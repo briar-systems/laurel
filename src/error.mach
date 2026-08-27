@@ -42,7 +42,7 @@ pub rec Mapper {
     render: RenderFun;
 }
 
-test "web.error: make preserves classification" {
+test "laurel.error: make preserves classification" {
     val e: AppError = make(NOT_FOUND, 404, "not found", "route missing", false);
     if (e.kind != NOT_FOUND || e.status != 404 || e.retryable) { ret 1; }
     ret 0;

@@ -1,6 +1,6 @@
-# mach-web
+# Laurel
 
-`mach-web` is a lightweight production web application framework for Mach. It defines the application layer above `mach-http` while keeping protocol parsing, transport ownership, application dispatch, and integration policy in separate packages.
+Laurel is a lightweight production web application framework for Mach. It defines the application layer above `mach-http` while keeping protocol parsing, transport ownership, application dispatch, and integration policy in separate packages.
 
 The current repository is a contract scaffold. It defines stable ownership and extension boundaries without pretending that route dispatch, middleware execution, session protection, multipart parsing, or rendering already work.
 
