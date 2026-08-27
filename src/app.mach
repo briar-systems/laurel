@@ -2,13 +2,13 @@
 
 use std.types.bool.bool;
 use std.types.size.usize;
-use web.error;
-use web.middleware;
-use web.observability;
-use web.render;
-use web.router;
-use web.security;
-use web.session;
+use laurel.error;
+use laurel.middleware;
+use laurel.observability;
+use laurel.render;
+use laurel.router;
+use laurel.security;
+use laurel.session;
 
 pub rec Limits {
     max_body_bytes:      usize;

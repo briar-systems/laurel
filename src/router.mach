@@ -5,7 +5,7 @@ use std.types.size.usize;
 use std.types.string.str;
 use std.types.view;
 use http_router: http.router.router;
-use web.handler;
+use laurel.handler;
 
 pub rec Route {
     method:  view.View;
