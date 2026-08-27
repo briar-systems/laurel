@@ -1,0 +1,18 @@
+# response rendering boundary
+
+use R: std.types.result;
+use std.types.view;
+use http.core.body;
+use web.error;
+
+pub rec Rendered {
+    content_type: view.View;
+    body:         body.Body;
+}
+
+pub def RenderFun: fun(ptr, view.View, ptr) R.Result[Rendered, error.AppError];
+
+pub rec Renderer {
+    ctx:    ptr;
+    render: RenderFun;
+}

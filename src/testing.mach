@@ -1,0 +1,13 @@
+# in-process application test harness contract
+
+use R: std.types.result;
+use std.types.string.str;
+use http.core.message;
+use web.app;
+
+pub def InvokeFun: fun(ptr, *app.App, *message.Request, *message.Response) R.Result[u8, str];
+
+pub rec Harness {
+    ctx:    ptr;
+    invoke: InvokeFun;
+}

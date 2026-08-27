@@ -1,0 +1,49 @@
+# application error classification and response mapping
+
+use R: std.types.result;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.string.str;
+use http.core.message;
+
+pub def Kind: u8;
+
+pub val BAD_REQUEST:  Kind = 1;
+pub val UNAUTHORIZED: Kind = 2;
+pub val FORBIDDEN:    Kind = 3;
+pub val NOT_FOUND:    Kind = 4;
+pub val CONFLICT:     Kind = 5;
+pub val TOO_LARGE:    Kind = 6;
+pub val UNAVAILABLE:  Kind = 7;
+pub val INTERNAL:     Kind = 8;
+
+pub rec AppError {
+    kind:       Kind;
+    status:     u16;
+    public_msg: str;
+    detail:     str;
+    retryable:  bool;
+}
+
+pub fun make(kind: Kind, status: u16, public_msg: str, detail: str, retryable: bool) AppError {
+    ret AppError{
+        kind: kind,
+        status: status,
+        public_msg: public_msg,
+        detail: detail,
+        retryable: retryable,
+    };
+}
+
+pub def RenderFun: fun(ptr, AppError, *message.Response) R.Result[u8, str];
+
+pub rec Mapper {
+    ctx:    ptr;
+    render: RenderFun;
+}
+
+test "web.error: make preserves classification" {
+    val e: AppError = make(NOT_FOUND, 404, "not found", "route missing", false);
+    if (e.kind != NOT_FOUND || e.status != 404 || e.retryable) { ret 1; }
+    ret 0;
+}

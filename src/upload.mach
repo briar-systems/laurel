@@ -1,0 +1,36 @@
+# streamed upload storage contract
+
+use R: std.types.result;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.view;
+
+pub rec Metadata {
+    field_name:   view.View;
+    file_name:    view.View;
+    content_type: view.View;
+    declared_len: u64;
+    has_length:   u8;
+}
+
+pub rec Transaction {
+    ctx: ptr;
+}
+
+pub rec StoredFile {
+    id:   view.View;
+    size: u64;
+}
+
+pub def BeginFun:  fun(ptr, Metadata) R.Result[Transaction, str];
+pub def WriteFun:  fun(ptr, Transaction, *u8, usize) R.Result[usize, str];
+pub def CommitFun: fun(ptr, Transaction) R.Result[StoredFile, str];
+pub def AbortFun:  fun(ptr, Transaction);
+
+pub rec Store {
+    ctx:    ptr;
+    begin:  BeginFun;
+    write:  WriteFun;
+    commit: CommitFun;
+    abort:  AbortFun;
+}

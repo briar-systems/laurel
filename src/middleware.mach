@@ -1,0 +1,20 @@
+# middleware chain contract
+
+use R: std.types.result;
+use std.types.size.usize;
+use http.core.message;
+use web.context;
+use web.error;
+use web.handler;
+
+pub def MiddlewareFun: fun(ptr, handler.Handler, *context.Context, *message.Response) R.Result[u8, error.AppError];
+
+pub rec Middleware {
+    ctx:  ptr;
+    call: MiddlewareFun;
+}
+
+pub rec Stack {
+    items: *Middleware;
+    len:   usize;
+}

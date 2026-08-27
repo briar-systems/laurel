@@ -1,0 +1,18 @@
+# application lifecycle boundary
+
+use R: std.types.result;
+use std.types.view;
+
+pub def StartFun: fun(ptr) R.Result[u8, view.View];
+pub def ReadyFun: fun(ptr) u8;
+pub def DrainFun: fun(ptr, i64) R.Result[u8, view.View];
+pub def StopFun: fun(ptr) R.Result[u8, view.View];
+
+pub rec Lifecycle {
+    ctx:   ptr;
+    start: StartFun;
+    ready: ReadyFun;
+    drain: DrainFun;
+    stop:  StopFun;
+}
+

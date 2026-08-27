@@ -1,0 +1,12 @@
+# typed application service provider boundary
+
+use R: std.types.result;
+use std.types.view;
+
+pub def ResolveFun: fun(ptr, view.View) R.Result[ptr, view.View];
+
+pub rec Provider {
+    ctx:     ptr;
+    resolve: ResolveFun;
+}
+

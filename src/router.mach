@@ -1,0 +1,30 @@
+# integration boundary for mach-http routing
+
+use R: std.types.result;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.view;
+use http_router: http.router.router;
+use web.handler;
+
+pub rec Route {
+    method:  view.View;
+    pattern: view.View;
+    name:    str;
+    handler: handler.Handler;
+}
+
+pub def InstallFun: fun(ptr, *http_router.Router, *Route) R.Result[u8, str];
+
+pub rec Adapter {
+    ctx:     ptr;
+    install: InstallFun;
+}
+
+pub rec Router {
+    inner:   *http_router.Router;
+    routes:  *Route;
+    len:     usize;
+    cap:     usize;
+    adapter: Adapter;
+}

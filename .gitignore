@@ -1,0 +1,6 @@
+dep/
+.DS_Store
+.claude/
+*.swp
+*.swo
+*~

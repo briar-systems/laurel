@@ -1,0 +1,61 @@
+# request-scoped borrowed state
+
+use A: std.allocator;
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.view;
+use http.core.message;
+
+pub rec Param {
+    name:  view.View;
+    value: view.View;
+}
+
+pub rec Params {
+    items: *Param;
+    len:   usize;
+}
+
+pub rec Context {
+    request:      *message.Request;
+    params:       Params;
+    alloc:        *A.Allocator;
+    app_state:    ptr;
+    principal:    ptr;
+    session:      ptr;
+    request_id:   view.View;
+    deadline_ns:  i64;
+    canceled:     *i64;
+}
+
+fun view_eq(a: view.View, b: view.View) bool {
+    if (a.len != b.len) { ret false; }
+    var i: usize = 0;
+    for (i < a.len) {
+        if (a.data[i] != b.data[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+pub fun find_param(params: *Params, name: view.View) *Param {
+    if (params == nil) { ret nil; }
+    var i: usize = 0;
+    for (i < params.len) {
+        if (view_eq(params.items[i].name, name)) { ret ?params.items[i]; }
+        i = i + 1;
+    }
+    ret nil;
+}
+
+test "web.context: route parameter lookup is length bounded" {
+    var items: [2]Param;
+    items[0] = Param{name: view.view("id-extra", 2), value: view.view("42", 2)};
+    items[1] = Param{name: view.view("slug", 4), value: view.view("news", 4)};
+    var params: Params = Params{items: ?items[0], len: 2};
+    val got: *Param = find_param(?params, view.view("id", 2));
+    if (got == nil || got.value.len != 2 || got.value.data[0] != '4') { ret 1; }
+    ret 0;
+}

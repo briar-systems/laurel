@@ -1,0 +1,32 @@
+# bounded form parsing contract
+
+use A: std.allocator;
+use R: std.types.result;
+use std.types.size.usize;
+use std.types.view;
+use http.core.body;
+use web.error;
+
+pub rec Limits {
+    max_bytes:       usize;
+    max_fields:      usize;
+    max_name_bytes:  usize;
+    max_value_bytes: usize;
+}
+
+pub rec Field {
+    name:  view.View;
+    value: view.View;
+}
+
+pub rec Form {
+    fields: *Field;
+    len:    usize;
+}
+
+pub def ParseFun: fun(ptr, *body.Body, *A.Allocator, Limits) R.Result[Form, error.AppError];
+
+pub rec Parser {
+    ctx:   ptr;
+    parse: ParseFun;
+}

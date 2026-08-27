@@ -1,0 +1,27 @@
+# request logging and metrics event boundary
+
+use std.types.view;
+use web.error;
+
+pub rec RequestEvent {
+    request_id:  view.View;
+    method:      view.View;
+    target:      view.View;
+    route_name:  view.View;
+    status:      u16;
+    duration_ns: i64;
+    bytes_in:    u64;
+    bytes_out:   u64;
+    error_kind:  error.Kind;
+}
+
+pub def StartFun:  fun(ptr, *RequestEvent);
+pub def FinishFun: fun(ptr, *RequestEvent);
+pub def ErrorFun:  fun(ptr, *RequestEvent, error.AppError);
+
+pub rec Observer {
+    ctx:    ptr;
+    start:  StartFun;
+    finish: FinishFun;
+    error:  ErrorFun;
+}

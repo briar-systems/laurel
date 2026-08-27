@@ -1,0 +1,39 @@
+# assembled application contract
+
+use std.types.bool.bool;
+use std.types.size.usize;
+use web.error;
+use web.middleware;
+use web.observability;
+use web.render;
+use web.router;
+use web.security;
+use web.session;
+
+pub rec Limits {
+    max_body_bytes:      usize;
+    max_form_fields:     usize;
+    max_upload_bytes:    usize;
+    max_route_params:    usize;
+    handler_deadline_ns: i64;
+}
+
+pub rec Config {
+    limits:      Limits;
+    trust_proxy: bool;
+}
+
+pub rec App {
+    config:       Config;
+    router:       *router.Router;
+    middleware:   *middleware.Stack;
+    errors:       error.Mapper;
+    sessions:     *session.Manager;
+    security:     *security.HeadersPolicy;
+    csrf:         *security.CsrfProtector;
+    origins:      *security.OriginPolicy;
+    authenticator: *security.Authenticator;
+    renderer:     *render.Renderer;
+    observer:     *observability.Observer;
+    state:        ptr;
+}

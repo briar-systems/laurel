@@ -1,0 +1,19 @@
+# streaming and realtime response boundary
+
+use R: std.types.result;
+use std.types.size.usize;
+use std.types.view;
+
+pub val KIND_STREAM:    u8 = 1;
+pub val KIND_SSE:       u8 = 2;
+pub val KIND_WEBSOCKET: u8 = 3;
+
+pub def SendFun: fun(ptr, view.View, u8) R.Result[usize, view.View];
+pub def CloseFun: fun(ptr, u16, view.View) R.Result[u8, view.View];
+
+pub rec Channel {
+    ctx:   ptr;
+    kind:  u8;
+    send:  SendFun;
+    close: CloseFun;
+}

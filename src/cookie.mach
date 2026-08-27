@@ -1,0 +1,28 @@
+# bounded cookie contracts
+
+use std.types.bool.bool;
+use std.types.size.usize;
+use std.types.view;
+
+pub val SAME_SITE_DEFAULT: u8 = 0;
+pub val SAME_SITE_LAX:     u8 = 1;
+pub val SAME_SITE_STRICT:  u8 = 2;
+pub val SAME_SITE_NONE:    u8 = 3;
+
+pub rec Cookie {
+    name:      view.View;
+    value:     view.View;
+    path:      view.View;
+    domain:    view.View;
+    max_age_s: i64;
+    secure:    bool;
+    http_only: bool;
+    same_site: u8;
+}
+
+pub rec Jar {
+    items: *Cookie;
+    len:   usize;
+    cap:   usize;
+}
+

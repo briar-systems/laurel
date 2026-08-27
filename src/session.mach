@@ -1,0 +1,71 @@
+# protected session lifecycle and persistence contracts
+
+use O: std.types.option;
+use R: std.types.result;
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.view;
+
+pub rec Session {
+    id:              view.View;
+    data:            *u8;
+    len:             usize;
+    expires_at_unix: i64;
+    version:         u64;
+}
+
+pub def LoadFun:   fun(ptr, view.View) R.Result[O.Option[Session], str];
+pub def SaveFun:   fun(ptr, *Session) R.Result[u8, str];
+pub def DeleteFun: fun(ptr, view.View) R.Result[u8, str];
+
+pub rec Store {
+    ctx:    ptr;
+    load:   LoadFun;
+    save:   SaveFun;
+    delete: DeleteFun;
+}
+
+pub def EncodeFun: fun(ptr, *Session, *u8, usize) R.Result[usize, str];
+pub def DecodeFun: fun(ptr, *u8, usize) R.Result[Session, str];
+
+pub rec Codec {
+    ctx:    ptr;
+    encode: EncodeFun;
+    decode: DecodeFun;
+}
+
+pub rec CookiePolicy {
+    name:      str;
+    path:      str;
+    domain:    str;
+    same_site: str;
+    secure:    bool;
+    http_only: bool;
+    max_age:   i64;
+}
+
+pub fun secure_cookie(name: str) CookiePolicy {
+    ret CookiePolicy{
+        name: name,
+        path: "/",
+        domain: nil,
+        same_site: "Lax",
+        secure: true,
+        http_only: true,
+        max_age: 0,
+    };
+}
+
+pub rec Manager {
+    store:  Store;
+    codec:  Codec;
+    cookie: CookiePolicy;
+}
+
+test "web.session: default cookie is transport and script protected" {
+    val p: CookiePolicy = secure_cookie("session");
+    if (!p.secure || !p.http_only || p.path[0] != '/') { ret 1; }
+    ret 0;
+}

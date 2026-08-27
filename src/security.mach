@@ -1,0 +1,43 @@
+# application security policy hooks
+
+use R: std.types.result;
+use std.types.bool.bool;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.view;
+use http.core.message;
+
+pub rec HeadersPolicy {
+    content_security_policy: str;
+    referrer_policy:         str;
+    permissions_policy:      str;
+    frame_options:           str;
+    content_type_options:    bool;
+    hsts_max_age:            u64;
+    hsts_include_subdomains: bool;
+}
+
+pub def IssueCsrfFun:  fun(ptr, *u8, usize) R.Result[usize, str];
+pub def VerifyCsrfFun: fun(ptr, view.View) R.Result[bool, str];
+
+pub rec CsrfProtector {
+    ctx:    ptr;
+    issue:  IssueCsrfFun;
+    verify: VerifyCsrfFun;
+}
+
+pub def CheckOriginFun: fun(ptr, *message.Request) R.Result[bool, str];
+
+pub rec OriginPolicy {
+    ctx:   ptr;
+    check: CheckOriginFun;
+}
+
+pub def AuthenticateFun: fun(ptr, *message.Request) R.Result[ptr, str];
+pub def ReleasePrincipalFun: fun(ptr, ptr);
+
+pub rec Authenticator {
+    ctx:       ptr;
+    authenticate: AuthenticateFun;
+    release:   ReleasePrincipalFun;
+}
