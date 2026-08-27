@@ -3,9 +3,9 @@
 use R: std.types.result;
 use std.types.size.usize;
 use http.core.message;
-use web.context;
-use web.error;
-use web.handler;
+use laurel.context;
+use laurel.error;
+use laurel.handler;
 
 pub def MiddlewareFun: fun(ptr, handler.Handler, *context.Context, *message.Response) R.Result[u8, error.AppError];
 

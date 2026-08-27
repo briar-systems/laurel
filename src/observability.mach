@@ -1,7 +1,7 @@
 # request logging and metrics event boundary
 
 use std.types.view;
-use web.error;
+use laurel.error;
 
 pub rec RequestEvent {
     request_id:  view.View;

@@ -1,6 +1,6 @@
 [project]
-id = "web"
-version = "0.1.0"
+id = "laurel"
+version = "0.2.0"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
@@ -44,10 +44,10 @@ opt = 2
 debug = false
 simd = "scalarize"
 
-[artifact.web]
+[artifact.laurel]
 kind = "static"
 entry = "lib.mach"
-out = "lib/web"
+out = "lib/laurel"
 targets = ["*"]
 link = []
 need = []

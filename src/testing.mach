@@ -3,7 +3,7 @@
 use R: std.types.result;
 use std.types.string.str;
 use http.core.message;
-use web.app;
+use laurel.app;
 
 pub def InvokeFun: fun(ptr, *app.App, *message.Request, *message.Response) R.Result[u8, str];
 

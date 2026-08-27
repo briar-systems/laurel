@@ -3,7 +3,7 @@
 use R: std.types.result;
 use std.types.view;
 use http.core.body;
-use web.error;
+use laurel.error;
 
 pub rec Rendered {
     content_type: view.View;

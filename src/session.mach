@@ -64,7 +64,7 @@ pub rec Manager {
     cookie: CookiePolicy;
 }
 
-test "web.session: default cookie is transport and script protected" {
+test "laurel.session: default cookie is transport and script protected" {
     val p: CookiePolicy = secure_cookie("session");
     if (!p.secure || !p.http_only || p.path[0] != '/') { ret 1; }
     ret 0;
