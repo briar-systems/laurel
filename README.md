@@ -29,7 +29,7 @@ The framework has no global application registry, hidden allocator, mandatory te
 
 ## Local dependencies
 
-The manifest uses local path dependencies for `mach-std` and `mach-http`. Build outputs are written to `../.mach-out/web/`, outside the repository.
+The manifest uses pinned Git tags for `mach-std` and `mach-http`. Build output uses Mach's default `out/` directory.
 
 ## Status
 

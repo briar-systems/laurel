@@ -2,7 +2,7 @@
 id = "web"
 version = "0.1.0"
 src = "src"
-out = "../.mach-out/web/{target.name}/{profile.name}"
+out = "out/{target.name}/{profile.name}"
 
 [target.linux-x86_64]
 isa = "x86_64"
@@ -53,7 +53,9 @@ link = []
 need = []
 
 [dep.mach-std]
-path = "../mach-std"
+git = "https://github.com/briar-systems/mach-std"
+ref = "tag/v0.28.2"
 
 [dep.mach-http]
-path = "../mach-http"
+git = "https://github.com/briar-systems/mach-http"
+ref = "tag/v0.1.0"
