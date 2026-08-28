@@ -348,6 +348,14 @@ fun memory_load(ctx: ptr, id: view.View, data_output: *u8,
         mutex.unlock(?store.lock);
         ret STORE_CAPACITY;
     }
+    val output_bytes: *u8 = output::*u8;
+    if (ranges_overlap(data_output, slot.data_len, id.data, id.len)
+        || ranges_overlap(data_output, slot.data_len, output_bytes,
+            $size_of(Session))
+        || ranges_overlap(id.data, id.len, output_bytes, $size_of(Session))) {
+        mutex.unlock(?store.lock);
+        ret STORE_INVALID;
+    }
     var i: usize = 0;
     for (i < slot.data_len) {
         data_output[i] = slot.data[i];
@@ -371,6 +379,13 @@ fun memory_save(ctx: ptr, value: *Session, expected_version: u64,
         || result == nil || value.version != expected_version) {
         ret STORE_INVALID;
     }
+    val result_bytes: *u8 = result::*u8;
+    if (ranges_overlap(result_bytes, $size_of(SaveResult), value::*u8,
+            $size_of(Session))
+        || ranges_overlap(result_bytes, $size_of(SaveResult), value.id.data,
+            value.id.len)
+        || ranges_overlap(result_bytes, $size_of(SaveResult), value.data.data,
+            value.data.len)) { ret STORE_INVALID; }
     if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
     mutex.lock(?store.lock);
     if (!store.active || scope_cancelled(scope)) {
@@ -895,6 +910,10 @@ fun encode_protected(ctx: ptr, value: *Session, context_value: view.View,
     val required_output: usize = base64url_text_len(raw_len);
     if (required_output > output_capacity || required_output > MAX_TOKEN_BYTES
         || output == nil) { ret codec_result(CODEC_OUTPUT_TOO_SMALL); }
+    if (ranges_overlap(output, required_output, value::*u8, $size_of(Session))
+        || ranges_overlap(output, required_output, value.id.data, value.id.len)
+        || ranges_overlap(output, required_output, value.data.data,
+            value.data.len)) { ret codec_result(CODEC_INVALID); }
     var secret_key: [32]^u8;
     ct.zeroize(?secret_key[0], 32);
     mutex.lock(?codec.ring.lock);
@@ -1341,6 +1360,9 @@ test "laurel.session: authenticated codecs reject hostile tokens transactionally
     if (fixture.codec.encode(fixture.codec.ctx, ?value, view.view(nil, 0),
         100, ?rejected[0], 4096).status != CODEC_INVALID
         || rejected[0] != 0xa5 || fixture.entropy.calls != 0) { ret 32; }
+    if (fixture.codec.encode(fixture.codec.ctx, ?value,
+        view.view("tenant:a", 8), 100, value.id.data, 4096).status
+        != CODEC_INVALID || fixture.entropy.calls != 0) { ret 33; }
     var tiny: [1]u8;
     tiny[0] = 0xa5;
     if (fixture.codec.encode(fixture.codec.ctx, ?value,
@@ -1647,6 +1669,11 @@ test "laurel.session: stores enforce versions, generations, capacity, and releas
     if (store.load(store.ctx, value.id, ?data[0], 2048, ?loaded, nil)
         != STORE_OK || loaded.version != 1 || loaded.generation == 0
         || !public_equal(?data[0], value.data.data, value.data.len)) { ret 3; }
+    if (store.load(store.ctx, value.id, (?loaded)::*u8, 2048,
+        ?loaded, nil) != STORE_INVALID) { ret 18; }
+    val aliased_result: *SaveResult = (?value)::usize::*SaveResult;
+    if (store.save(store.ctx, ?value, 0, aliased_result, nil)
+        != STORE_INVALID || value.version != 0) { ret 19; }
     val first_generation: u64 = loaded.generation;
     loaded.data = view.view("two", 3);
     if (store.save(store.ctx, ?loaded, 1, ?saved, nil) != STORE_OK
