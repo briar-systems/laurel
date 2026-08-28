@@ -28,6 +28,7 @@ pub val NONCE_BYTES: usize = 16;
 pub val TAG_BYTES: usize = 32;
 pub val MAX_BINDING_BYTES: usize = 256;
 pub val MAX_KEY_GENERATIONS: usize = 16;
+pub val MAX_REGISTERED_RINGS: usize = 8;
 pub val RAW_HEADER_BYTES: usize = 40;
 pub val RAW_TOKEN_BYTES: usize = 72;
 pub val TOKEN_BYTES: usize = 96;
@@ -85,7 +86,22 @@ pub rec Entropy {
     fill: FillFun;
 }
 
+# an opaque public name for one registered key ring; it holds no pointer, so
+# nothing reachable from a Protector leads to secret-welded storage
+pub rec Handle {
+    slot: u32;
+    generation: u32;
+}
+
 pub rec Protector {
+    ring: Handle;
+    entropy: Entropy;
+    policy: Policy;
+    active: bool;
+}
+
+# the resolved private view of a Protector, used only inside this module
+rec Snapshot {
     ring: *KeyRing;
     entropy: Entropy;
     policy: Policy;
@@ -228,6 +244,80 @@ fun key_equal(first: *KeyGeneration, second: *KeyGeneration) bool {
     ret false;
 }
 
+# key rings stay caller owned and secret welded. only this module-private table
+# names them, so no public record ever points at key material.
+var registry_rings: [8]*KeyRing;
+var registry_generations: [8]u32;
+var registry_used: [8]bool;
+var registry_lock: mutex.Mutex = 0;
+
+fun register_ring(ring: *KeyRing, output: *Handle) bool {
+    if (ring == nil || output == nil) { ret false; }
+    mutex.lock(?registry_lock);
+    var i: usize = 0;
+    for (i < MAX_REGISTERED_RINGS) {
+        if (registry_used[i] && registry_rings[i] == ring) {
+            mutex.unlock(?registry_lock);
+            ret false;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < MAX_REGISTERED_RINGS) {
+        if (!registry_used[i] && registry_generations[i] != 4294967295) {
+            registry_generations[i] = registry_generations[i] + 1;
+            registry_rings[i] = ring;
+            registry_used[i] = true;
+            @output = Handle{slot: i::u32,
+                generation: registry_generations[i]};
+            mutex.unlock(?registry_lock);
+            ret true;
+        }
+        i = i + 1;
+    }
+    mutex.unlock(?registry_lock);
+    ret false;
+}
+
+fun resolve_ring(handle: Handle) *KeyRing {
+    if (handle.generation == 0 ||
+        handle.slot::usize >= MAX_REGISTERED_RINGS) { ret nil; }
+    val slot: usize = handle.slot::usize;
+    mutex.lock(?registry_lock);
+    var ring: *KeyRing = nil;
+    if (registry_used[slot] &&
+        registry_generations[slot] == handle.generation) {
+        ring = registry_rings[slot];
+    }
+    mutex.unlock(?registry_lock);
+    ret ring;
+}
+
+fun deregister_ring(handle: Handle) bool {
+    if (handle.generation == 0 ||
+        handle.slot::usize >= MAX_REGISTERED_RINGS) { ret false; }
+    val slot: usize = handle.slot::usize;
+    mutex.lock(?registry_lock);
+    if (!registry_used[slot] ||
+        registry_generations[slot] != handle.generation) {
+        mutex.unlock(?registry_lock);
+        ret false;
+    }
+    registry_rings[slot] = nil;
+    registry_used[slot] = false;
+    mutex.unlock(?registry_lock);
+    ret true;
+}
+
+fun snapshot_of(protector: *Protector, output: *Snapshot) bool {
+    if (protector == nil || output == nil) { ret false; }
+    val ring: *KeyRing = resolve_ring(protector.ring);
+    if (ring == nil) { ret false; }
+    @output = Snapshot{ring: ring, entropy: protector.entropy,
+        policy: protector.policy, active: protector.active};
+    ret true;
+}
+
 pub fun init_ring(ring: *KeyRing, items: *KeyGeneration, len: usize,
     current_id: u32, max_retired: usize) bool {
     if (ring == nil || !range_valid(ring_anchor(ring), $size_of(KeyRing)) ||
@@ -333,8 +423,9 @@ fun policy_equal(first: Policy, second: Policy) bool {
         first.require_unsafe == second.require_unsafe;
 }
 
-fun protector_equal(snapshot: Protector, protector: *Protector) bool {
-    ret protector != nil && snapshot.ring == protector.ring &&
+fun protector_equal(snapshot: Snapshot, protector: *Protector) bool {
+    ret protector != nil && snapshot.ring != nil &&
+        resolve_ring(protector.ring) == snapshot.ring &&
         entropy_equal(snapshot.entropy, protector.entropy) &&
         policy_equal(snapshot.policy, protector.policy) &&
         snapshot.active == protector.active;
@@ -386,7 +477,9 @@ pub fun init(protector: *Protector, ring: *KeyRing, entropy: Entropy,
         ring_aliases(ring, entropy.ctx::*u8, entropy.context_size) ||
         !entropy_disjoint(entropy, protector, ring)) { ret false; }
     if (protector.active || !ring_shape_valid(ring)) { ret false; }
-    protector.ring = ring;
+    var handle: Handle;
+    if (!register_ring(ring, ?handle)) { ret false; }
+    protector.ring = handle;
     protector.entropy = entropy;
     protector.policy = policy;
     protector.active = true;
@@ -395,12 +488,15 @@ pub fun init(protector: *Protector, ring: *KeyRing, entropy: Entropy,
 
 pub fun valid(protector: *Protector) bool {
     if (protector == nil || !protector.active ||
-        !range_valid(protector_anchor(protector), $size_of(Protector)) ||
-        !ring_shape_valid(protector.ring) ||
-        !entropy_valid(protector.entropy) || !policy_valid(protector.policy)) {
+        !range_valid(protector_anchor(protector), $size_of(Protector))) {
         ret false;
     }
-    val snapshot: Protector = @protector;
+    var snapshot: Snapshot;
+    if (!snapshot_of(protector, ?snapshot) ||
+        !ring_shape_valid(snapshot.ring) ||
+        !entropy_valid(snapshot.entropy) || !policy_valid(snapshot.policy)) {
+        ret false;
+    }
     ret !ring_aliases(snapshot.ring, protector_anchor(protector),
             $size_of(Protector)) &&
         !ring_aliases(snapshot.ring, snapshot.entropy.ctx::*u8,
@@ -411,14 +507,15 @@ pub fun valid(protector: *Protector) bool {
 
 pub fun release(protector: *Protector) bool {
     if (!valid(protector)) { ret false; }
-    protector.ring = nil;
+    val handle: Handle = protector.ring;
+    protector.ring = Handle{slot: 0, generation: 0};
     protector.entropy = Entropy{};
     protector.policy = Policy{};
     protector.active = false;
-    ret true;
+    ret deregister_ring(handle);
 }
 
-fun external_disjoint(snapshot: Protector, protector: *Protector,
+fun external_disjoint(snapshot: Snapshot, protector: *Protector,
     data: *u8, len: usize, consult_provider: bool) bool {
     if (!range_valid(data, len) ||
         overlap(data, len, protector_anchor(protector),
@@ -431,7 +528,7 @@ fun external_disjoint(snapshot: Protector, protector: *Protector,
     ret protector_equal(snapshot, protector);
 }
 
-fun binding_for(snapshot: Protector, protector: *Protector,
+fun binding_for(snapshot: Snapshot, protector: *Protector,
     request_context: *context.Context, session_id: view.View,
     storage: *u8, output: *view.View, generation: *u64) bool {
     if (!context.active(request_context) || storage == nil || output == nil ||
@@ -523,7 +620,7 @@ fun make_tag(key: *KeyGeneration, header: *u8, binding: view.View,
     ret result.error == contracts.OK && result.written == TAG_BYTES;
 }
 
-fun fill_nonce(protector: *Protector, snapshot: Protector,
+fun fill_nonce(protector: *Protector, snapshot: Snapshot,
     output: *u8) Status {
     val entropy: Entropy = snapshot.entropy;
     if (!external_disjoint(snapshot, protector, output, NONCE_BYTES, true)) {
@@ -546,7 +643,8 @@ pub fun issue(protector: *Protector, request_context: *context.Context,
     session_id: view.View, now: i64, output: *u8,
     output_capacity: usize) Operation {
     if (!valid(protector)) { ret operation(INVALID); }
-    val snapshot: Protector = @protector;
+    var snapshot: Snapshot;
+    if (!snapshot_of(protector, ?snapshot)) { ret operation(INVALID); }
     if (output_capacity < TOKEN_CAPACITY) { ret operation(OUTPUT_TOO_SMALL); }
     if (now < 0 || output == nil || !range_valid(output, TOKEN_CAPACITY) ||
         !external_disjoint(snapshot, protector, output, TOKEN_CAPACITY, true) ||
@@ -666,7 +764,8 @@ fun time_status(policy: Policy, key: *KeyGeneration, issued: i64,
 pub fun verify(protector: *Protector, request_context: *context.Context,
     session_id: view.View, token: view.View, now: i64) Operation {
     if (!valid(protector)) { ret operation(INVALID); }
-    val snapshot: Protector = @protector;
+    var snapshot: Snapshot;
+    if (!snapshot_of(protector, ?snapshot)) { ret operation(INVALID); }
     if (now < 0 || token.len != TOKEN_BYTES ||
         !external_disjoint(snapshot, protector, token.data, token.len, false)) {
         ret operation(INVALID);
@@ -1063,5 +1162,87 @@ test "laurel.security.csrf: provider mutation and invalid rings are rejected" {
         i = i + 1;
     }
     if (init_ring(?ring, ?duplicate[0], 2, 1, 1)) { ret 6; }
+    ret 0;
+}
+
+rec RegistryCase {
+    entropy: TestEntropy;
+    keys: [2]KeyGeneration;
+    ring: KeyRing;
+    protector: Protector;
+}
+
+fun init_registry_case(item: *RegistryCase, tag: u8) bool {
+    item.entropy = TestEntropy{seed: 1, calls: 0, fail: false};
+    item.keys[0] = KeyGeneration{id: 1, activated_at: 0,
+        issue_until: 200, verify_until: 400};
+    item.keys[1] = KeyGeneration{id: 2, activated_at: 50,
+        issue_until: 300, verify_until: 500};
+    var i: usize = 0;
+    for (i < KEY_BYTES) {
+        val first: u8 = tag + i::u8;
+        val second: u8 = tag + 0x40 + i::u8;
+        item.keys[0].key[i] = first;
+        item.keys[1].key[i] = second;
+        i = i + 1;
+    }
+    ret init_ring(?item.ring, ?item.keys[0], 2, 1, 1);
+}
+
+fun case_entropy(item: *RegistryCase) Entropy {
+    ret Entropy{ctx: (?item.entropy)::ptr, context_size: $size_of(TestEntropy),
+        aliases_state: test_entropy_aliases, fill: test_entropy_fill};
+}
+
+fun case_policy() Policy {
+    ret Policy{binding: BIND_SESSION, max_age_s: 60, clock_skew_s: 5,
+        require_unsafe: true};
+}
+
+fun activate_case(item: *RegistryCase) bool {
+    ret init(?item.protector, ?item.ring, case_entropy(item), case_policy());
+}
+
+test "laurel.security.csrf: ring registration is bounded and single use" {
+    var cases: [9]RegistryCase;
+    var i: usize = 0;
+    for (i < 9) {
+        if (!init_registry_case(?cases[i], (0x10 + i * 8)::u8)) { ret 1; }
+        i = i + 1;
+    }
+    if (!activate_case(?cases[0]) || !valid(?cases[0].protector)) { ret 2; }
+    if (init(?cases[8].protector, ?cases[0].ring, case_entropy(?cases[8]),
+            case_policy()) || cases[8].protector.active) { ret 3; }
+    i = 1;
+    for (i < MAX_REGISTERED_RINGS) {
+        if (!activate_case(?cases[i]) || !valid(?cases[i].protector)) { ret 4; }
+        i = i + 1;
+    }
+    if (activate_case(?cases[8]) || cases[8].protector.active) { ret 5; }
+    val stale: Handle = cases[0].protector.ring;
+    if (!release(?cases[0].protector) || valid(?cases[0].protector)
+        || cases[0].protector.active) { ret 6; }
+    if (!activate_case(?cases[8]) || !valid(?cases[8].protector)) { ret 7; }
+    # re-arm everything except the handle, so a stale generation is the only
+    # reason this protector must not resolve to the ring now in that slot
+    cases[0].protector.entropy = case_entropy(?cases[0]);
+    cases[0].protector.policy = case_policy();
+    cases[0].protector.ring = stale;
+    cases[0].protector.active = true;
+    if (valid(?cases[0].protector)
+        || issue(?cases[0].protector, nil, view.view("s", 1), 1, nil,
+            0).status != INVALID) { ret 8; }
+    cases[0].protector.active = false;
+    if (release(?cases[0].protector)) { ret 9; }
+    i = 1;
+    for (i < 9) {
+        if (!release(?cases[i].protector)) { ret 10; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < 9) {
+        if (!release_ring(?cases[i].ring)) { ret 11; }
+        i = i + 1;
+    }
     ret 0;
 }

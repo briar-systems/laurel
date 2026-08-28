@@ -79,6 +79,31 @@ returns. Applications must not mutate ring fields or key generations directly.
 Issue, verify, rotation, and release serialize key access through the ring
 mutex. Release zeroizes every secret key and invalidates the ring.
 
+### Key material stays off the public surface
+
+Key generations hold their 256-bit secrets in secret-welded storage. Mach
+propagates that qualifier through every pointer that reaches it, so any type
+holding a `*KeyRing`, or holding anything that reaches one, cannot be erased to
+the untyped `ptr`. Server integrations carry handler and completion state as
+`ptr`, so a key on a public record makes the entire consumer graph unerasable,
+not just the record that holds it.
+
+`Protector` therefore names its ring with `csrf.Handle`, an opaque public value
+of two integers and no pointer. Key rings stay caller-owned and stay welded;
+only a bounded module-private table inside `csrf` maps a live handle to its
+ring, so no public Laurel type points at key material. `MAX_REGISTERED_RINGS`
+bounds how many protectors may be active at once, and registration is refused
+rather than overwriting an existing entry.
+
+`csrf.init` registers the ring and `csrf.release` deregisters it. A handle
+carries the slot generation at registration, so a handle retained across a
+release never resolves, even after that slot has been reissued to another ring.
+Registering the same ring twice is refused.
+
+`KeyRing` and `KeyGeneration` are unchanged and deliberately still refuse to
+erase to `ptr`: they own key material, and that restriction is what protects
+it. The application-facing types erase; the key-owning types do not.
+
 `verify_request` enforces exactly one `x-csrf-token` field for unsafe methods
 when `require_unsafe` is enabled. Safe methods pass without a token. Disabling
 this requirement is an explicit policy relaxation.
