@@ -52,7 +52,9 @@ stable tenant, application, host, or cookie-purpose value as context. A token
 encoded for one context cannot authenticate in another.
 
 The entropy callback must fill the entire requested output with cryptographic
-randomness or return nonzero. Each encode claims its nonce before encryption.
+randomness or return nonzero. It also publishes a complete owned-region alias
+query. The codec rejects any operation buffer that intersects entropy state.
+Each encode claims its nonce before encryption.
 The supplied nonce guard must reject reuse for the full key generation. Claims
 remain live through the generation's decode deadline plus accepted clock skew,
 not merely through the encoded session's expiry. The bounded in-memory guard is
@@ -65,14 +67,20 @@ Guard callbacks borrow a private token copy for the duration of one call and
 must not retain its pointer. A callback that writes through the public pointer
 is detected after return. Encode fails closed without releasing the ambiguous
 claim, and the changed bytes never reach the envelope or AEAD. A provider must
-publish a stable nonnull
-domain identity and the complete range of its coordination backend. Nonce and
-replay domains, contexts, and backend ranges must be distinct. This rejects two
-separately locked in-memory guards over aliased `GuardSlot` storage as well as
-custom adapters that declare the same backend.
+publish a stable nonnull domain identity, a complete owned-region alias query,
+and an overlap query that enumerates every region it owns against another
+provider. This supports fragmented durable backends without weakening alias
+proofs. Nonce and replay domains, contexts, and complete owned regions must be
+distinct. This rejects two separately locked in-memory guards over aliased
+`GuardSlot` storage as well as custom adapters that share hidden coordination
+state. Replay claims receive the same isolated-copy treatment. Mutation after a
+replay callback fails closed and retains the ambiguous claim.
 
 Caller-owned key generation storage transfers exclusive mutation rights to the
-active `KeyRing`. Do not modify an item until `release_key_ring` returns. A
+active `KeyRing`. Do not modify an item until `release_key_ring` returns. Each
+ring is immutably bound to one AEAD algorithm and one nonce-domain identity.
+`init_protected_codec` rejects an algorithm or nonce guard outside that binding,
+so one key can never acquire independent nonce sequences through another codec. A
 generation has an activation time, an exclusive encode deadline, and an
 exclusive decode deadline. `rotate_key_ring` changes only the current generation
 and accepts a key that can encode at the supplied time. Codec operations copy
@@ -96,11 +104,18 @@ concurrently accessible.
 Encode and decode take Unix seconds explicitly. The codec enforces nonnegative
 times, issued-at, not-before, expiry, maximum lifetime, configured clock skew,
 and key windows. Decode authenticates before it evaluates encrypted session
-metadata. Outputs remain byte-for-byte unchanged on authentication, semantic,
+metadata. Encode rejects a session at or after its expiry even when decode skew
+would still accept an existing token. Session and context bytes are staged
+before entropy or guard callbacks, so callback mutation cannot change lengths,
+addresses, authenticated data, or plaintext after preflight. Outputs remain
+byte-for-byte unchanged on authentication, semantic,
 capacity, replay, and clock failures. Encode output cannot overlap the input
 session record, identifier, or data. Decode identifier and data outputs must be
 disjoint and cannot overlap the output session record. Decode may reuse token
 input storage because the complete envelope is staged before plaintext release.
+Every writable codec range is also checked against the `ProtectedCodec`, its
+ring and key-generation storage, entropy state, and complete nonce and replay
+guard ownership before publication.
 
 `REPLAY_ALLOW` permits repeated valid tokens. `REPLAY_REJECT` atomically claims
 the authenticated key and nonce after all validation and capacity checks but
@@ -114,10 +129,11 @@ contract. Guard exhaustion fails closed.
 
 `regenerate_id` draws 256 random bits and emits a 43-byte unpadded base64url
 identifier. It rejects the existing identifier and retries at most four times.
-Success resets the persistence version and generation to zero, so the new
-identity must be inserted rather than updating the old record. Applications
-must regenerate after authentication or privilege changes, save the new
-session, and delete the old identity. The source record, source identifier and
+Success resets the persistence version and generation to zero. Applications
+must regenerate after authentication or privilege changes and pass the result
+to the store's atomic `replace` operation. Separate save and delete operations
+are not fixation-safe because a failure between them can leave both identities
+valid. The source record, source identifier and
 data, identifier output, session output, and active codec storage must not
 overlap any writable output range. Regeneration snapshots the source record and
 identifier before entropy is requested, and every invalid ownership shape fails
@@ -125,10 +141,17 @@ before entropy or output mutation.
 
 ## Store boundary
 
-`session.Store` is the complete durable provider interface. `start` and `stop`
-own provider lifecycle. `load`, `save`, and `delete` receive an optional
+`session.Store` is the complete durable provider interface. Every provider
+publishes an `aliases` query covering its owner, locks, connections,
+allocations, transaction state, and cancellation machinery. `start` and `stop`
+own provider lifecycle. `load`, `save`, `replace`, `delete`, and `reap` receive an optional
 cancellation scope and must return `STORE_CANCELLED` without publishing output
 when it is no longer active.
+
+`load`, `save`, `replace`, and `reap` take the caller's bounded Unix time.
+Providers atomically reclaim all records whose exclusive expiry is at or before
+that time. `reap` makes reclamation available to a periodic maintenance task
+when request traffic is idle. An expired record is never returned or updated.
 
 An insert passes expected version zero and a session generation of zero. A
 successful provider chooses a nonzero immutable generation and version one,
@@ -141,14 +164,23 @@ generation mismatch is `STORE_STALE_GENERATION`. These rules make a distributed
 compare-and-swap store a drop-in implementation and prevent a deleted handle
 from mutating a later session that reused the same identifier.
 
-`MemoryStore` implements this contract over caller-owned fixed storage and a
-mutex. Capacity is explicit. Concurrent updates with the same expected version
-produce exactly one success. Stop wipes identifiers and application data before
-releasing the lifecycle. Durable providers retain ownership of their internal
-connections, allocations, transactions, and cancellation machinery.
+`replace` atomically validates the old identifier, version, and generation,
+proves the new identifier is distinct and unused, removes the old record, and
+publishes the replacement at version one with a fresh nonzero generation. A
+conflict, cancellation, capacity failure, or provider failure leaves the old
+identity unchanged and never publishes the new one.
 
-Store result records and load buffers must not overlap their input views or
-session records. Unsafe aliasing fails before any caller output is written.
+`MemoryStore` implements this contract over caller-owned fixed storage and a
+mutex. Initialization and started state are distinct. Every mutable lifecycle,
+length, generation, and slot field is read or changed only while holding that
+mutex. Capacity is explicit. Concurrent updates with the same expected version
+produce exactly one success. Stop serializes with active operations and wipes
+identifiers and application data before releasing the started lifecycle.
+
+Store result records and load buffers must not overlap their input views,
+session records, provider owner, or any provider backing region. The same rule
+applies to cancellation scopes and every `replace` or `reap` output. Unsafe
+aliasing fails before a provider lock is acquired or any caller output is written.
 All session, context, token, identifier, data, guard-token, and result ranges
 are validated before they are read. In-memory store, guard, and key-ring
 initializers check array multiplication, address ranges, and owner/backing
@@ -156,8 +188,9 @@ disjointness before clearing or publishing caller storage.
 
 ## Lifecycle order
 
-Initialize key generations, the key ring, nonce and replay guards, protected
-codec, store, and manager in that order. Start the manager before admission.
+Initialize nonce and replay guards, key generations and the algorithm and
+nonce-domain-bound key ring, protected codec, store, and manager in that order.
+Start the manager before admission.
 During shutdown, stop admission, settle requests, stop the manager, release the
 codec, release both guards, then release the key ring. Caller storage must
 outlive every object that borrows it.

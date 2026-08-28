@@ -37,8 +37,9 @@ and `mach-crypto` v0.5.0. Build output uses Mach's default `out/` directory.
 Application composition, lifecycle, bounded admission, exact request-context
 ownership, typed routes, immutable middleware execution, value-owned errors,
 strict cookies, AEAD-protected sessions, bounded replay and nonce guards,
-generation-safe in-memory persistence, and the durable store boundary are
-implemented. Security defaults, forms, uploads, rendering, realtime responses,
+generation-safe in-memory persistence, atomic session identity replacement,
+expired-record reclamation, and the durable store boundary are implemented.
+Security defaults, forms, uploads, rendering, realtime responses,
 and the in-process harness remain tracked work. Security-sensitive operations
 have no fallback implementation. See [`doc/routing.md`](doc/routing.md),
 [`doc/middleware.md`](doc/middleware.md), and

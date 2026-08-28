@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixation-resistant 256-bit session identifier regeneration.
 - Bounded concurrent in-memory sessions with optimistic version and generation checks.
 - Injectable lifecycle-owned durable session store and replay guard boundaries.
+- Atomic fixation-safe session identity replacement and explicit expired-record
+  reclamation.
 
 ### Changed
 
@@ -42,10 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decode horizons, with distinct guard domains and hardened regeneration ownership.
 - Rejected duplicate key material across generations and isolated AEAD nonces
   from mutable guard callback inputs.
-- Added explicit guard domain and backend identities with overlapping backing
-  rejection, checked session ranges, and overflow-safe initializer products.
+- Added complete entropy, guard, codec, key-ring, and store ownership queries
+  with fragmented-provider overlap rejection, checked session ranges, and
+  overflow-safe initializer products.
 - Ordered cookie scalar preflight before traversal and checked every serialized
   length component.
+- Bound every key ring to one algorithm and nonce domain, staged callback inputs,
+  detected mutated replay claims, and serialized in-memory lifecycle state.
 
 ## [0.2.0] - 2026-08-27
 
