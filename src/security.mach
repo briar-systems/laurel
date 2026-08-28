@@ -1,43 +1,959 @@
-# application security policy hooks
+# fail-closed application security policy
 
 use R: std.types.result;
+use std.chrono.time;
 use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
 use std.types.size.usize;
-use std.types.string.str;
 use std.types.view;
+use http.core.field;
 use http.core.message;
+use http.core.method;
+use http.core.status;
+use http.core.target;
+use laurel.context;
+use laurel.error;
+
+pub val MAX_CSP_BYTES: usize = 2048;
+pub val MAX_PERMISSIONS_BYTES: usize = 2048;
+pub val MAX_REFERRER_BYTES: usize = 64;
+pub val MAX_FRAME_BYTES: usize = 16;
+pub val MAX_HSTS_BYTES: usize = 64;
+pub val MAX_ORIGIN_BYTES: usize = 1024;
+
+pub def PolicyStatus: u8;
+pub val POLICY_OK: PolicyStatus = 1;
+pub val POLICY_INVALID: PolicyStatus = 2;
+pub val POLICY_REJECTED: PolicyStatus = 3;
+pub val POLICY_LIMIT: PolicyStatus = 4;
+pub val POLICY_COMMITTED: PolicyStatus = 5;
+pub val POLICY_PROVIDER: PolicyStatus = 6;
+pub val POLICY_REENTRANT: PolicyStatus = 7;
+
+pub rec HeadersConfig {
+    content_security_policy: view.View;
+    referrer_policy: view.View;
+    permissions_policy: view.View;
+    frame_options: view.View;
+    content_type_options: bool;
+    hsts_enabled: bool;
+    hsts_max_age: u64;
+    hsts_include_subdomains: bool;
+    hsts_preload: bool;
+}
 
 pub rec HeadersPolicy {
-    content_security_policy: str;
-    referrer_policy:         str;
-    permissions_policy:      str;
-    frame_options:           str;
-    content_type_options:    bool;
-    hsts_max_age:            u64;
-    hsts_include_subdomains: bool;
+    csp: [2048]u8;
+    csp_len: usize;
+    referrer: [64]u8;
+    referrer_len: usize;
+    permissions: [2048]u8;
+    permissions_len: usize;
+    frame: [16]u8;
+    frame_len: usize;
+    hsts: [64]u8;
+    hsts_len: usize;
+    content_type_options: bool;
+    hsts_enabled: bool;
+    initialized: bool;
 }
 
-pub def IssueCsrfFun:  fun(ptr, *u8, usize) R.Result[usize, str];
-pub def VerifyCsrfFun: fun(ptr, view.View) R.Result[bool, str];
-
-pub rec CsrfProtector {
-    ctx:    ptr;
-    issue:  IssueCsrfFun;
-    verify: VerifyCsrfFun;
+pub rec OriginRule {
+    serialized: view.View;
 }
-
-pub def CheckOriginFun: fun(ptr, *message.Request) R.Result[bool, str];
 
 pub rec OriginPolicy {
-    ctx:   ptr;
-    check: CheckOriginFun;
+    rules: *OriginRule;
+    len: usize;
+    max_rules: usize;
+    allow_same_origin: bool;
+    require_unsafe: bool;
+    initialized: bool;
 }
 
-pub def AuthenticateFun: fun(ptr, *message.Request) R.Result[ptr, str];
-pub def ReleasePrincipalFun: fun(ptr, ptr);
+pub rec RedirectPolicy {
+    origins: *OriginPolicy;
+    allow_relative: bool;
+    allow_same_origin: bool;
+    initialized: bool;
+}
+
+pub def AliasesStateFun: fun(ptr, *u8, usize) bool;
+pub def AuthenticateFun: fun(ptr, *message.Request)
+    R.Result[ptr, error.AppError];
+pub def ReleasePrincipalFun: fun(ptr, ptr) bool;
 
 pub rec Authenticator {
-    ctx:       ptr;
+    ctx: ptr;
+    context_size: usize;
+    aliases_state: AliasesStateFun;
     authenticate: AuthenticateFun;
-    release:   ReleasePrincipalFun;
+    release: ReleasePrincipalFun;
+}
+
+rec ParsedOrigin {
+    scheme: view.View;
+    authority: view.View;
+    serialized: view.View;
+}
+
+fun range_valid(data: *u8, len: usize) bool {
+    if (len == 0) { ret true; }
+    if (data == nil) { ret false; }
+    ret len - 1 <= ~(0::usize) - data::usize;
+}
+
+fun ranges_overlap(first: *u8, first_len: usize, second: *u8,
+    second_len: usize) bool {
+    if (first_len == 0 || second_len == 0) { ret false; }
+    if (!range_valid(first, first_len) || !range_valid(second, second_len)) {
+        ret true;
+    }
+    val first_start: usize = first::usize;
+    val second_start: usize = second::usize;
+    ret first_start <= second_start + second_len - 1 &&
+        second_start <= first_start + first_len - 1;
+}
+
+fun view_valid(value: view.View, maximum: usize) bool {
+    ret value.len <= maximum && range_valid(value.data, value.len);
+}
+
+fun equal_folded(first: view.View, second: view.View) bool {
+    if (first.len != second.len || !view_valid(first, MAX_ORIGIN_BYTES) ||
+        !view_valid(second, MAX_ORIGIN_BYTES)) { ret false; }
+    var i: usize = 0;
+    for (i < first.len) {
+        var left: u8 = first.data[i];
+        var right: u8 = second.data[i];
+        if (left >= 'A' && left <= 'Z') { left = left + 32; }
+        if (right >= 'A' && right <= 'Z') { right = right + 32; }
+        if (left != right) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun bytes_equal(first: view.View, text: *u8, len: usize) bool {
+    ret equal_folded(first, view.view(text, len));
+}
+
+fun safe_header_value(value: view.View, maximum: usize) bool {
+    if (!view_valid(value, maximum)) { ret false; }
+    var i: usize = 0;
+    for (i < value.len) {
+        val byte: u8 = value.data[i];
+        if (byte == 0 || byte == '\r' || byte == '\n' || byte == 127 ||
+            (byte < ' ' && byte != '\t')) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun copy_view(source: view.View, output: *u8, capacity: usize) usize {
+    if (!view_valid(source, capacity) || !range_valid(output, capacity)) {
+        ret 0;
+    }
+    var i: usize = 0;
+    for (i < source.len) {
+        output[i] = source.data[i];
+        i = i + 1;
+    }
+    ret source.len;
+}
+
+fun clear(output: *u8, len: usize) {
+    if (!range_valid(output, len)) { ret; }
+    var i: usize = 0;
+    for (i < len) {
+        output[i] = 0;
+        i = i + 1;
+    }
+}
+
+fun allowed_referrer(value: view.View) bool {
+    ret bytes_equal(value, "no-referrer"::*u8, 11) ||
+        bytes_equal(value, "no-referrer-when-downgrade"::*u8, 26) ||
+        bytes_equal(value, "same-origin"::*u8, 11) ||
+        bytes_equal(value, "strict-origin"::*u8, 13) ||
+        bytes_equal(value, "strict-origin-when-cross-origin"::*u8, 31);
+}
+
+fun allowed_frame(value: view.View) bool {
+    ret bytes_equal(value, "DENY"::*u8, 4) ||
+        bytes_equal(value, "SAMEORIGIN"::*u8, 10);
+}
+
+fun decimal(value: u64, output: *u8, capacity: usize) usize {
+    var reversed: [20]u8;
+    var len: usize = 0;
+    var current: u64 = value;
+    for (current != 0) {
+        reversed[len] = '0' + (current % 10)::u8;
+        current = current / 10;
+        len = len + 1;
+    }
+    if (len == 0) { reversed[0] = '0'; len = 1; }
+    if (len > capacity || output == nil) { ret 0; }
+    var i: usize = 0;
+    for (i < len) {
+        output[i] = reversed[len - i - 1];
+        i = i + 1;
+    }
+    ret len;
+}
+
+fun append_text(output: *u8, capacity: usize, offset: usize,
+    text: *u8, len: usize) usize {
+    if (offset > capacity || len > capacity - offset) { ret 0; }
+    var i: usize = 0;
+    for (i < len) {
+        output[offset + i] = text[i];
+        i = i + 1;
+    }
+    ret offset + len;
+}
+
+pub fun secure_headers_config() HeadersConfig {
+    ret HeadersConfig{
+        content_security_policy: view.view(
+            "default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+            78),
+        referrer_policy: view.view("strict-origin-when-cross-origin", 31),
+        permissions_policy: view.view(
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=()", 60),
+        frame_options: view.view("DENY", 4),
+        content_type_options: true,
+        hsts_enabled: true,
+        hsts_max_age: 31536000,
+        hsts_include_subdomains: true,
+        hsts_preload: false,
+    };
+}
+
+pub fun init_headers(policy: *HeadersPolicy, configured: HeadersConfig) bool {
+    if (policy == nil || policy.initialized ||
+        !safe_header_value(configured.content_security_policy,
+            MAX_CSP_BYTES) ||
+        !safe_header_value(configured.referrer_policy, MAX_REFERRER_BYTES) ||
+        !safe_header_value(configured.permissions_policy,
+            MAX_PERMISSIONS_BYTES) ||
+        !safe_header_value(configured.frame_options, MAX_FRAME_BYTES) ||
+        (configured.referrer_policy.len != 0 &&
+        !allowed_referrer(configured.referrer_policy)) ||
+        (configured.frame_options.len != 0 &&
+        !allowed_frame(configured.frame_options)) ||
+        (configured.hsts_preload && (!configured.hsts_enabled ||
+        !configured.hsts_include_subdomains ||
+        configured.hsts_max_age < 31536000))) { ret false; }
+    clear(?policy.csp[0], MAX_CSP_BYTES);
+    clear(?policy.referrer[0], MAX_REFERRER_BYTES);
+    clear(?policy.permissions[0], MAX_PERMISSIONS_BYTES);
+    clear(?policy.frame[0], MAX_FRAME_BYTES);
+    clear(?policy.hsts[0], MAX_HSTS_BYTES);
+    policy.csp_len = copy_view(configured.content_security_policy,
+        ?policy.csp[0], MAX_CSP_BYTES);
+    policy.referrer_len = copy_view(configured.referrer_policy,
+        ?policy.referrer[0], MAX_REFERRER_BYTES);
+    policy.permissions_len = copy_view(configured.permissions_policy,
+        ?policy.permissions[0], MAX_PERMISSIONS_BYTES);
+    policy.frame_len = copy_view(configured.frame_options,
+        ?policy.frame[0], MAX_FRAME_BYTES);
+    policy.hsts_len = 0;
+    if (configured.hsts_enabled) {
+        var offset: usize = append_text(?policy.hsts[0], MAX_HSTS_BYTES, 0,
+            "max-age="::*u8, 8);
+        val digits: usize = decimal(configured.hsts_max_age,
+            ?policy.hsts[offset], MAX_HSTS_BYTES - offset);
+        if (offset == 0 || digits == 0) { ret false; }
+        offset = offset + digits;
+        if (configured.hsts_include_subdomains) {
+            offset = append_text(?policy.hsts[0], MAX_HSTS_BYTES, offset,
+                "; includeSubDomains"::*u8, 19);
+            if (offset == 0) { ret false; }
+        }
+        if (configured.hsts_preload) {
+            offset = append_text(?policy.hsts[0], MAX_HSTS_BYTES, offset,
+                "; preload"::*u8, 9);
+            if (offset == 0) { ret false; }
+        }
+        policy.hsts_len = offset;
+    }
+    policy.content_type_options = configured.content_type_options;
+    policy.hsts_enabled = configured.hsts_enabled;
+    policy.initialized = true;
+    ret true;
+}
+
+pub fun secure_headers(policy: *HeadersPolicy) bool {
+    ret init_headers(policy, secure_headers_config());
+}
+
+pub fun headers_valid(policy: *HeadersPolicy) bool {
+    ret policy != nil && policy.initialized &&
+        policy.csp_len <= MAX_CSP_BYTES &&
+        policy.referrer_len <= MAX_REFERRER_BYTES &&
+        policy.permissions_len <= MAX_PERMISSIONS_BYTES &&
+        policy.frame_len <= MAX_FRAME_BYTES &&
+        policy.hsts_len <= MAX_HSTS_BYTES &&
+        safe_header_value(view.view(?policy.csp[0], policy.csp_len),
+            MAX_CSP_BYTES) &&
+        safe_header_value(view.view(?policy.referrer[0], policy.referrer_len),
+            MAX_REFERRER_BYTES) &&
+        safe_header_value(view.view(?policy.permissions[0],
+            policy.permissions_len), MAX_PERMISSIONS_BYTES) &&
+        safe_header_value(view.view(?policy.frame[0], policy.frame_len),
+            MAX_FRAME_BYTES) &&
+        safe_header_value(view.view(?policy.hsts[0], policy.hsts_len),
+            MAX_HSTS_BYTES) &&
+        (policy.referrer_len == 0 || allowed_referrer(
+            view.view(?policy.referrer[0], policy.referrer_len))) &&
+        (policy.frame_len == 0 || allowed_frame(
+            view.view(?policy.frame[0], policy.frame_len))) &&
+        (policy.hsts_enabled == (policy.hsts_len != 0));
+}
+
+fun header_count(fields: *field.Fields, name: view.View) usize {
+    if (fields == nil || !fields.valid) { ret ~(0::usize); }
+    var count: usize = 0;
+    var i: usize = 0;
+    for (i < fields.len) {
+        if (field.name_equal(fields.items[i].name, name)) {
+            count = count + 1;
+        }
+        i = i + 1;
+    }
+    ret count;
+}
+
+fun append_header(response: *message.Response, name: *u8, name_len: usize,
+    value: *u8, value_len: usize) PolicyStatus {
+    if (header_count(?response.fields, view.view(name, name_len)) != 0) {
+        ret POLICY_REJECTED;
+    }
+    val added: field.AddStatus = message.add_field(response, field.Field{
+        name: view.view(name, name_len), value: view.view(value, value_len),
+        sensitive: false});
+    if (added == field.ADD_OK) { ret POLICY_OK; }
+    if (added == field.ADD_INVALID) { ret POLICY_INVALID; }
+    ret POLICY_LIMIT;
+}
+
+pub fun apply_headers(policy: *HeadersPolicy, request: *message.Request,
+    response: *message.Response) PolicyStatus {
+    if (!headers_valid(policy) || request == nil || response == nil ||
+        request.generation == 0 || request.generation != response.generation) {
+        ret POLICY_INVALID;
+    }
+    if (response.committed) { ret POLICY_COMMITTED; }
+    val original_len: usize = response.fields.len;
+    val original_bytes: usize = response.fields.bytes;
+    var result: PolicyStatus = POLICY_OK;
+    if (policy.csp_len != 0) {
+        result = append_header(response, "content-security-policy"::*u8, 23,
+            ?policy.csp[0], policy.csp_len);
+    }
+    if (result == POLICY_OK && policy.referrer_len != 0) {
+        result = append_header(response, "referrer-policy"::*u8, 15,
+            ?policy.referrer[0], policy.referrer_len);
+    }
+    if (result == POLICY_OK && policy.permissions_len != 0) {
+        result = append_header(response, "permissions-policy"::*u8, 18,
+            ?policy.permissions[0], policy.permissions_len);
+    }
+    if (result == POLICY_OK && policy.frame_len != 0) {
+        result = append_header(response, "x-frame-options"::*u8, 15,
+            ?policy.frame[0], policy.frame_len);
+    }
+    if (result == POLICY_OK && policy.content_type_options) {
+        result = append_header(response, "x-content-type-options"::*u8, 22,
+            "nosniff"::*u8, 7);
+    }
+    if (result == POLICY_OK && policy.hsts_enabled &&
+        request.metadata.secure) {
+        result = append_header(response, "strict-transport-security"::*u8, 25,
+            ?policy.hsts[0], policy.hsts_len);
+    }
+    if (result != POLICY_OK) {
+        response.fields.len = original_len;
+        response.fields.bytes = original_bytes;
+    }
+    ret result;
+}
+
+fun scheme_char(byte: u8, first: bool) bool {
+    if ((byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z')) {
+        ret true;
+    }
+    ret !first && ((byte >= '0' && byte <= '9') || byte == '+' ||
+        byte == '-' || byte == '.');
+}
+
+fun parse_origin(value: view.View, output: *ParsedOrigin) bool {
+    if (output == nil || value.len < 8 ||
+        !view_valid(value, MAX_ORIGIN_BYTES)) { ret false; }
+    var colon: usize = 0;
+    for (colon < value.len && value.data[colon] != ':') {
+        if (!scheme_char(value.data[colon], colon == 0)) { ret false; }
+        colon = colon + 1;
+    }
+    if (colon == 0 || colon + 3 > value.len || value.data[colon] != ':' ||
+        value.data[colon + 1] != '/' || value.data[colon + 2] != '/') {
+        ret false;
+    }
+    val scheme: view.View = view.view(value.data, colon);
+    if (!bytes_equal(scheme, "http"::*u8, 4) &&
+        !bytes_equal(scheme, "https"::*u8, 5)) { ret false; }
+    val authority_start: usize = colon + 3;
+    if (authority_start == value.len) { ret false; }
+    var i: usize = authority_start;
+    for (i < value.len) {
+        val byte: u8 = value.data[i];
+        if (byte <= ' ' || byte == 127 || byte == '/' || byte == '\\' ||
+            byte == '?' || byte == '#' || byte == '@' || byte == ',') {
+            ret false;
+        }
+        i = i + 1;
+    }
+    output.scheme = scheme;
+    output.authority = view.view(?value.data[authority_start],
+        value.len - authority_start);
+    output.serialized = value;
+    ret true;
+}
+
+fun origin_equal(first: ParsedOrigin, second: ParsedOrigin) bool {
+    ret equal_folded(first.scheme, second.scheme) &&
+        equal_folded(first.authority, second.authority);
+}
+
+pub fun init_origins(policy: *OriginPolicy, rules: *OriginRule, len: usize,
+    max_rules: usize, allow_same_origin: bool, require_unsafe: bool) bool {
+    if (policy == nil || policy.initialized || len > max_rules ||
+        (len != 0 && rules == nil)) { ret false; }
+    var i: usize = 0;
+    for (i < len) {
+        var parsed: ParsedOrigin;
+        if (!parse_origin(rules[i].serialized, ?parsed)) { ret false; }
+        var prior: usize = 0;
+        for (prior < i) {
+            var earlier: ParsedOrigin;
+            if (!parse_origin(rules[prior].serialized, ?earlier) ||
+                origin_equal(parsed, earlier)) { ret false; }
+            prior = prior + 1;
+        }
+        i = i + 1;
+    }
+    policy.rules = rules;
+    policy.len = len;
+    policy.max_rules = max_rules;
+    policy.allow_same_origin = allow_same_origin;
+    policy.require_unsafe = require_unsafe;
+    policy.initialized = true;
+    ret true;
+}
+
+pub fun origins_valid(policy: *OriginPolicy) bool {
+    if (policy == nil || !policy.initialized || policy.len > policy.max_rules ||
+        (policy.len != 0 && policy.rules == nil)) { ret false; }
+    var i: usize = 0;
+    for (i < policy.len) {
+        var parsed: ParsedOrigin;
+        if (!parse_origin(policy.rules[i].serialized, ?parsed)) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun request_authority(request: *message.Request, output: *view.View) bool {
+    if (request == nil || output == nil) { ret false; }
+    if (request.target.authority.len != 0) {
+        @output = request.target.authority;
+        ret view_valid(@output, MAX_ORIGIN_BYTES);
+    }
+    val name: view.View = view.view("host", 4);
+    if (header_count(?request.fields, name) != 1) { ret false; }
+    val host: *field.Field = field.find_first(?request.fields, name);
+    if (host == nil || host.value.len == 0 ||
+        !view_valid(host.value, MAX_ORIGIN_BYTES)) { ret false; }
+    @output = host.value;
+    ret true;
+}
+
+fun request_origin(request: *message.Request, output: *ParsedOrigin) bool {
+    var authority: view.View;
+    if (!request_authority(request, ?authority)) { ret false; }
+    var scheme: view.View = view.view("http", 4);
+    if (request.metadata.secure) { scheme = view.view("https", 5); }
+    output.scheme = scheme;
+    output.authority = authority;
+    output.serialized = view.view(nil, 0);
+    ret true;
+}
+
+fun rule_allows(policy: *OriginPolicy, origin: ParsedOrigin) bool {
+    var i: usize = 0;
+    for (i < policy.len) {
+        var allowed: ParsedOrigin;
+        if (parse_origin(policy.rules[i].serialized, ?allowed) &&
+            origin_equal(origin, allowed)) { ret true; }
+        i = i + 1;
+    }
+    ret false;
+}
+
+pub fun check_origin(policy: *OriginPolicy,
+    request: *message.Request) PolicyStatus {
+    if (!origins_valid(policy) || request == nil || request.generation == 0) {
+        ret POLICY_INVALID;
+    }
+    val name: view.View = view.view("origin", 6);
+    val count: usize = header_count(?request.fields, name);
+    if (count == ~(0::usize) || count > 1) { ret POLICY_REJECTED; }
+    if (count == 0) {
+        if (policy.require_unsafe && !method.is_safe(request.method.kind)) {
+            ret POLICY_REJECTED;
+        }
+        ret POLICY_OK;
+    }
+    val item: *field.Field = field.find_first(?request.fields, name);
+    var supplied: ParsedOrigin;
+    if (item == nil || !parse_origin(item.value, ?supplied)) {
+        ret POLICY_REJECTED;
+    }
+    if (policy.allow_same_origin) {
+        var expected: ParsedOrigin;
+        if (request_origin(request, ?expected) && origin_equal(supplied, expected)) {
+            ret POLICY_OK;
+        }
+    }
+    if (rule_allows(policy, supplied)) { ret POLICY_OK; }
+    ret POLICY_REJECTED;
+}
+
+pub fun init_redirects(policy: *RedirectPolicy, origins: *OriginPolicy,
+    allow_relative: bool, allow_same_origin: bool) bool {
+    if (policy == nil || policy.initialized || !origins_valid(origins)) {
+        ret false;
+    }
+    policy.origins = origins;
+    policy.allow_relative = allow_relative;
+    policy.allow_same_origin = allow_same_origin;
+    policy.initialized = true;
+    ret true;
+}
+
+fun redirect_status(code: status.Status) bool {
+    ret code == status.MOVED_PERMANENTLY || code == status.FOUND ||
+        code == status.SEE_OTHER || code == status.TEMPORARY_REDIRECT ||
+        code == status.PERMANENT_REDIRECT;
+}
+
+fun safe_location(location: view.View) bool {
+    if (location.len == 0 || !safe_header_value(location, MAX_ORIGIN_BYTES)) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < location.len) {
+        if (location.data[i] == '\\') { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun location_origin(location: view.View, output: *ParsedOrigin) bool {
+    if (!safe_location(location)) { ret false; }
+    var scheme_end: usize = 0;
+    for (scheme_end < location.len && location.data[scheme_end] != ':') {
+        scheme_end = scheme_end + 1;
+    }
+    if (scheme_end + 3 > location.len || location.data[scheme_end + 1] != '/' ||
+        location.data[scheme_end + 2] != '/') { ret false; }
+    var end: usize = scheme_end + 3;
+    for (end < location.len && location.data[end] != '/' &&
+        location.data[end] != '?' && location.data[end] != '#') {
+        end = end + 1;
+    }
+    ret parse_origin(view.view(location.data, end), output);
+}
+
+pub fun redirect(policy: *RedirectPolicy, request: *message.Request,
+    response: *message.Response, code: status.Status,
+    location: view.View) PolicyStatus {
+    if (policy == nil || !policy.initialized ||
+        !origins_valid(policy.origins) || request == nil || response == nil ||
+        request.generation == 0 || request.generation != response.generation ||
+        !redirect_status(code) || !safe_location(location)) {
+        ret POLICY_INVALID;
+    }
+    if (response.committed) { ret POLICY_COMMITTED; }
+    var allowed: bool = false;
+    if (location.data[0] == '/') {
+        allowed = policy.allow_relative &&
+            (location.len == 1 || location.data[1] != '/');
+    } or {
+        var target_origin: ParsedOrigin;
+        if (!location_origin(location, ?target_origin)) { ret POLICY_REJECTED; }
+        if (policy.allow_same_origin) {
+            var expected: ParsedOrigin;
+            allowed = request_origin(request, ?expected) &&
+                origin_equal(target_origin, expected);
+        }
+        if (!allowed) { allowed = rule_allows(policy.origins, target_origin); }
+    }
+    if (!allowed || header_count(?response.fields,
+            view.view("location", 8)) != 0) { ret POLICY_REJECTED; }
+    val old_status: status.Status = response.status;
+    val old_len: usize = response.fields.len;
+    val old_bytes: usize = response.fields.bytes;
+    if (message.set_status(response, code) != message.RESPONSE_OK) {
+        ret POLICY_INVALID;
+    }
+    val added: field.AddStatus = message.add_field(response, field.Field{
+        name: view.view("location", 8), value: location, sensitive: false});
+    if (added != field.ADD_OK) {
+        response.status = old_status;
+        response.fields.len = old_len;
+        response.fields.bytes = old_bytes;
+        if (added == field.ADD_INVALID) { ret POLICY_INVALID; }
+        ret POLICY_LIMIT;
+    }
+    ret POLICY_OK;
+}
+
+fun authenticator_equal(first: Authenticator, second: Authenticator) bool {
+    ret first.ctx == second.ctx && first.context_size == second.context_size &&
+        first.aliases_state::usize == second.aliases_state::usize &&
+        first.authenticate::usize == second.authenticate::usize &&
+        first.release::usize == second.release::usize;
+}
+
+pub fun authenticator_valid(value: *Authenticator) bool {
+    if (value == nil) { ret false; }
+    val snapshot: Authenticator = @value;
+    ret snapshot.ctx != nil && snapshot.context_size != 0 &&
+        range_valid(snapshot.ctx::*u8, snapshot.context_size) &&
+        snapshot.aliases_state::usize != 0 &&
+        snapshot.authenticate::usize != 0 && snapshot.release::usize != 0 &&
+        !ranges_overlap(snapshot.ctx::*u8, snapshot.context_size,
+            value::*u8, $size_of(Authenticator)) &&
+        !snapshot.aliases_state(snapshot.ctx, value::*u8,
+            $size_of(Authenticator)) && authenticator_equal(snapshot, @value);
+}
+
+fun authentication_input_valid(authenticator: *Authenticator,
+    snapshot: Authenticator, data: *u8, len: usize) bool {
+    ret range_valid(data, len) &&
+        !ranges_overlap(data, len, authenticator::*u8,
+            $size_of(Authenticator)) &&
+        !ranges_overlap(data, len, snapshot.ctx::*u8,
+            snapshot.context_size) &&
+        !snapshot.aliases_state(snapshot.ctx, data, len) &&
+        authenticator_equal(snapshot, @authenticator);
+}
+
+fun authentication_error(kind: error.Kind, public_text: *u8,
+    public_len: usize, detail: *u8, detail_len: usize) error.AppError {
+    ret error.make_view(kind, 401, view.view(public_text, public_len),
+        view.view(detail, detail_len), false);
+}
+
+pub fun authenticate(authenticator: *Authenticator,
+    request_context: *context.Context) R.Result[ptr, error.AppError] {
+    if (!authenticator_valid(authenticator) ||
+        !context.active(request_context) ||
+        request_context.principal_state != context.PRINCIPAL_NONE ||
+        request_context.principal != nil) {
+        ret R.err[ptr, error.AppError](authentication_error(error.INTERNAL,
+            "internal server error"::*u8, 21,
+            "invalid authentication ownership"::*u8, 32));
+    }
+    val request: *message.Request = context.request(request_context);
+    val snapshot: Authenticator = @authenticator;
+    if (request == nil || !authentication_input_valid(authenticator, snapshot,
+            request::*u8, $size_of(message.Request)) ||
+        !authentication_input_valid(authenticator, snapshot,
+            request_context::*u8, $size_of(context.Context))) {
+        ret R.err[ptr, error.AppError](authentication_error(error.INTERNAL,
+            "internal server error"::*u8, 21,
+            "authentication state overlaps request"::*u8, 37));
+    }
+    request_context.principal_state = context.PRINCIPAL_AUTHENTICATING;
+    val result: R.Result[ptr, error.AppError] =
+        snapshot.authenticate(snapshot.ctx, request);
+    if (!authenticator_equal(snapshot, @authenticator) ||
+        !context.active(request_context) ||
+        request_context.principal_state != context.PRINCIPAL_AUTHENTICATING ||
+        request_context.principal != nil) {
+        if (!R.is_err[ptr, error.AppError](result)) {
+            val leaked: ptr = R.unwrap_ok[ptr, error.AppError](result);
+            if (leaked != nil && !snapshot.release(snapshot.ctx, leaked) &&
+                request_context.principal_state ==
+                    context.PRINCIPAL_AUTHENTICATING &&
+                request_context.principal == nil) {
+                request_context.principal = leaked;
+                request_context.principal_state = context.PRINCIPAL_OWNED;
+            }
+        }
+        if (request_context.principal_state == context.PRINCIPAL_AUTHENTICATING) {
+            request_context.principal_state = context.PRINCIPAL_NONE;
+        }
+        ret R.err[ptr, error.AppError](authentication_error(error.INTERNAL,
+            "internal server error"::*u8, 21,
+            "authentication callback violated ownership"::*u8, 42));
+    }
+    if (R.is_err[ptr, error.AppError](result)) {
+        request_context.principal_state = context.PRINCIPAL_NONE;
+        ret result;
+    }
+    val principal: ptr = R.unwrap_ok[ptr, error.AppError](result);
+    if (principal == nil) {
+        request_context.principal_state = context.PRINCIPAL_NONE;
+        ret R.err[ptr, error.AppError](authentication_error(error.UNAUTHORIZED,
+            "authentication required"::*u8, 23,
+            "authenticator returned no principal"::*u8, 35));
+    }
+    request_context.principal = principal;
+    request_context.principal_state = context.PRINCIPAL_OWNED;
+    ret R.ok[ptr, error.AppError](principal);
+}
+
+pub fun release_principal(authenticator: *Authenticator,
+    request_context: *context.Context) bool {
+    if (!authenticator_valid(authenticator) || request_context == nil ||
+        request_context.principal_state != context.PRINCIPAL_OWNED ||
+        request_context.principal == nil) { ret false; }
+    val snapshot: Authenticator = @authenticator;
+    if (!authentication_input_valid(authenticator, snapshot,
+            request_context::*u8, $size_of(context.Context))) { ret false; }
+    val principal: ptr = request_context.principal;
+    request_context.principal = nil;
+    request_context.principal_state = context.PRINCIPAL_RELEASING;
+    val released: bool = snapshot.release(snapshot.ctx, principal);
+    if (!authenticator_equal(snapshot, @authenticator) ||
+        request_context.principal_state != context.PRINCIPAL_RELEASING ||
+        request_context.principal != nil) {
+        if (request_context.principal_state == context.PRINCIPAL_RELEASING &&
+            request_context.principal == nil) {
+            if (released) {
+                request_context.principal_state = context.PRINCIPAL_RELEASED;
+            }
+            or {
+                request_context.principal = principal;
+                request_context.principal_state = context.PRINCIPAL_OWNED;
+            }
+        }
+        ret false;
+    }
+    if (!released) {
+        request_context.principal = principal;
+        request_context.principal_state = context.PRINCIPAL_OWNED;
+        ret false;
+    }
+    request_context.principal_state = context.PRINCIPAL_RELEASED;
+    ret true;
+}
+
+rec PolicyFixture {
+    request_items: [8]field.Field;
+    response_items: [8]field.Field;
+    request: message.Request;
+    response: message.Response;
+}
+
+fun init_policy_fixture(fixture: *PolicyFixture, request_method: method.Method,
+    secure: bool, response_capacity: usize) bool {
+    if (fixture == nil || response_capacity > 8) { ret false; }
+    fixture.request = message.Request{};
+    fixture.request.method = request_method;
+    fixture.request.target = target.origin(view.view("/", 1),
+        view.view("/", 1), view.view(nil, 0));
+    fixture.request.metadata = message.Metadata{
+        version: message.version_h1(1, 1), secure: secure, early_data: false,
+        peer: message.unspecified_endpoint(),
+        local: message.unspecified_endpoint(),
+        received_at: time.Time{sec: 1, nsec: 0}, has_deadline: false,
+        deadline: time.Time{sec: 0, nsec: 0}, request_index: 1};
+    fixture.request.fields = field.init(?fixture.request_items[0], 8,
+        field.limits(8, 8192, 64, 2048));
+    fixture.request.generation = 7;
+    fixture.response = message.Response{};
+    fixture.response.status = status.OK;
+    fixture.response.fields = field.init(?fixture.response_items[0],
+        response_capacity, field.limits(8, 8192, 64, 4096));
+    fixture.response.generation = 7;
+    ret true;
+}
+
+fun request_header(fixture: *PolicyFixture, name: *u8, name_len: usize,
+    value: *u8, value_len: usize) bool {
+    ret field.append(?fixture.request.fields, field.Field{
+        name: view.view(name, name_len), value: view.view(value, value_len),
+        sensitive: false}) == field.ADD_OK;
+}
+
+test "laurel.security: secure response headers are bounded and transactional" {
+    var policy: HeadersPolicy;
+    if (!secure_headers(?policy) || !headers_valid(?policy) ||
+        policy.csp_len != 78 || policy.permissions_len != 60 ||
+        policy.hsts_len != 35) { ret 1; }
+    var fixture: PolicyFixture;
+    if (!init_policy_fixture(?fixture, method.from_kind(method.GET), true, 8) ||
+        apply_headers(?policy, ?fixture.request, ?fixture.response) !=
+        POLICY_OK || fixture.response.fields.len != 6 ||
+        field.find_first(?fixture.response.fields,
+            view.view("strict-transport-security", 25)) == nil ||
+        field.find_first(?fixture.response.fields,
+            view.view("x-content-type-options", 22)) == nil) { ret 2; }
+
+    var duplicate: PolicyFixture;
+    if (!init_policy_fixture(?duplicate, method.from_kind(method.GET), true, 8) ||
+        message.add_field(?duplicate.response, field.Field{
+            name: view.view("x-frame-options", 15),
+            value: view.view("ALLOWALL", 8), sensitive: false}) != field.ADD_OK) {
+        ret 3;
+    }
+    val duplicate_len: usize = duplicate.response.fields.len;
+    val duplicate_bytes: usize = duplicate.response.fields.bytes;
+    if (apply_headers(?policy, ?duplicate.request, ?duplicate.response) !=
+            POLICY_REJECTED ||
+        duplicate.response.fields.len != duplicate_len ||
+        duplicate.response.fields.bytes != duplicate_bytes) { ret 4; }
+
+    var limited: PolicyFixture;
+    if (!init_policy_fixture(?limited, method.from_kind(method.GET), true, 2) ||
+        apply_headers(?policy, ?limited.request, ?limited.response) !=
+            POLICY_LIMIT || limited.response.fields.len != 0 ||
+        limited.response.fields.bytes != 0) { ret 5; }
+
+    var cleartext: PolicyFixture;
+    if (!init_policy_fixture(?cleartext, method.from_kind(method.GET), false, 8) ||
+        apply_headers(?policy, ?cleartext.request, ?cleartext.response) !=
+            POLICY_OK || cleartext.response.fields.len != 5 ||
+        field.find_first(?cleartext.response.fields,
+            view.view("strict-transport-security", 25)) != nil) { ret 6; }
+
+    var invalid: HeadersPolicy;
+    var config: HeadersConfig = secure_headers_config();
+    config.referrer_policy = view.view("unsafe\r\nvalue", 13);
+    if (init_headers(?invalid, config)) { ret 7; }
+    config = secure_headers_config();
+    config.frame_options = view.view("ALLOWALL", 8);
+    if (init_headers(?invalid, config)) { ret 8; }
+    config = secure_headers_config();
+    config.hsts_preload = true;
+    config.hsts_include_subdomains = false;
+    if (init_headers(?invalid, config)) { ret 9; }
+    policy.csp[0] = '\r';
+    if (headers_valid(?policy)) { ret 10; }
+    ret 0;
+}
+
+test "laurel.security: origin policy rejects cross-origin ambiguity" {
+    var rule: OriginRule = OriginRule{
+        serialized: view.view("https://trusted.example", 23)};
+    var origins: OriginPolicy;
+    if (!init_origins(?origins, ?rule, 1, 1, true, true) ||
+        !origins_valid(?origins)) { ret 1; }
+    var fixture: PolicyFixture;
+    if (!init_policy_fixture(?fixture, method.from_kind(method.POST), true, 8) ||
+        !request_header(?fixture, "host"::*u8, 4,
+            "app.example"::*u8, 11) ||
+        !request_header(?fixture, "origin"::*u8, 6,
+            "https://app.example"::*u8, 19) ||
+        check_origin(?origins, ?fixture.request) != POLICY_OK) { ret 2; }
+
+    field.reset(?fixture.request.fields);
+    if (!request_header(?fixture, "host"::*u8, 4,
+            "app.example"::*u8, 11) ||
+        !request_header(?fixture, "origin"::*u8, 6,
+            "https://trusted.example"::*u8, 23) ||
+        check_origin(?origins, ?fixture.request) != POLICY_OK) { ret 3; }
+
+    field.reset(?fixture.request.fields);
+    if (!request_header(?fixture, "host"::*u8, 4,
+            "app.example"::*u8, 11) ||
+        !request_header(?fixture, "origin"::*u8, 6,
+            "https://evil.example"::*u8, 20) ||
+        check_origin(?origins, ?fixture.request) != POLICY_REJECTED) { ret 4; }
+
+    field.reset(?fixture.request.fields);
+    if (!request_header(?fixture, "host"::*u8, 4,
+            "app.example"::*u8, 11) ||
+        check_origin(?origins, ?fixture.request) != POLICY_REJECTED) { ret 5; }
+    fixture.request.method = method.from_kind(method.GET);
+    if (check_origin(?origins, ?fixture.request) != POLICY_OK) { ret 6; }
+    fixture.request.method = method.from_kind(method.POST);
+
+    field.reset(?fixture.request.fields);
+    if (!request_header(?fixture, "host"::*u8, 4,
+            "app.example"::*u8, 11) ||
+        !request_header(?fixture, "origin"::*u8, 6,
+            "https://app.example"::*u8, 19) ||
+        !request_header(?fixture, "origin"::*u8, 6,
+            "https://app.example"::*u8, 19) ||
+        check_origin(?origins, ?fixture.request) != POLICY_REJECTED) { ret 7; }
+
+    field.reset(?fixture.request.fields);
+    if (!request_header(?fixture, "host"::*u8, 4,
+            "app.example"::*u8, 11) ||
+        !request_header(?fixture, "origin"::*u8, 6,
+            "https://user@app.example"::*u8, 24) ||
+        check_origin(?origins, ?fixture.request) != POLICY_REJECTED) { ret 8; }
+    var duplicates: [2]OriginRule = [2]OriginRule{rule, rule};
+    var invalid: OriginPolicy;
+    if (init_origins(?invalid, ?duplicates[0], 2, 2, true, true)) { ret 9; }
+    ret 0;
+}
+
+test "laurel.security: redirects require an explicit safe destination" {
+    var rule: OriginRule = OriginRule{
+        serialized: view.view("https://trusted.example", 23)};
+    var origins: OriginPolicy;
+    var policy: RedirectPolicy;
+    if (!init_origins(?origins, ?rule, 1, 1, true, true) ||
+        !init_redirects(?policy, ?origins, true, true)) { ret 1; }
+    var fixture: PolicyFixture;
+    if (!init_policy_fixture(?fixture, method.from_kind(method.GET), true, 8) ||
+        !request_header(?fixture, "host"::*u8, 4,
+            "app.example"::*u8, 11) ||
+        redirect(?policy, ?fixture.request, ?fixture.response,
+            status.SEE_OTHER, view.view("/safe", 5)) != POLICY_OK ||
+        fixture.response.status != status.SEE_OTHER ||
+        fixture.response.fields.len != 1) { ret 2; }
+
+    fixture.response.status = status.OK;
+    field.reset(?fixture.response.fields);
+    if (redirect(?policy, ?fixture.request, ?fixture.response, status.FOUND,
+            view.view("//evil.example", 14)) != POLICY_REJECTED ||
+        fixture.response.status != status.OK || fixture.response.fields.len != 0) {
+        ret 3;
+    }
+    if (redirect(?policy, ?fixture.request, ?fixture.response,
+            status.TEMPORARY_REDIRECT,
+            view.view("https://trusted.example/path", 28)) != POLICY_OK) {
+        ret 4;
+    }
+
+    fixture.response.status = status.OK;
+    field.reset(?fixture.response.fields);
+    if (redirect(?policy, ?fixture.request, ?fixture.response, status.FOUND,
+            view.view("https://evil.example/path", 25)) != POLICY_REJECTED ||
+        redirect(?policy, ?fixture.request, ?fixture.response, status.FOUND,
+            view.view("javascript:alert(1)", 19)) != POLICY_REJECTED ||
+        redirect(?policy, ?fixture.request, ?fixture.response, status.FOUND,
+            view.view("/safe\r\nlocation: evil", 21)) != POLICY_INVALID) {
+        ret 5;
+    }
+    if (message.add_field(?fixture.response, field.Field{
+            name: view.view("location", 8), value: view.view("/first", 6),
+            sensitive: false}) != field.ADD_OK) { ret 6; }
+    val prior_bytes: usize = fixture.response.fields.bytes;
+    if (redirect(?policy, ?fixture.request, ?fixture.response, status.FOUND,
+            view.view("/second", 7)) != POLICY_REJECTED ||
+        fixture.response.status != status.OK ||
+        fixture.response.fields.len != 1 ||
+        fixture.response.fields.bytes != prior_bytes) { ret 7; }
+    ret 0;
 }

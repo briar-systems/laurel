@@ -17,7 +17,8 @@ The framework has no global application registry, hidden allocator, mandatory te
 - `middleware` snapshots and executes an application-owned chain with value-typed, single-use next handlers.
 - `error` owns bounded failure text and maps strict UTF-8 public messages to fail-closed HTTP responses.
 - `session` separates session lifecycle, protected cookie encoding, and durable storage.
-- `security` defines response header, CSRF, origin, and authentication policy hooks.
+- `security` defines bounded response headers, origin enforcement,
+  HMAC-protected CSRF tokens, authentication ownership, and redirect policy.
 - `form` and `upload` keep bounded parsing and streamed file storage separate.
 - `render` converts a model into a response body without coupling the framework to a template engine.
 - `observability` reports request events through application-owned logging and metrics callbacks.
@@ -29,8 +30,8 @@ The framework has no global application registry, hidden allocator, mandatory te
 
 ## Local dependencies
 
-The manifest uses pinned Git tags for `mach-std` v0.29.0, `mach-http` v0.3.0,
-and `mach-crypto` v0.5.0. Build output uses Mach's default `out/` directory.
+The manifest uses pinned Git tags for `mach-std` v0.33.0, `mach-http` v0.4.1,
+and `mach-crypto` v0.6.0. Build output uses Mach's default `out/` directory.
 
 ## Status
 
@@ -38,10 +39,13 @@ Application composition, lifecycle, bounded admission, exact request-context
 ownership, typed routes, immutable middleware execution, value-owned errors,
 strict cookies, AEAD-protected sessions, bounded replay and nonce guards,
 generation-safe in-memory persistence, atomic session identity replacement,
-expired-record reclamation, ownership-safe manager lifecycle, and the durable
-store boundary are implemented.
-Security defaults, forms, uploads, rendering, realtime responses,
+expired-record reclamation, ownership-safe manager lifecycle, the durable
+store boundary, secure response defaults, origin enforcement, HMAC-protected
+session or request-bound CSRF tokens, authentication ownership, and safe
+redirects are implemented.
+Forms, uploads, rendering, realtime responses,
 and the in-process harness remain tracked work. Security-sensitive operations
 have no fallback implementation. See [`doc/routing.md`](doc/routing.md),
 [`doc/middleware.md`](doc/middleware.md), and
-[`doc/sessions.md`](doc/sessions.md) for the ownership contracts.
+[`doc/sessions.md`](doc/sessions.md), and
+[`doc/security.md`](doc/security.md) for the ownership contracts.

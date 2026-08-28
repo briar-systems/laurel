@@ -10,6 +10,7 @@ fwd laurel.middleware;
 fwd laurel.error;
 fwd laurel.session;
 fwd laurel.security;
+fwd laurel.security.csrf;
 fwd laurel.form;
 fwd laurel.upload;
 fwd laurel.render;

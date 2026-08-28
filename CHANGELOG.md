@@ -31,10 +31,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Injectable lifecycle-owned durable session store and replay guard boundaries.
 - Atomic fixation-safe session identity replacement and explicit expired-record
   reclamation.
+- Bounded security header defaults with transactional response publication.
+- Exact same-origin and allowlist enforcement for unsafe requests.
+- HMAC-SHA-256 CSRF tokens bound to session or request generations with bounded
+  key rotation and clock windows.
+- Authentication principal ownership with deterministic failure and release.
+- Transactional relative, same-origin, and allowlisted redirect policy.
 
 ### Changed
 
-- Pinned `mach-std` to v0.29.0, `mach-http` to v0.3.0, and `mach-crypto` to v0.5.0.
+- Pinned `mach-std` to v0.33.0, `mach-http` to v0.4.1, and `mach-crypto` to v0.6.0.
 - Routed handler response ownership through the bound request context.
 - Required complete allocator callback tables at context binding and allocating boundaries.
 - Revalidated response, body, field storage, generation, and cancellation state after allocator callbacks.

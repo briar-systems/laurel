@@ -29,9 +29,15 @@ use laurel.provider;
 use laurel.render;
 use laurel.router;
 use laurel.security;
+use laurel.security.csrf;
 use laurel.session;
 
 val ADMISSION_CLOSED: i64 = -1;
+
+fun app_identity(app: *App) ptr {
+    if (app == nil) { ret nil; }
+    ret (?app.config)::ptr;
+}
 
 pub rec Limits {
     max_body_bytes:          usize;
@@ -63,7 +69,7 @@ pub rec App {
     lifecycle:    *lifecycle.Controller;
     sessions:     *session.Manager;
     security:     *security.HeadersPolicy;
-    csrf:         *security.CsrfProtector;
+    csrf:         *csrf.Protector;
     origins:      *security.OriginPolicy;
     authenticator: *security.Authenticator;
     renderer:     *render.Renderer;
@@ -84,7 +90,7 @@ pub rec Assembly {
     lifecycle:     *lifecycle.Controller;
     sessions:      *session.Manager;
     security:      *security.HeadersPolicy;
-    csrf:          *security.CsrfProtector;
+    csrf:          *csrf.Protector;
     origins:       *security.OriginPolicy;
     authenticator: *security.Authenticator;
     renderer:      *render.Renderer;
@@ -119,10 +125,12 @@ fun valid_optional_components(assembly: Assembly) bool {
     if (assembly.sessions != nil && !session.manager_valid(assembly.sessions)) {
         ret false;
     }
-    if (assembly.csrf != nil && (assembly.csrf.issue == nil || assembly.csrf.verify == nil)) { ret false; }
-    if (assembly.origins != nil && assembly.origins.check == nil) { ret false; }
-    if (assembly.authenticator != nil && (assembly.authenticator.authenticate == nil
-        || assembly.authenticator.release == nil)) { ret false; }
+    if (assembly.csrf != nil && !csrf.valid(assembly.csrf)) { ret false; }
+    if (assembly.origins != nil && !security.origins_valid(assembly.origins)) {
+        ret false;
+    }
+    if (assembly.authenticator != nil &&
+        !security.authenticator_valid(assembly.authenticator)) { ret false; }
     if (assembly.renderer != nil && assembly.renderer.render == nil) { ret false; }
     ret true;
 }
@@ -132,7 +140,8 @@ pub fun validate_assembly(assembly: Assembly) bool {
         || !assembly.router.initialized || !valid_stack(assembly.middleware)
         || assembly.middleware.len > assembly.config.limits.max_middleware_depth
         || assembly.config.panic_policy != middleware.PANIC_ABORT
-        || assembly.fallback.call == nil || assembly.errors.render == nil || assembly.security == nil
+        || assembly.fallback.call == nil || assembly.errors.render == nil ||
+        !security.headers_valid(assembly.security)
         || !provider.validate(assembly.providers) || !lifecycle.validate(assembly.lifecycle)
         || assembly.lifecycle.state != lifecycle.ASSEMBLED || !valid_observer(assembly.observer)
         || !valid_optional_components(assembly)) { ret false; }
@@ -242,7 +251,7 @@ pub fun bind_context(app: *App, request_context: *context.Context,
     request_id: view.View) bool {
     if (!reserve_context(app)) { ret false; }
     if (!context.bind(request_context, exchange_ptr, params, app.config.limits.max_route_params,
-        allocator, app, app.generation, app.app_state, request_id,
+        allocator, app_identity(app), app.generation, app.app_state, request_id,
         app.config.limits.max_request_id_bytes)) {
         release_reservation(app);
         ret false;
@@ -251,8 +260,19 @@ pub fun bind_context(app: *App, request_context: *context.Context,
 }
 
 pub fun release_context(app: *App, request_context: *context.Context) bool {
-    if (app == nil || request_context == nil || !context.owned_by(request_context, app, app.generation)
-        || !context.unbind(request_context, app, app.generation)) { ret false; }
+    if (app == nil || request_context == nil ||
+        !context.owned_by(request_context, app_identity(app), app.generation)) {
+        ret false;
+    }
+    if (request_context.principal_state == context.PRINCIPAL_OWNED) {
+        if (app.authenticator == nil ||
+            !security.release_principal(app.authenticator, request_context)) {
+            ret false;
+        }
+    }
+    if (!context.unbind(request_context, app_identity(app), app.generation)) {
+        ret false;
+    }
     ret release_reservation(app);
 }
 
@@ -269,7 +289,8 @@ fun invalid_execution(detail: str) middleware.Outcome {
 pub fun execute(app: *App, terminal: handler.Handler,
     request_context: *context.Context) middleware.Outcome {
     if (app == nil || !app.valid || request_context == nil
-        || !context.owned_by(request_context, app, app.generation)) {
+        || !context.owned_by(request_context, app_identity(app),
+            app.generation)) {
         ret invalid_execution("middleware context is not owned by the application");
     }
     ret middleware.execute(app.middleware, terminal, app.errors,
@@ -369,6 +390,54 @@ fun test_observer_start(context_ptr: ptr, event: *observability.RequestEvent) {}
 fun test_observer_finish(context_ptr: ptr, event: *observability.RequestEvent) {}
 fun test_observer_error(context_ptr: ptr, event: *observability.RequestEvent, app_error: error.AppError) {}
 
+rec TestAuthenticator {
+    principal: i64;
+    authenticate_calls: usize;
+    release_calls: usize;
+    owned: bool;
+    fail_authenticate: bool;
+    empty_principal: bool;
+    fail_release: bool;
+}
+
+fun test_auth_aliases(context_ptr: ptr, data: *u8, len: usize) bool {
+    if (context_ptr == nil || len == 0 || data == nil) { ret false; }
+    val state: *TestAuthenticator = context_ptr::*TestAuthenticator;
+    val first: usize = state::usize;
+    val second: usize = data::usize;
+    if (len - 1 > ~(0::usize) - second) { ret true; }
+    ret first <= second + len - 1 &&
+        second <= first + $size_of(TestAuthenticator) - 1;
+}
+
+fun test_authenticate(context_ptr: ptr, request: *message.Request)
+    R.Result[ptr, error.AppError] {
+    val state: *TestAuthenticator = context_ptr::*TestAuthenticator;
+    if (request == nil || state.owned) {
+        ret R.err[ptr, error.AppError](error.make(error.INTERNAL, 500,
+            "internal server error", "invalid test authentication", false));
+    }
+    state.authenticate_calls = state.authenticate_calls + 1;
+    if (state.fail_authenticate) {
+        ret R.err[ptr, error.AppError](error.make(error.UNAUTHORIZED, 401,
+            "authentication required", "test authentication rejected", false));
+    }
+    if (state.empty_principal) {
+        ret R.ok[ptr, error.AppError](nil);
+    }
+    state.owned = true;
+    ret R.ok[ptr, error.AppError](?state.principal);
+}
+
+fun test_release_principal(context_ptr: ptr, principal: ptr) bool {
+    val state: *TestAuthenticator = context_ptr::*TestAuthenticator;
+    if (!state.owned || principal != ?state.principal) { ret false; }
+    state.release_calls = state.release_calls + 1;
+    if (state.fail_release) { ret false; }
+    state.owned = false;
+    ret true;
+}
+
 test "laurel.app: assembly and lifecycle retain caller ownership" {
     var providers: provider.Set;
     if (!provider.init(?providers, nil, 0, 0, 32)) { ret 1; }
@@ -381,8 +450,14 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
         router.limits_default()).status != router.COMPILE_OK) { ret 2; }
     var middlewares: middleware.Stack = middleware.Stack{items: nil, len: 0};
     var headers: security.HeadersPolicy;
+    if (!security.secure_headers(?headers)) { ret 2; }
     var observer: observability.Observer = observability.Observer{ctx: nil, start: test_observer_start,
         finish: test_observer_finish, error: test_observer_error};
+    var auth_state: TestAuthenticator = TestAuthenticator{principal: 7};
+    var authenticator: security.Authenticator = security.Authenticator{
+        ctx: ?auth_state, context_size: $size_of(TestAuthenticator),
+        aliases_state: test_auth_aliases, authenticate: test_authenticate,
+        release: test_release_principal};
     var app: App;
     val assembly: Assembly = Assembly{
         config: Config{limits: Limits{max_body_bytes: 1024, max_form_fields: 16, max_upload_bytes: 4096,
@@ -401,7 +476,7 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
         security: ?headers,
         csrf: nil,
         origins: nil,
-        authenticator: nil,
+        authenticator: ?authenticator,
         renderer: nil,
         observer: ?observer,
         app_state: nil,
@@ -444,6 +519,30 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     if (!bind_context(?app, ?request_context, ?http_exchange,
         context.Params{items: nil, len: 0, generation: 101}, ?allocator,
         view.view("request-101", 11)) || active_request_count(?app) != 1) { ret 10; }
+    auth_state.fail_authenticate = true;
+    if (!R.is_err[ptr, error.AppError](
+            security.authenticate(?authenticator, ?request_context)) ||
+        request_context.principal_state != context.PRINCIPAL_NONE ||
+        request_context.principal != nil || auth_state.authenticate_calls != 1) {
+        ret 15;
+    }
+    auth_state.fail_authenticate = false;
+    auth_state.empty_principal = true;
+    if (!R.is_err[ptr, error.AppError](
+            security.authenticate(?authenticator, ?request_context)) ||
+        request_context.principal_state != context.PRINCIPAL_NONE ||
+        request_context.principal != nil || auth_state.authenticate_calls != 2) {
+        ret 15;
+    }
+    auth_state.empty_principal = false;
+    val authenticated: R.Result[ptr, error.AppError] =
+        security.authenticate(?authenticator, ?request_context);
+    if (R.is_err[ptr, error.AppError](authenticated) ||
+        R.unwrap_ok[ptr, error.AppError](authenticated) != ?auth_state.principal ||
+        request_context.principal_state != context.PRINCIPAL_OWNED ||
+        auth_state.authenticate_calls != 3 ||
+        !R.is_err[ptr, error.AppError](
+            security.authenticate(?authenticator, ?request_context))) { ret 15; }
     val executed: middleware.Outcome = execute(?app,
         handler.Handler{ctx: nil, call: test_handler}, ?request_context);
     if (executed.status != middleware.EXECUTION_RESPOND
@@ -455,9 +554,16 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
         || active_request_count(?app) != 1) { ret 10; }
     if (drain(?app, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_PENDING
         || can_accept(?app) || stop(?app).status != lifecycle.TRANSITION_PENDING) { ret 11; }
+    auth_state.fail_release = true;
+    if (release_context(?app, ?request_context) ||
+        request_context.principal_state != context.PRINCIPAL_OWNED ||
+        request_context.principal != ?auth_state.principal ||
+        auth_state.release_calls != 1) { ret 12; }
+    auth_state.fail_release = false;
     if (!release_context(?app, ?request_context) || release_context(?app, ?request_context)
         || drain(?app, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_OK
-        || !drained(?app)) { ret 12; }
+        || !drained(?app) || auth_state.release_calls != 2 ||
+        auth_state.owned) { ret 12; }
     if (stop(?app).status != lifecycle.TRANSITION_OK || !lifecycle.terminal(?controller)) { ret 13; }
     if (!release(?app) || app.valid || app.app_state != nil || !cancel.destroy(?scope)) { ret 14; }
     ret 0;
