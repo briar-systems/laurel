@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Injectable lifecycle-owned durable session store and replay guard boundaries.
 - Atomic fixation-safe session identity replacement and explicit expired-record
   reclamation.
+- Bounded security header defaults with transactional response publication.
+- Exact same-origin and allowlist enforcement for unsafe requests.
+- HMAC-SHA-256 CSRF tokens bound to session or request generations with bounded
+  key rotation and clock windows.
+- Authentication principal ownership with deterministic failure and release.
+- Transactional relative, same-origin, and allowlisted redirect policy.
 - Incremental URL-encoded decoding with independent encoded, field, name,
   value, and temporary-storage limits.
 - Fragmented and nested multipart decoding with strict MIME parameter grammar.

@@ -45,7 +45,7 @@ these to the limits accepted by their ingress path.
 ## Protected codec
 
 `session.ProtectedCodec` supports AES-256-GCM and ChaCha20-Poly1305 through the
-exact `mach-crypto` v0.5.0 API. A token contains a version, algorithm, key
+exact `mach-crypto` v0.6.0 API. A token contains a version, algorithm, key
 generation identifier, 96-bit nonce, ciphertext, and 128-bit tag. The header
 and the caller's context value are authenticated as associated data. Use a
 stable tenant, application, host, or cookie-purpose value as context. A token
