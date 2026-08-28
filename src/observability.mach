@@ -1,18 +1,119 @@
 # request logging and metrics event boundary
 
+use A: std.allocator;
+use O: std.types.option;
+use fixed_allocator: std.allocator.fixed;
+use std.chrono.time;
+use std.sync.cancel;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
 use std.types.view;
+use http.core.body;
+use http.core.exchange;
+use http.core.field;
+use http.core.message;
+use http.core.method;
+use http.core.target;
+use laurel.context;
 use laurel.error;
+use laurel.middleware;
+
+pub val MAX_REQUEST_ID_BYTES: usize = 64;
+pub val MAX_METHOD_BYTES:     usize = 32;
+pub val MAX_TARGET_BYTES:     usize = 256;
+pub val MAX_ROUTE_NAME_BYTES: usize = 128;
+pub val MAX_TERM_BYTES:       usize = 64;
+pub val MAX_LABEL_NAME_BYTES: usize = 32;
+pub val MAX_LABELS:           usize = 8;
+pub val MAX_LABEL_VALUES:     usize = 16;
+
+pub def Phase: u8;
+
+pub val PHASE_START:  Phase = 1;
+pub val PHASE_FINISH: Phase = 2;
+pub val PHASE_ERROR:  Phase = 3;
+
+pub def Outcome: u8;
+
+pub val OUTCOME_PENDING:   Outcome = 1;
+pub val OUTCOME_COMPLETED: Outcome = 2;
+pub val OUTCOME_FAILED:    Outcome = 3;
+pub val OUTCOME_CANCELLED: Outcome = 4;
+pub val OUTCOME_TIMED_OUT: Outcome = 5;
+
+pub def Truncation: u8;
+
+pub val TRUNCATE_REJECT: Truncation = 1;
+pub val TRUNCATE_ELIDE:  Truncation = 2;
+
+pub def RecordStatus: u8;
+
+pub val RECORD_OK:      RecordStatus = 1;
+pub val RECORD_INVALID: RecordStatus = 2;
+pub val RECORD_STATE:   RecordStatus = 3;
+pub val RECORD_LIMIT:   RecordStatus = 4;
+pub val RECORD_UNKNOWN: RecordStatus = 5;
+pub val RECORD_VALUE:   RecordStatus = 6;
+
+# one bounded term used for every label name and every permitted label value
+pub rec Term {
+    bytes: [64]u8;
+    len:   usize;
+}
+
+# a label carries a registered name and a value from that name's declared domain
+pub rec Label {
+    name:      Term;
+    value:     Term;
+    populated: bool;
+}
+
+# a label name is registered once with the exact value domain it may report
+pub rec LabelSpec {
+    name:            Term;
+    values:          *Term;
+    value_count:     usize;
+    max_value_bytes: usize;
+}
+
+# the closed set of label names an observer may ever see
+pub rec Vocabulary {
+    specs:       *LabelSpec;
+    len:         usize;
+    initialized: bool;
+}
+
+pub rec Policy {
+    max_target_bytes:     usize;
+    max_route_name_bytes: usize;
+    truncation:           Truncation;
+}
 
 pub rec RequestEvent {
-    request_id:  view.View;
-    method:      view.View;
-    target:      view.View;
-    route_name:  view.View;
-    status:      u16;
-    duration_ns: i64;
-    bytes_in:    u64;
-    bytes_out:   u64;
-    error_kind:  error.Kind;
+    phase:          Phase;
+    outcome:        Outcome;
+    request_id:     [64]u8;
+    request_id_len: usize;
+    method:         [32]u8;
+    method_len:     usize;
+    target:         [256]u8;
+    target_len:     usize;
+    route_name:     [128]u8;
+    route_name_len: usize;
+    status:         u16;
+    error_kind:     error.Kind;
+    started_ns:     i64;
+    duration_ns:    i64;
+    bytes_in:       u64;
+    bytes_out:      u64;
+    labels:         [8]Label;
+    label_len:      usize;
+    generation:     u64;
+    sequence:       u64;
+    truncated:      bool;
+    valid:          bool;
 }
 
 pub def StartFun:  fun(ptr, *RequestEvent);
@@ -24,4 +125,725 @@ pub rec Observer {
     start:  StartFun;
     finish: FinishFun;
     error:  ErrorFun;
+}
+
+# exactly one start and exactly one terminal event are emitted per request
+pub rec Recorder {
+    observer:    Observer;
+    vocabulary:  *Vocabulary;
+    policy:      Policy;
+    event:       RequestEvent;
+    started:     bool;
+    terminal:    bool;
+    sequence:    u64;
+    initialized: bool;
+}
+
+fun view_valid(value: view.View) bool {
+    ret value.len == 0 || value.data != nil;
+}
+
+fun printable(value: view.View) bool {
+    if (!view_valid(value)) { ret false; }
+    var i: usize = 0;
+    for (i < value.len) {
+        val byte: u8 = value.data[i];
+        if (byte < 0x21 || byte > 0x7e) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun label_name_valid(value: view.View) bool {
+    if (value.len == 0 || value.len > MAX_LABEL_NAME_BYTES || value.data == nil) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < value.len) {
+        val byte: u8 = value.data[i];
+        if (!((byte >= 'a' && byte <= 'z') || (byte >= '0' && byte <= '9')
+            || byte == '_')) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+pub fun term(output: *Term, value: view.View) bool {
+    if (output == nil || value.len == 0 || value.len > MAX_TERM_BYTES
+        || value.data == nil) { ret false; }
+    var i: usize = 0;
+    for (i < value.len) {
+        output.bytes[i] = value.data[i];
+        i = i + 1;
+    }
+    output.len = value.len;
+    ret true;
+}
+
+pub fun term_view(value: *Term) view.View {
+    if (value == nil || value.len == 0 || value.len > MAX_TERM_BYTES) {
+        ret view.view(nil, 0);
+    }
+    ret view.view(?value.bytes[0], value.len);
+}
+
+fun terms_equal(value: *Term, other: view.View) bool {
+    if (value == nil || value.len != other.len || !view_valid(other)) { ret false; }
+    var i: usize = 0;
+    for (i < value.len) {
+        if (value.bytes[i] != other.data[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun spec_valid(spec: *LabelSpec) bool {
+    if (spec == nil || !label_name_valid(term_view(?spec.name))
+        || spec.max_value_bytes == 0 || spec.max_value_bytes > MAX_TERM_BYTES
+        || spec.value_count > MAX_LABEL_VALUES
+        || (spec.value_count != 0 && spec.values == nil)) { ret false; }
+    var i: usize = 0;
+    for (i < spec.value_count) {
+        val value: view.View = term_view(?spec.values[i]);
+        if (value.len == 0 || value.len > spec.max_value_bytes || !printable(value)) {
+            ret false;
+        }
+        var previous: usize = 0;
+        for (previous < i) {
+            if (terms_equal(?spec.values[previous], value)) { ret false; }
+            previous = previous + 1;
+        }
+        i = i + 1;
+    }
+    ret true;
+}
+
+pub fun init_vocabulary(vocabulary: *Vocabulary, specs: *LabelSpec, length: usize) bool {
+    if (vocabulary == nil || vocabulary.initialized || length > MAX_LABELS
+        || (length != 0 && specs == nil)) { ret false; }
+    var i: usize = 0;
+    for (i < length) {
+        if (!spec_valid(?specs[i])) { ret false; }
+        var previous: usize = 0;
+        for (previous < i) {
+            if (terms_equal(?specs[previous].name, term_view(?specs[i].name))) {
+                ret false;
+            }
+            previous = previous + 1;
+        }
+        i = i + 1;
+    }
+    vocabulary.specs = specs;
+    vocabulary.len = length;
+    vocabulary.initialized = true;
+    ret true;
+}
+
+pub fun vocabulary_valid(vocabulary: *Vocabulary) bool {
+    if (vocabulary == nil || !vocabulary.initialized || vocabulary.len > MAX_LABELS
+        || (vocabulary.len != 0 && vocabulary.specs == nil)) { ret false; }
+    var i: usize = 0;
+    for (i < vocabulary.len) {
+        if (!spec_valid(?vocabulary.specs[i])) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun find_spec(vocabulary: *Vocabulary, name: view.View) *LabelSpec {
+    var i: usize = 0;
+    for (i < vocabulary.len) {
+        if (terms_equal(?vocabulary.specs[i].name, name)) { ret ?vocabulary.specs[i]; }
+        i = i + 1;
+    }
+    ret nil;
+}
+
+pub fun policy_default() Policy {
+    ret Policy{max_target_bytes: MAX_TARGET_BYTES,
+        max_route_name_bytes: MAX_ROUTE_NAME_BYTES, truncation: TRUNCATE_ELIDE};
+}
+
+pub fun policy_valid(policy: Policy) bool {
+    ret policy.max_target_bytes != 0 && policy.max_target_bytes <= MAX_TARGET_BYTES
+        && policy.max_route_name_bytes != 0
+        && policy.max_route_name_bytes <= MAX_ROUTE_NAME_BYTES
+        && (policy.truncation == TRUNCATE_REJECT || policy.truncation == TRUNCATE_ELIDE);
+}
+
+pub fun observer_valid(observer: Observer) bool {
+    ret observer.start::usize != 0 && observer.finish::usize != 0
+        && observer.error::usize != 0;
+}
+
+fun copy_field(input: view.View, output: *u8, limit: usize, length: *usize,
+    truncation: Truncation, truncated: *bool) bool {
+    @length = 0;
+    if (!view_valid(input)) { ret false; }
+    var count: usize = input.len;
+    if (count > limit) {
+        if (truncation != TRUNCATE_ELIDE) { ret false; }
+        count = limit;
+        @truncated = true;
+    }
+    var i: usize = 0;
+    for (i < count) {
+        output[i] = input.data[i];
+        i = i + 1;
+    }
+    @length = count;
+    ret true;
+}
+
+pub fun event_request_id(event: *RequestEvent) view.View {
+    if (event == nil || event.request_id_len == 0) { ret view.view(nil, 0); }
+    ret view.view(?event.request_id[0], event.request_id_len);
+}
+
+pub fun event_method(event: *RequestEvent) view.View {
+    if (event == nil || event.method_len == 0) { ret view.view(nil, 0); }
+    ret view.view(?event.method[0], event.method_len);
+}
+
+pub fun event_target(event: *RequestEvent) view.View {
+    if (event == nil || event.target_len == 0) { ret view.view(nil, 0); }
+    ret view.view(?event.target[0], event.target_len);
+}
+
+pub fun event_route_name(event: *RequestEvent) view.View {
+    if (event == nil || event.route_name_len == 0) { ret view.view(nil, 0); }
+    ret view.view(?event.route_name[0], event.route_name_len);
+}
+
+pub fun event_label(event: *RequestEvent, name: view.View) view.View {
+    if (event == nil || event.label_len > MAX_LABELS) { ret view.view(nil, 0); }
+    var i: usize = 0;
+    for (i < event.label_len) {
+        if (event.labels[i].populated && terms_equal(?event.labels[i].name, name)) {
+            ret term_view(?event.labels[i].value);
+        }
+        i = i + 1;
+    }
+    ret view.view(nil, 0);
+}
+
+pub fun init_recorder(recorder: *Recorder, observer: Observer,
+    vocabulary: *Vocabulary, policy: Policy) bool {
+    if (recorder == nil || recorder.initialized || !observer_valid(observer)
+        || !vocabulary_valid(vocabulary) || !policy_valid(policy)) { ret false; }
+    recorder.observer = observer;
+    recorder.vocabulary = vocabulary;
+    recorder.policy = policy;
+    recorder.started = false;
+    recorder.terminal = false;
+    recorder.sequence = 0;
+    recorder.event.valid = false;
+    recorder.initialized = true;
+    ret true;
+}
+
+fun recorder_ready(recorder: *Recorder) bool {
+    ret recorder != nil && recorder.initialized && observer_valid(recorder.observer)
+        && vocabulary_valid(recorder.vocabulary) && policy_valid(recorder.policy);
+}
+
+fun clear_event(recorder: *Recorder) {
+    recorder.event.phase = PHASE_START;
+    recorder.event.outcome = OUTCOME_PENDING;
+    recorder.event.request_id_len = 0;
+    recorder.event.method_len = 0;
+    recorder.event.target_len = 0;
+    recorder.event.route_name_len = 0;
+    recorder.event.status = 0;
+    recorder.event.error_kind = 0;
+    recorder.event.started_ns = 0;
+    recorder.event.duration_ns = 0;
+    recorder.event.bytes_in = 0;
+    recorder.event.bytes_out = 0;
+    recorder.event.label_len = 0;
+    recorder.event.generation = 0;
+    recorder.event.sequence = 0;
+    recorder.event.truncated = false;
+    recorder.event.valid = false;
+    var i: usize = 0;
+    for (i < MAX_LABELS) {
+        recorder.event.labels[i].populated = false;
+        i = i + 1;
+    }
+}
+
+pub fun begin(recorder: *Recorder, request_context: *context.Context,
+    started_ns: i64) RecordStatus {
+    if (!recorder_ready(recorder) || started_ns < 0) { ret RECORD_INVALID; }
+    if (recorder.started) { ret RECORD_STATE; }
+    if (!context.active(request_context)) { ret RECORD_INVALID; }
+    val request: *message.Request = context.request(request_context);
+    if (request == nil || recorder.sequence == 18446744073709551615) {
+        ret RECORD_INVALID;
+    }
+    clear_event(recorder);
+    var truncated: bool = false;
+    if (!copy_field(request_context.request_id, ?recorder.event.request_id[0],
+            MAX_REQUEST_ID_BYTES, ?recorder.event.request_id_len, TRUNCATE_REJECT,
+            ?truncated)
+        || !copy_field(request.method.token, ?recorder.event.method[0],
+            MAX_METHOD_BYTES, ?recorder.event.method_len, TRUNCATE_REJECT, ?truncated)
+        || !copy_field(request.target.raw, ?recorder.event.target[0],
+            recorder.policy.max_target_bytes, ?recorder.event.target_len,
+            recorder.policy.truncation, ?truncated)) {
+        clear_event(recorder);
+        ret RECORD_LIMIT;
+    }
+    recorder.sequence = recorder.sequence + 1;
+    recorder.event.truncated = truncated;
+    recorder.event.started_ns = started_ns;
+    recorder.event.generation = request_context.generation;
+    recorder.event.sequence = recorder.sequence;
+    recorder.event.valid = true;
+    recorder.started = true;
+    recorder.terminal = false;
+    recorder.observer.start(recorder.observer.ctx, ?recorder.event);
+    ret RECORD_OK;
+}
+
+pub fun set_route(recorder: *Recorder, name: view.View) RecordStatus {
+    if (!recorder_ready(recorder)) { ret RECORD_INVALID; }
+    if (!recorder.started || recorder.terminal) { ret RECORD_STATE; }
+    if (name.len == 0 || !printable(name)) { ret RECORD_INVALID; }
+    var truncated: bool = false;
+    if (!copy_field(name, ?recorder.event.route_name[0],
+        recorder.policy.max_route_name_bytes, ?recorder.event.route_name_len,
+        recorder.policy.truncation, ?truncated)) { ret RECORD_LIMIT; }
+    if (truncated) { recorder.event.truncated = true; }
+    ret RECORD_OK;
+}
+
+# a label name outside the vocabulary is refused, so cardinality stays fixed
+pub fun set_label(recorder: *Recorder, name: view.View, value: view.View) RecordStatus {
+    if (!recorder_ready(recorder)) { ret RECORD_INVALID; }
+    if (!recorder.started || recorder.terminal) { ret RECORD_STATE; }
+    if (!label_name_valid(name)) { ret RECORD_INVALID; }
+    val spec: *LabelSpec = find_spec(recorder.vocabulary, name);
+    if (spec == nil) { ret RECORD_UNKNOWN; }
+    if (value.len == 0 || value.len > spec.max_value_bytes || !printable(value)) {
+        ret RECORD_VALUE;
+    }
+    if (spec.value_count != 0) {
+        var permitted: bool = false;
+        var i: usize = 0;
+        for (i < spec.value_count) {
+            if (terms_equal(?spec.values[i], value)) { permitted = true; }
+            i = i + 1;
+        }
+        if (!permitted) { ret RECORD_VALUE; }
+    }
+    var slot: usize = recorder.event.label_len;
+    var i: usize = 0;
+    for (i < recorder.event.label_len) {
+        if (terms_equal(?recorder.event.labels[i].name, name)) { slot = i; }
+        i = i + 1;
+    }
+    if (slot == recorder.event.label_len) {
+        if (recorder.event.label_len >= recorder.vocabulary.len) { ret RECORD_LIMIT; }
+        if (!term(?recorder.event.labels[slot].name, name)) { ret RECORD_INVALID; }
+        recorder.event.label_len = recorder.event.label_len + 1;
+    }
+    if (!term(?recorder.event.labels[slot].value, value)) { ret RECORD_INVALID; }
+    recorder.event.labels[slot].populated = true;
+    ret RECORD_OK;
+}
+
+pub fun record_transfer(recorder: *Recorder, bytes_in: u64,
+    bytes_out: u64) RecordStatus {
+    if (!recorder_ready(recorder)) { ret RECORD_INVALID; }
+    if (!recorder.started || recorder.terminal) { ret RECORD_STATE; }
+    recorder.event.bytes_in = bytes_in;
+    recorder.event.bytes_out = bytes_out;
+    ret RECORD_OK;
+}
+
+fun settle(recorder: *Recorder, phase: Phase, outcome: Outcome, status_code: u16,
+    now_ns: i64) bool {
+    if (now_ns < recorder.event.started_ns) { ret false; }
+    recorder.event.phase = phase;
+    recorder.event.outcome = outcome;
+    recorder.event.status = status_code;
+    recorder.event.duration_ns = now_ns - recorder.event.started_ns;
+    recorder.event.valid = true;
+    recorder.terminal = true;
+    ret true;
+}
+
+pub fun finish(recorder: *Recorder, status_code: u16, now_ns: i64) RecordStatus {
+    if (!recorder_ready(recorder)) { ret RECORD_INVALID; }
+    if (!recorder.started || recorder.terminal) { ret RECORD_STATE; }
+    if (!settle(recorder, PHASE_FINISH, OUTCOME_COMPLETED, status_code, now_ns)) {
+        ret RECORD_INVALID;
+    }
+    recorder.observer.finish(recorder.observer.ctx, ?recorder.event);
+    ret RECORD_OK;
+}
+
+pub fun cancelled(recorder: *Recorder, reason: cancel.Reason, status_code: u16,
+    now_ns: i64) RecordStatus {
+    if (!recorder_ready(recorder)) { ret RECORD_INVALID; }
+    if (!recorder.started || recorder.terminal) { ret RECORD_STATE; }
+    var outcome: Outcome = OUTCOME_CANCELLED;
+    if (reason == cancel.TIMED_OUT) { outcome = OUTCOME_TIMED_OUT; }
+    or (reason != cancel.CANCELLED) { ret RECORD_INVALID; }
+    if (!settle(recorder, PHASE_FINISH, outcome, status_code, now_ns)) {
+        ret RECORD_INVALID;
+    }
+    recorder.observer.finish(recorder.observer.ctx, ?recorder.event);
+    ret RECORD_OK;
+}
+
+pub fun failed(recorder: *Recorder, app_error: error.AppError, status_code: u16,
+    now_ns: i64) RecordStatus {
+    if (!recorder_ready(recorder)) { ret RECORD_INVALID; }
+    if (!recorder.started || recorder.terminal) { ret RECORD_STATE; }
+    if (app_error.kind < error.BAD_REQUEST || app_error.kind > error.CANCELLED) {
+        ret RECORD_INVALID;
+    }
+    if (!settle(recorder, PHASE_ERROR, OUTCOME_FAILED, status_code, now_ns)) {
+        ret RECORD_INVALID;
+    }
+    recorder.event.error_kind = app_error.kind;
+    recorder.observer.error(recorder.observer.ctx, ?recorder.event, app_error);
+    ret RECORD_OK;
+}
+
+# the middleware outcome selects exactly one terminal event
+pub fun observe_execution(recorder: *Recorder, outcome: middleware.Outcome,
+    reason: cancel.Reason, status_code: u16, now_ns: i64) RecordStatus {
+    if (!recorder_ready(recorder)) { ret RECORD_INVALID; }
+    if (outcome.status == middleware.EXECUTION_CANCELLED) {
+        ret cancelled(recorder, reason, status_code, now_ns);
+    }
+    if (outcome.status == middleware.EXECUTION_ERROR_RENDERED
+        || outcome.status == middleware.EXECUTION_ERROR_UNMAPPED) {
+        ret failed(recorder, outcome.app_error, status_code, now_ns);
+    }
+    if (outcome.status == middleware.EXECUTION_RESPOND
+        || outcome.status == middleware.EXECUTION_NEXT) {
+        ret finish(recorder, status_code, now_ns);
+    }
+    ret RECORD_INVALID;
+}
+
+# the exchange completion carries the authoritative transfer counters
+pub fun observe_completion(recorder: *Recorder,
+    completion: exchange.Completion) RecordStatus {
+    ret record_transfer(recorder, completion.bytes_in, completion.bytes_out);
+}
+
+pub fun release(recorder: *Recorder) bool {
+    if (recorder == nil || !recorder.initialized) { ret false; }
+    if (recorder.started && !recorder.terminal) { ret false; }
+    clear_event(recorder);
+    recorder.started = false;
+    recorder.terminal = false;
+    ret true;
+}
+
+pub fun recorder_event(recorder: *Recorder) *RequestEvent {
+    if (recorder == nil || !recorder.initialized || !recorder.event.valid) { ret nil; }
+    ret ?recorder.event;
+}
+
+rec Fixture {
+    scope:             cancel.Scope;
+    request_body:      body.Reader;
+    request:           message.Request;
+    response_fields:   [8]field.Field;
+    response_trailers: [4]field.Field;
+    response:          message.Response;
+    informationals:    [2]message.Informational;
+    exchange:          exchange.Exchange;
+    allocation_bytes:  [512]u8;
+    allocation_state:  fixed_allocator.FixedState;
+    allocator:         A.Allocator;
+    context:           context.Context;
+    owner:             i64;
+}
+
+fun init_fixture(state: *Fixture, generation: u64, path: view.View,
+    request_id: view.View) bool {
+    if (state == nil || !cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0})) {
+        ret false;
+    }
+    if (O.is_some[*u8](fixed_allocator.make(?state.allocator, ?state.allocation_state,
+        ?state.allocation_bytes[0], 512))) { ret false; }
+    val configured: message.Limits = message.limits_default();
+    val request_fields: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    val request_trailers: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    state.request_body = body.empty_reader(generation);
+    val metadata: message.Metadata = message.Metadata{
+        version: message.version_h1(1, 1), secure: true, early_data: false,
+        peer: message.unspecified_endpoint(), local: message.unspecified_endpoint(),
+        received_at: time.Time{sec: 1, nsec: 0}, has_deadline: false,
+        deadline: time.Time{sec: 0, nsec: 0}, request_index: 1};
+    if (!message.init_request(?state.request, method.from_kind(method.GET),
+        target.origin(path, path, view.view(nil, 0)), metadata, request_fields,
+        request_trailers, ?state.request_body, generation, configured)) { ret false; }
+    if (!message.init_response(?state.response, ?state.response_fields[0], 8,
+        ?state.response_trailers[0], 4, generation, configured)) { ret false; }
+    if (!exchange.init(?state.exchange, ?state.request, ?state.response,
+        ?state.informationals[0], 2, ?state.scope, generation, configured)
+        || !exchange.begin(?state.exchange)) { ret false; }
+    state.owner = 1;
+    ret context.bind(?state.context, ?state.exchange,
+        context.Params{items: nil, len: 0, generation: generation}, 4, ?state.allocator,
+        ?state.owner, 3, nil, request_id, MAX_REQUEST_ID_BYTES);
+}
+
+fun release_fixture(state: *Fixture) bool {
+    ret context.unbind(?state.context, ?state.owner, 3) && cancel.destroy(?state.scope);
+}
+
+rec Sink {
+    starts:      usize;
+    finishes:    usize;
+    errors:      usize;
+    last_phase:  Phase;
+    last_outcome: Outcome;
+    last_status: u16;
+    last_kind:   error.Kind;
+    last_duration: i64;
+    last_labels: usize;
+    last_route:  usize;
+    truncated:   bool;
+}
+
+fun sink_start(ctx: ptr, event: *RequestEvent) {
+    val state: *Sink = ctx::*Sink;
+    state.starts = state.starts + 1;
+    state.last_phase = event.phase;
+    state.last_outcome = event.outcome;
+    state.truncated = event.truncated;
+}
+
+fun sink_finish(ctx: ptr, event: *RequestEvent) {
+    val state: *Sink = ctx::*Sink;
+    state.finishes = state.finishes + 1;
+    state.last_phase = event.phase;
+    state.last_outcome = event.outcome;
+    state.last_status = event.status;
+    state.last_duration = event.duration_ns;
+    state.last_labels = event.label_len;
+    state.last_route = event.route_name_len;
+}
+
+fun sink_error(ctx: ptr, event: *RequestEvent, app_error: error.AppError) {
+    val state: *Sink = ctx::*Sink;
+    state.errors = state.errors + 1;
+    state.last_phase = event.phase;
+    state.last_outcome = event.outcome;
+    state.last_status = event.status;
+    state.last_kind = event.error_kind;
+}
+
+fun sink_observer(state: *Sink) Observer {
+    ret Observer{ctx: state::ptr, start: sink_start, finish: sink_finish,
+        error: sink_error};
+}
+
+fun same(actual: view.View, expected: view.View) bool {
+    if (actual.len != expected.len) { ret false; }
+    var i: usize = 0;
+    for (i < actual.len) {
+        if (actual.data[i] != expected.data[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun build_vocabulary(vocabulary: *Vocabulary, specs: *LabelSpec, values: *Term) bool {
+    if (!term(?values[0], view.view("get", 3)) || !term(?values[1], view.view("post", 4))
+        || !term(?specs[0].name, view.view("verb", 4))
+        || !term(?specs[1].name, view.view("tenant", 6))) { ret false; }
+    specs[0].values = values;
+    specs[0].value_count = 2;
+    specs[0].max_value_bytes = 8;
+    specs[1].values = nil;
+    specs[1].value_count = 0;
+    specs[1].max_value_bytes = 16;
+    ret init_vocabulary(vocabulary, specs, 2);
+}
+
+test "laurel.observability: label names and values have fixed cardinality" {
+    var values: [2]Term;
+    var specs: [2]LabelSpec;
+    var vocabulary: Vocabulary;
+    if (!build_vocabulary(?vocabulary, ?specs[0], ?values[0])
+        || !vocabulary_valid(?vocabulary)) { ret 1; }
+    var duplicate_specs: [2]LabelSpec;
+    var duplicate: Vocabulary;
+    if (!term(?duplicate_specs[0].name, view.view("verb", 4))
+        || !term(?duplicate_specs[1].name, view.view("verb", 4))) { ret 2; }
+    duplicate_specs[0].values = nil;
+    duplicate_specs[0].value_count = 0;
+    duplicate_specs[0].max_value_bytes = 8;
+    duplicate_specs[1].values = nil;
+    duplicate_specs[1].value_count = 0;
+    duplicate_specs[1].max_value_bytes = 8;
+    if (init_vocabulary(?duplicate, ?duplicate_specs[0], 2)) { ret 3; }
+    var uppercase: Vocabulary;
+    var uppercase_specs: [1]LabelSpec;
+    if (!term(?uppercase_specs[0].name, view.view("Verb", 4))) { ret 4; }
+    uppercase_specs[0].values = nil;
+    uppercase_specs[0].value_count = 0;
+    uppercase_specs[0].max_value_bytes = 8;
+    if (init_vocabulary(?uppercase, ?uppercase_specs[0], 1)) { ret 5; }
+    var state: Fixture;
+    if (!init_fixture(?state, 11, view.view("/orders", 7),
+        view.view("request-11", 10))) { ret 6; }
+    var sink: Sink;
+    var recorder: Recorder;
+    if (!init_recorder(?recorder, sink_observer(?sink), ?vocabulary, policy_default())
+        || begin(?recorder, ?state.context, 0) != RECORD_OK) { ret 7; }
+    if (set_label(?recorder, view.view("verb", 4), view.view("get", 3)) != RECORD_OK
+        || set_label(?recorder, view.view("tenant", 6), view.view("acme", 4))
+            != RECORD_OK || recorder.event.label_len != 2) { ret 8; }
+    if (set_label(?recorder, view.view("verb", 4), view.view("patch", 5)) != RECORD_VALUE
+        || set_label(?recorder, view.view("region", 6), view.view("eu", 2))
+            != RECORD_UNKNOWN
+        || recorder.event.label_len != 2) { ret 9; }
+    var oversized: [17]u8;
+    var i: usize = 0;
+    for (i < 17) {
+        oversized[i] = 'x';
+        i = i + 1;
+    }
+    if (set_label(?recorder, view.view("tenant", 6), view.view(?oversized[0], 17))
+            != RECORD_VALUE
+        || set_label(?recorder, view.view("tenant", 6), view.view("a b", 3))
+            != RECORD_VALUE
+        || recorder.event.label_len != 2) { ret 10; }
+    if (set_label(?recorder, view.view("verb", 4), view.view("post", 4)) != RECORD_OK
+        || recorder.event.label_len != 2
+        || !same(event_label(?recorder.event, view.view("verb", 4)),
+            view.view("post", 4))
+        || !same(event_label(?recorder.event, view.view("tenant", 6)),
+            view.view("acme", 4))
+        || event_label(?recorder.event, view.view("region", 6)).len != 0) { ret 11; }
+    if (finish(?recorder, 200, 4) != RECORD_OK || sink.last_labels != 2) { ret 12; }
+    if (!release_fixture(?state)) { ret 13; }
+    ret 0;
+}
+
+test "laurel.observability: one start and one terminal event per request" {
+    var values: [2]Term;
+    var specs: [2]LabelSpec;
+    var vocabulary: Vocabulary;
+    var sink: Sink;
+    var recorder: Recorder;
+    if (!build_vocabulary(?vocabulary, ?specs[0], ?values[0])
+        || !init_recorder(?recorder, sink_observer(?sink), ?vocabulary,
+            policy_default())) { ret 1; }
+    var completed: Fixture;
+    if (!init_fixture(?completed, 21, view.view("/a", 2),
+        view.view("request-21", 10))) { ret 2; }
+    if (begin(?recorder, ?completed.context, 10) != RECORD_OK || sink.starts != 1
+        || sink.last_phase != PHASE_START || sink.last_outcome != OUTCOME_PENDING) {
+        ret 3;
+    }
+    if (begin(?recorder, ?completed.context, 10) != RECORD_STATE || sink.starts != 1) {
+        ret 4;
+    }
+    if (set_route(?recorder, view.view("orders.index", 12)) != RECORD_OK
+        || record_transfer(?recorder, 7, 19) != RECORD_OK) { ret 5; }
+    if (finish(?recorder, 200, 25) != RECORD_OK || sink.finishes != 1
+        || sink.last_phase != PHASE_FINISH || sink.last_outcome != OUTCOME_COMPLETED
+        || sink.last_status != 200 || sink.last_duration != 15
+        || sink.last_route != 12 || recorder.event.bytes_in != 7
+        || recorder.event.bytes_out != 19) { ret 6; }
+    if (finish(?recorder, 200, 30) != RECORD_STATE
+        || failed(?recorder, error.make(error.INTERNAL, 500, "internal server error",
+            "late", false), 500, 30) != RECORD_STATE
+        || sink.finishes != 1 || sink.errors != 0) { ret 7; }
+    if (!release(?recorder) || !release_fixture(?completed)) { ret 8; }
+    var faulted: Fixture;
+    if (!init_fixture(?faulted, 22, view.view("/b", 2),
+        view.view("request-22", 10))) { ret 9; }
+    if (begin(?recorder, ?faulted.context, 0) != RECORD_OK || sink.starts != 2) {
+        ret 10;
+    }
+    val outcome: middleware.Outcome = middleware.Outcome{
+        status: middleware.EXECUTION_ERROR_RENDERED, action: 0,
+        app_error: error.make(error.NOT_FOUND, 404, "not found", "absent", false),
+        render_error: error.render_failure("none")};
+    if (observe_execution(?recorder, outcome, cancel.ACTIVE, 404, 6) != RECORD_OK
+        || sink.errors != 1 || sink.last_phase != PHASE_ERROR
+        || sink.last_outcome != OUTCOME_FAILED || sink.last_kind != error.NOT_FOUND
+        || sink.last_status != 404 || sink.finishes != 1) { ret 11; }
+    if (!release(?recorder) || !release_fixture(?faulted)) { ret 12; }
+    var cancelled_fixture: Fixture;
+    if (!init_fixture(?cancelled_fixture, 23, view.view("/c", 2),
+        view.view("request-23", 10))) { ret 13; }
+    if (begin(?recorder, ?cancelled_fixture.context, 0) != RECORD_OK) { ret 14; }
+    val stopped: middleware.Outcome = middleware.Outcome{
+        status: middleware.EXECUTION_CANCELLED, action: 0,
+        app_error: error.make(error.CANCELLED, 408, "request cancelled", "stop", false),
+        render_error: error.render_failure("none")};
+    if (observe_execution(?recorder, stopped, cancel.TIMED_OUT, 408, 3) != RECORD_OK
+        || sink.finishes != 2 || sink.last_outcome != OUTCOME_TIMED_OUT
+        || sink.last_status != 408) { ret 15; }
+    if (!release(?recorder) || !release_fixture(?cancelled_fixture)) { ret 16; }
+    ret 0;
+}
+
+test "laurel.observability: request fields have fixed size policies" {
+    var values: [2]Term;
+    var specs: [2]LabelSpec;
+    var vocabulary: Vocabulary;
+    if (!build_vocabulary(?vocabulary, ?specs[0], ?values[0])) { ret 1; }
+    var long_path: [40]u8;
+    long_path[0] = '/';
+    var i: usize = 1;
+    for (i < 40) {
+        long_path[i] = 'p';
+        i = i + 1;
+    }
+    var state: Fixture;
+    if (!init_fixture(?state, 31, view.view(?long_path[0], 40),
+        view.view("request-31", 10))) { ret 2; }
+    var sink: Sink;
+    var recorder: Recorder;
+    var elide: Policy = policy_default();
+    elide.max_target_bytes = 16;
+    elide.max_route_name_bytes = 8;
+    if (!init_recorder(?recorder, sink_observer(?sink), ?vocabulary, elide)
+        || begin(?recorder, ?state.context, 0) != RECORD_OK) { ret 3; }
+    if (event_target(?recorder.event).len != 16 || !recorder.event.truncated
+        || !sink.truncated
+        || !same(event_request_id(?recorder.event), view.view("request-31", 10))
+        || !same(event_method(?recorder.event), view.view("GET", 3))) { ret 4; }
+    if (set_route(?recorder, view.view("orders.index", 12)) != RECORD_OK
+        || event_route_name(?recorder.event).len != 8) { ret 5; }
+    if (finish(?recorder, 200, 1) != RECORD_OK || !release(?recorder)) { ret 6; }
+    var reject: Policy = policy_default();
+    reject.max_target_bytes = 16;
+    reject.truncation = TRUNCATE_REJECT;
+    var strict_sink: Sink;
+    var strict: Recorder;
+    if (!init_recorder(?strict, sink_observer(?strict_sink), ?vocabulary, reject)
+        || begin(?strict, ?state.context, 0) != RECORD_LIMIT
+        || strict_sink.starts != 0 || strict.started) { ret 7; }
+    var invalid: Policy = policy_default();
+    invalid.max_target_bytes = 0;
+    var refused: Recorder;
+    if (init_recorder(?refused, sink_observer(?sink), ?vocabulary, invalid)) { ret 8; }
+    var oversized_id: [80]u8;
+    i = 0;
+    for (i < 80) {
+        oversized_id[i] = 'i';
+        i = i + 1;
+    }
+    var wide: Fixture;
+    if (init_fixture(?wide, 32, view.view("/d", 2), view.view(?oversized_id[0], 80))) {
+        ret 9;
+    }
+    if (!cancel.destroy(?wide.scope) || !release_fixture(?state)) { ret 10; }
+    ret 0;
 }

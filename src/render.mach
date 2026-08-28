@@ -190,6 +190,15 @@ pub fun media_valid(media: *Media) bool {
         && field.valid_value(view.view(?media.header[0], media.header_len));
 }
 
+pub fun release_media(media: *Media) bool {
+    if (media == nil) { ret false; }
+    media.initialized = false;
+    media.header_len = 0;
+    media.type_len = 0;
+    media.charset_len = 0;
+    ret true;
+}
+
 pub fun media_header(media: *Media) view.View {
     if (!media_valid(media)) { ret view.view(nil, 0); }
     ret view.view(?media.header[0], media.header_len);
@@ -468,6 +477,16 @@ pub fun fixed_body(state: *Fixed) *body.Reader {
     ret ?state.reader;
 }
 
+# storage is reusable only once its body can no longer be read
+pub fun release_fixed(state: *Fixed) bool {
+    if (state == nil) { ret false; }
+    if (state.initialized && !body.reader_terminal_state(?state.reader)) { ret false; }
+    state.initialized = false;
+    state.offset = 0;
+    state.generation = 0;
+    ret true;
+}
+
 fun source_valid(source: Source) bool {
     ret source.produce::usize != 0 && source.resume::usize != 0 && source.settle::usize != 0;
 }
@@ -577,6 +596,18 @@ pub fun init_stream(state: *Stream, source: Source, max_bytes: u64, generation: 
 pub fun stream_body(state: *Stream) *body.Reader {
     if (state == nil || !state.initialized) { ret nil; }
     ret ?state.reader;
+}
+
+pub fun release_stream(state: *Stream) bool {
+    if (state == nil) { ret false; }
+    if (state.initialized && !body.reader_terminal_state(?state.reader)) { ret false; }
+    state.initialized = false;
+    state.produced = 0;
+    state.pending_output = nil;
+    state.pending_capacity = 0;
+    state.ended = false;
+    state.generation = 0;
+    ret true;
 }
 
 pub fun stream_produced(state: *Stream) u64 {
