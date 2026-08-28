@@ -18,7 +18,8 @@ The framework has no global application registry, hidden allocator, mandatory te
 - `error` owns bounded failure text and maps strict UTF-8 public messages to fail-closed HTTP responses.
 - `session` separates session lifecycle, protected cookie encoding, and durable storage.
 - `security` defines response header, CSRF, origin, and authentication policy hooks.
-- `form` and `upload` keep bounded parsing and streamed file storage separate.
+- `form`, `multipart`, and `upload` keep bounded parsing, request-wide upload
+  transactions, and streamed file storage separate.
 - `render` converts a model into a response body without coupling the framework to a template engine.
 - `observability` reports request events through application-owned logging and metrics callbacks.
 - `testing` defines an in-process request harness boundary.
@@ -39,9 +40,11 @@ ownership, typed routes, immutable middleware execution, value-owned errors,
 strict cookies, AEAD-protected sessions, bounded replay and nonce guards,
 generation-safe in-memory persistence, atomic session identity replacement,
 expired-record reclamation, ownership-safe manager lifecycle, and the durable
-store boundary are implemented.
-Security defaults, forms, uploads, rendering, realtime responses,
-and the in-process harness remain tracked work. Security-sensitive operations
-have no fallback implementation. See [`doc/routing.md`](doc/routing.md),
-[`doc/middleware.md`](doc/middleware.md), and
-[`doc/sessions.md`](doc/sessions.md) for the ownership contracts.
+store boundary are implemented. Security policy defaults, bounded URL-encoded
+forms, fragmented and nested multipart decoding, streamed files, atomic
+request-wide upload batches, cancellation, and durable outcome reconciliation
+are implemented. Rendering, realtime responses, and the in-process harness
+remain tracked work. Security-sensitive operations have no fallback
+implementation. See [`doc/routing.md`](doc/routing.md),
+[`doc/middleware.md`](doc/middleware.md), [`doc/sessions.md`](doc/sessions.md),
+and [`doc/input.md`](doc/input.md) for the ownership contracts.
