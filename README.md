@@ -6,7 +6,7 @@ The application foundation is implemented. Applications assemble caller-owned pr
 
 Production scope includes typed handlers, middleware, secure sessions and cookies, forms, streamed uploads, rendering, service providers, application lifecycle, structured failures, observability, in-process tests, streaming responses, server-sent events, and WebSockets. Database clients, template engines, queues, and identity systems remain replaceable providers rather than mandatory framework subsystems.
 
-The framework has no global application registry, hidden allocator, mandatory template language, mandatory persistence layer, or server-specific connection state.
+The framework has no global application registry, hidden allocator, mandatory template language, mandatory persistence layer, or server-specific connection state. Its one piece of process-wide state is a bounded module-private table inside `security.csrf` that maps an opaque handle to a caller-owned key ring, which is what keeps key material off every public type. See [`doc/security.md`](doc/security.md).
 
 ## Boundaries
 
@@ -18,7 +18,8 @@ The framework has no global application registry, hidden allocator, mandatory te
 - `error` owns bounded failure text and maps strict UTF-8 public messages to fail-closed HTTP responses.
 - `session` separates session lifecycle, protected cookie encoding, and durable storage.
 - `security` defines bounded response headers, origin enforcement,
-  HMAC-protected CSRF tokens, authentication ownership, and redirect policy.
+  HMAC-protected CSRF tokens addressed by an opaque handle so key material
+  never reaches a public type, authentication ownership, and redirect policy.
 - `form`, `multipart`, and `upload` keep bounded parsing, request-wide upload
   transactions, and streamed file storage separate.
 - `render` converts a model into a bounded response body, with explicit media

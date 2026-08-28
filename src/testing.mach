@@ -31,8 +31,14 @@ use laurel.observability;
 use laurel.provider;
 use laurel.render;
 use laurel.router;
+use laurel.cookie;
+use laurel.form;
+use laurel.multipart;
+use laurel.realtime;
 use laurel.security;
+use laurel.security.csrf;
 use laurel.session;
+use laurel.upload;
 use http_router: http.router.router;
 
 pub val DRAIN_SCRATCH_BYTES: usize = 256;
@@ -1453,5 +1459,67 @@ test "laurel.testing: admission follows the driven application lifecycle" {
         || init(?refused, ?fixture.application, ?fixture.matcher, nil, invalid,
             limits, DEFAULT_BODY_POLLS)) { ret 9; }
     if (!release_application(?fixture)) { ret 10; }
+    ret 0;
+}
+
+# Every type an integrator holds must erase to the untyped `ptr`, because
+# service and completion callbacks carry their state that way. A pointer that
+# transitively reaches secret-welded storage cannot be erased, so one key on a
+# public record silently makes the whole consumer graph unerasable. These
+# helpers are the compile-time assertion; they never dereference their argument.
+#
+# `csrf.KeyRing` is deliberately absent: it owns key material and must keep
+# refusing to erase.
+fun erase_app(value: *app.App) ptr { ret value::ptr; }
+fun erase_assembly(value: *app.Assembly) ptr { ret value::ptr; }
+fun erase_context(value: *context.Context) ptr { ret value::ptr; }
+fun erase_handler(value: *handler.Handler) ptr { ret value::ptr; }
+fun erase_router(value: *router.Router) ptr { ret value::ptr; }
+fun erase_stack(value: *middleware.Stack) ptr { ret value::ptr; }
+fun erase_mapper(value: *error.Mapper) ptr { ret value::ptr; }
+fun erase_default_errors(value: *error.Default) ptr { ret value::ptr; }
+fun erase_manager(value: *session.Manager) ptr { ret value::ptr; }
+fun erase_headers(value: *security.HeadersPolicy) ptr { ret value::ptr; }
+fun erase_origins(value: *security.OriginPolicy) ptr { ret value::ptr; }
+fun erase_redirects(value: *security.RedirectPolicy) ptr { ret value::ptr; }
+fun erase_authenticator(value: *security.Authenticator) ptr { ret value::ptr; }
+fun erase_protector(value: *csrf.Protector) ptr { ret value::ptr; }
+fun erase_csrf_handle(value: *csrf.Handle) ptr { ret value::ptr; }
+fun erase_providers(value: *provider.Set) ptr { ret value::ptr; }
+fun erase_controller(value: *lifecycle.Controller) ptr { ret value::ptr; }
+fun erase_jar(value: *cookie.Jar) ptr { ret value::ptr; }
+fun erase_form(value: *form.UrlEncoded) ptr { ret value::ptr; }
+fun erase_form_body(value: *form.BodyParser) ptr { ret value::ptr; }
+fun erase_multipart(value: *multipart.Parser) ptr { ret value::ptr; }
+fun erase_upload(value: *upload.Upload) ptr { ret value::ptr; }
+fun erase_media(value: *render.Media) ptr { ret value::ptr; }
+fun erase_fixed(value: *render.Fixed) ptr { ret value::ptr; }
+fun erase_render_stream(value: *render.Stream) ptr { ret value::ptr; }
+fun erase_renderer(value: *render.Renderer) ptr { ret value::ptr; }
+fun erase_realtime_stream(value: *realtime.Stream) ptr { ret value::ptr; }
+fun erase_socket(value: *realtime.Socket) ptr { ret value::ptr; }
+fun erase_recorder(value: *observability.Recorder) ptr { ret value::ptr; }
+fun erase_observer(value: *observability.Observer) ptr { ret value::ptr; }
+fun erase_harness(value: *Harness) ptr { ret value::ptr; }
+fun erase_result(value: *Result) ptr { ret value::ptr; }
+
+test "laurel.testing: every public type erases to the untyped ptr" {
+    if (erase_app(nil) != nil || erase_assembly(nil) != nil
+        || erase_context(nil) != nil || erase_handler(nil) != nil
+        || erase_router(nil) != nil || erase_stack(nil) != nil
+        || erase_mapper(nil) != nil || erase_default_errors(nil) != nil) { ret 1; }
+    if (erase_manager(nil) != nil || erase_headers(nil) != nil
+        || erase_origins(nil) != nil || erase_redirects(nil) != nil
+        || erase_authenticator(nil) != nil || erase_protector(nil) != nil
+        || erase_csrf_handle(nil) != nil) { ret 2; }
+    if (erase_providers(nil) != nil || erase_controller(nil) != nil
+        || erase_jar(nil) != nil || erase_form(nil) != nil
+        || erase_form_body(nil) != nil || erase_multipart(nil) != nil
+        || erase_upload(nil) != nil) { ret 3; }
+    if (erase_media(nil) != nil || erase_fixed(nil) != nil
+        || erase_render_stream(nil) != nil || erase_renderer(nil) != nil
+        || erase_realtime_stream(nil) != nil || erase_socket(nil) != nil) { ret 4; }
+    if (erase_recorder(nil) != nil || erase_observer(nil) != nil
+        || erase_harness(nil) != nil || erase_result(nil) != nil) { ret 5; }
     ret 0;
 }
