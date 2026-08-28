@@ -729,13 +729,26 @@ fun key_ring_valid(ring: *KeyRing) bool {
 }
 
 fun key_material_equal(left: *u8, right: *u8) bool {
-    var different: u8 = 0;
+    var left_secret: [32]^u8;
+    var right_secret: [32]^u8;
+    ct.zeroize(?left_secret[0], 32);
+    ct.zeroize(?right_secret[0], 32);
     var i: usize = 0;
     for (i < 32) {
-        different = different | (left[i] ^ right[i]);
+        left_secret[i] = left[i];
+        right_secret[i] = right[i];
         i = i + 1;
     }
-    ret different == 0;
+    ct.begin();
+    val equal: ^u8 = ct.eq_bytes(?left_secret[0], ?right_secret[0], 32);
+    ct.zeroize(?left_secret[0], 32);
+    ct.zeroize(?right_secret[0], 32);
+    if (equal:^ == 1) {
+        ct.end();
+        ret true;
+    }
+    ct.end();
+    ret false;
 }
 
 pub fun init_key_ring(ring: *KeyRing, items: *KeyGeneration, len: usize,
