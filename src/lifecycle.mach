@@ -1,12 +1,45 @@
-# application lifecycle boundary
+# deterministic caller-driven application lifecycle
 
 use R: std.types.result;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
 use std.types.view;
 
-pub def StartFun: fun(ptr) R.Result[u8, view.View];
-pub def ReadyFun: fun(ptr) u8;
-pub def DrainFun: fun(ptr, i64) R.Result[u8, view.View];
-pub def StopFun: fun(ptr) R.Result[u8, view.View];
+pub def State: u8;
+pub val ASSEMBLED: State = 1;
+pub val STARTING:  State = 2;
+pub val STARTED:   State = 3;
+pub val READY:     State = 4;
+pub val DRAINING:  State = 5;
+pub val DRAINED:   State = 6;
+pub val STOPPING:  State = 7;
+pub val STOPPED:   State = 8;
+pub val FAILED:    State = 9;
+
+pub def CallbackStatus: u8;
+pub val CALLBACK_DONE:    CallbackStatus = 1;
+pub val CALLBACK_PENDING: CallbackStatus = 2;
+
+pub def Readiness: u8;
+pub val NOT_READY:        Readiness = 1;
+pub val READY_NOW:        Readiness = 2;
+pub val READINESS_FAILED: Readiness = 3;
+
+pub def TransitionStatus: u8;
+pub val TRANSITION_OK:       TransitionStatus = 1;
+pub val TRANSITION_PENDING:  TransitionStatus = 2;
+pub val TRANSITION_INVALID:  TransitionStatus = 3;
+pub val TRANSITION_FAILED:   TransitionStatus = 4;
+
+pub val NO_COMPONENT: usize = 18446744073709551615;
+pub val NO_DEADLINE: i64 = -1;
+
+pub def StartFun: fun(ptr) R.Result[CallbackStatus, view.View];
+pub def ReadyFun: fun(ptr) Readiness;
+pub def DrainFun: fun(ptr, i64) R.Result[CallbackStatus, view.View];
+pub def StopFun: fun(ptr) R.Result[CallbackStatus, view.View];
 
 pub rec Lifecycle {
     ctx:   ptr;
@@ -16,3 +49,387 @@ pub rec Lifecycle {
     stop:  StopFun;
 }
 
+pub rec Controller {
+    items:             *Lifecycle;
+    len:               usize;
+    max_components:    usize;
+    state:             State;
+    active:            usize;
+    start_index:       usize;
+    start_pending:     bool;
+    drain_cursor:      usize;
+    drain_deadline_ns: i64;
+    stop_cursor:       usize;
+    generation:        u64;
+    failure_phase:     State;
+    failure_component: usize;
+    failure_error:     view.View;
+    cleanup_component: usize;
+    cleanup_error:     view.View;
+    valid:             bool;
+}
+
+pub rec Transition {
+    status:    TransitionStatus;
+    state:     State;
+    component: usize;
+    error:     view.View;
+}
+
+fun transition(status: TransitionStatus, controller: *Controller,
+    component: usize, error: view.View) Transition {
+    var state: State = FAILED;
+    if (controller != nil) { state = controller.state; }
+    ret Transition{status: status, state: state, component: component, error: error};
+}
+
+fun invalid(controller: *Controller) Transition {
+    ret transition(TRANSITION_INVALID, controller, NO_COMPONENT,
+        view.view("invalid lifecycle state", 23));
+}
+
+fun valid_item(item: *Lifecycle) bool {
+    ret item != nil && item.start != nil && item.ready != nil && item.drain != nil && item.stop != nil;
+}
+
+pub fun validate(controller: *Controller) bool {
+    if (controller == nil || !controller.valid || controller.len > controller.max_components
+        || (controller.len > 0 && controller.items == nil) || controller.active > controller.len
+        || controller.start_index > controller.len || controller.drain_cursor > controller.active
+        || controller.stop_cursor > controller.active) { ret false; }
+    var i: usize = 0;
+    for (i < controller.len) {
+        if (!valid_item(?controller.items[i])) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+pub fun init(controller: *Controller, items: *Lifecycle, length: usize,
+    max_components: usize) bool {
+    if (controller == nil || length == 0 || length > max_components || items == nil) { ret false; }
+    var i: usize = 0;
+    for (i < length) {
+        if (!valid_item(?items[i])) { ret false; }
+        i = i + 1;
+    }
+    controller.items = items;
+    controller.len = length;
+    controller.max_components = max_components;
+    controller.state = ASSEMBLED;
+    controller.active = 0;
+    controller.start_index = 0;
+    controller.start_pending = false;
+    controller.drain_cursor = 0;
+    controller.drain_deadline_ns = NO_DEADLINE;
+    controller.stop_cursor = 0;
+    controller.generation = 0;
+    controller.failure_phase = 0;
+    controller.failure_component = NO_COMPONENT;
+    controller.failure_error = view.view(nil, 0);
+    controller.cleanup_component = NO_COMPONENT;
+    controller.cleanup_error = view.view(nil, 0);
+    controller.valid = true;
+    ret true;
+}
+
+fun record_failure(controller: *Controller, phase: State, component: usize, error: view.View) {
+    if (controller.failure_component == NO_COMPONENT) {
+        controller.failure_phase = phase;
+        controller.failure_component = component;
+        controller.failure_error = error;
+    } or (phase == STOPPING && controller.cleanup_component == NO_COMPONENT) {
+        controller.cleanup_component = component;
+        controller.cleanup_error = error;
+    }
+}
+
+fun callback_result(controller: *Controller, phase: State, component: usize,
+    result: R.Result[CallbackStatus, view.View]) Transition {
+    if (R.is_err[CallbackStatus, view.View](result)) {
+        val error: view.View = R.unwrap_err[CallbackStatus, view.View](result);
+        record_failure(controller, phase, component, error);
+        controller.state = FAILED;
+        ret transition(TRANSITION_FAILED, controller, component, error);
+    }
+    val status: CallbackStatus = R.unwrap_ok[CallbackStatus, view.View](result);
+    if (status == CALLBACK_DONE) {
+        ret transition(TRANSITION_OK, controller, component, view.view(nil, 0));
+    }
+    if (status == CALLBACK_PENDING) {
+        ret transition(TRANSITION_PENDING, controller, component, view.view(nil, 0));
+    }
+    val error: view.View = view.view("invalid callback result", 23);
+    record_failure(controller, phase, component, error);
+    controller.state = FAILED;
+    ret transition(TRANSITION_FAILED, controller, component, error);
+}
+
+pub fun start(controller: *Controller) Transition {
+    if (!validate(controller) || (controller.state != ASSEMBLED && controller.state != STARTING)) {
+        ret invalid(controller);
+    }
+    if (controller.state == ASSEMBLED) {
+        controller.state = STARTING;
+        controller.generation = controller.generation + 1;
+    }
+    for (controller.start_index < controller.len) {
+        val index: usize = controller.start_index;
+        if (!controller.start_pending) {
+            controller.active = index + 1;
+            controller.start_pending = true;
+        }
+        val result: Transition = callback_result(controller, STARTING, index,
+            controller.items[index].start(controller.items[index].ctx));
+        if (result.status == TRANSITION_FAILED) {
+            controller.stop_cursor = controller.active;
+            ret result;
+        }
+        if (result.status == TRANSITION_PENDING) { ret result; }
+        controller.start_pending = false;
+        controller.start_index = index + 1;
+    }
+    controller.state = STARTED;
+    ret transition(TRANSITION_OK, controller, NO_COMPONENT, view.view(nil, 0));
+}
+
+pub fun poll_ready(controller: *Controller) Transition {
+    if (!validate(controller)) { ret invalid(controller); }
+    if (controller.state == READY) {
+        ret transition(TRANSITION_OK, controller, NO_COMPONENT, view.view(nil, 0));
+    }
+    if (controller.state != STARTED || controller.active != controller.len) { ret invalid(controller); }
+    var pending: bool = false;
+    var i: usize = 0;
+    for (i < controller.active) {
+        val readiness: Readiness = controller.items[i].ready(controller.items[i].ctx);
+        if (readiness == READINESS_FAILED || (readiness != NOT_READY && readiness != READY_NOW)) {
+            val error: view.View = view.view("readiness callback failed", 25);
+            record_failure(controller, READY, i, error);
+            controller.state = FAILED;
+            controller.stop_cursor = controller.active;
+            ret transition(TRANSITION_FAILED, controller, i, error);
+        }
+        if (readiness == NOT_READY) { pending = true; }
+        i = i + 1;
+    }
+    if (pending) { ret transition(TRANSITION_PENDING, controller, NO_COMPONENT, view.view(nil, 0)); }
+    controller.state = READY;
+    ret transition(TRANSITION_OK, controller, NO_COMPONENT, view.view(nil, 0));
+}
+
+pub fun drain(controller: *Controller, deadline_ns: i64) Transition {
+    if (!validate(controller) || deadline_ns < NO_DEADLINE) { ret invalid(controller); }
+    if (controller.state == STARTED || controller.state == READY) {
+        controller.state = DRAINING;
+        controller.drain_cursor = controller.active;
+        controller.drain_deadline_ns = deadline_ns;
+    } or (controller.state != DRAINING || controller.drain_deadline_ns != deadline_ns) {
+        ret invalid(controller);
+    }
+    for (controller.drain_cursor > 0) {
+        val index: usize = controller.drain_cursor - 1;
+        val result: Transition = callback_result(controller, DRAINING, index,
+            controller.items[index].drain(controller.items[index].ctx, deadline_ns));
+        if (result.status == TRANSITION_FAILED) {
+            controller.stop_cursor = controller.active;
+            ret result;
+        }
+        if (result.status == TRANSITION_PENDING) { ret result; }
+        controller.drain_cursor = index;
+    }
+    controller.state = DRAINED;
+    ret transition(TRANSITION_OK, controller, NO_COMPONENT, view.view(nil, 0));
+}
+
+pub fun stop(controller: *Controller) Transition {
+    if (!validate(controller)) { ret invalid(controller); }
+    if (controller.state == STOPPED) {
+        ret transition(TRANSITION_OK, controller, NO_COMPONENT, view.view(nil, 0));
+    }
+    if (controller.state == ASSEMBLED && controller.active == 0) {
+        controller.state = STOPPED;
+        ret transition(TRANSITION_OK, controller, NO_COMPONENT, view.view(nil, 0));
+    }
+    if (controller.state != STOPPING) {
+        if (controller.state != STARTING && controller.state != STARTED && controller.state != READY
+            && controller.state != DRAINING && controller.state != DRAINED && controller.state != FAILED) {
+            ret invalid(controller);
+        }
+        controller.state = STOPPING;
+        controller.stop_cursor = controller.active;
+    }
+    for (controller.stop_cursor > 0) {
+        val index: usize = controller.stop_cursor - 1;
+        val result: Transition = callback_result(controller, STOPPING, index,
+            controller.items[index].stop(controller.items[index].ctx));
+        if (result.status == TRANSITION_FAILED) { ret result; }
+        if (result.status == TRANSITION_PENDING) { ret result; }
+        controller.stop_cursor = index;
+        controller.active = index;
+    }
+    if (controller.failure_component != NO_COMPONENT) {
+        controller.state = FAILED;
+        ret transition(TRANSITION_FAILED, controller, controller.failure_component, controller.failure_error);
+    }
+    controller.state = STOPPED;
+    ret transition(TRANSITION_OK, controller, NO_COMPONENT, view.view(nil, 0));
+}
+
+pub fun accepting(controller: *Controller) bool {
+    ret validate(controller) && controller.state == READY;
+}
+
+pub fun terminal(controller: *Controller) bool {
+    ret validate(controller) && controller.active == 0
+        && (controller.state == STOPPED || controller.state == FAILED);
+}
+
+pub fun destroy(controller: *Controller) bool {
+    if (!terminal(controller)) { ret false; }
+    controller.items = nil;
+    controller.len = 0;
+    controller.max_components = 0;
+    controller.valid = false;
+    ret true;
+}
+
+rec TestService {
+    id:            usize;
+    start_pending: usize;
+    drain_pending: usize;
+    stop_pending:  usize;
+    readiness:     Readiness;
+    fail_start:    bool;
+    fail_drain:    bool;
+    fail_stop:     bool;
+    start_calls:   usize;
+    drain_calls:   usize;
+    stop_calls:    usize;
+}
+
+var trace: [32]usize;
+var trace_len: usize;
+
+fun trace_push(value: usize) {
+    trace[trace_len] = value;
+    trace_len = trace_len + 1;
+}
+
+fun test_start(context: ptr) R.Result[CallbackStatus, view.View] {
+    val service: *TestService = context::*TestService;
+    service.start_calls = service.start_calls + 1;
+    if (service.fail_start) { ret R.err[CallbackStatus, view.View](view.view("start failed", 12)); }
+    if (service.start_pending > 0) {
+        service.start_pending = service.start_pending - 1;
+        ret R.ok[CallbackStatus, view.View](CALLBACK_PENDING);
+    }
+    trace_push(service.id);
+    ret R.ok[CallbackStatus, view.View](CALLBACK_DONE);
+}
+
+fun test_ready(context: ptr) Readiness {
+    ret (context::*TestService).readiness;
+}
+
+fun test_drain(context: ptr, deadline_ns: i64) R.Result[CallbackStatus, view.View] {
+    val service: *TestService = context::*TestService;
+    service.drain_calls = service.drain_calls + 1;
+    if (service.fail_drain) { ret R.err[CallbackStatus, view.View](view.view("drain failed", 12)); }
+    if (service.drain_pending > 0) {
+        service.drain_pending = service.drain_pending - 1;
+        ret R.ok[CallbackStatus, view.View](CALLBACK_PENDING);
+    }
+    trace_push(100 + service.id);
+    ret R.ok[CallbackStatus, view.View](CALLBACK_DONE);
+}
+
+fun test_stop(context: ptr) R.Result[CallbackStatus, view.View] {
+    val service: *TestService = context::*TestService;
+    service.stop_calls = service.stop_calls + 1;
+    if (service.fail_stop) {
+        service.fail_stop = false;
+        ret R.err[CallbackStatus, view.View](view.view("stop failed", 11));
+    }
+    if (service.stop_pending > 0) {
+        service.stop_pending = service.stop_pending - 1;
+        ret R.ok[CallbackStatus, view.View](CALLBACK_PENDING);
+    }
+    trace_push(200 + service.id);
+    ret R.ok[CallbackStatus, view.View](CALLBACK_DONE);
+}
+
+fun test_items(states: *TestService, items: *Lifecycle, length: usize) {
+    var i: usize = 0;
+    for (i < length) {
+        items[i] = Lifecycle{ctx: (?states[i])::ptr, start: test_start, ready: test_ready,
+            drain: test_drain, stop: test_stop};
+        i = i + 1;
+    }
+}
+
+test "laurel.lifecycle: startup readiness drain and stop have fixed order" {
+    trace_len = 0;
+    var states: [2]TestService;
+    states[0].id = 1; states[0].readiness = READY_NOW;
+    states[1].id = 2; states[1].readiness = NOT_READY;
+    var items: [2]Lifecycle;
+    test_items(?states[0], ?items[0], 2);
+    var controller: Controller;
+    if (!init(?controller, ?items[0], 2, 2)) { ret 1; }
+    val started: Transition = start(?controller);
+    if (started.status != TRANSITION_OK || controller.state != STARTED || controller.active != 2
+        || trace_len != 2 || trace[0] != 1 || trace[1] != 2) { ret 2; }
+    if (poll_ready(?controller).status != TRANSITION_PENDING || accepting(?controller)) { ret 3; }
+    states[1].readiness = READY_NOW;
+    if (poll_ready(?controller).status != TRANSITION_OK || !accepting(?controller)) { ret 4; }
+    if (drain(?controller, 99).status != TRANSITION_OK || controller.state != DRAINED
+        || trace[2] != 102 || trace[3] != 101) { ret 5; }
+    if (stop(?controller).status != TRANSITION_OK || controller.state != STOPPED || controller.active != 0
+        || trace[4] != 202 || trace[5] != 201 || !terminal(?controller)) { ret 6; }
+    if (!destroy(?controller) || controller.valid) { ret 7; }
+    ret 0;
+}
+
+test "laurel.lifecycle: pending callbacks retain exact ownership" {
+    trace_len = 0;
+    var states: [2]TestService;
+    states[0].id = 1; states[0].readiness = READY_NOW; states[0].start_pending = 1;
+    states[1].id = 2; states[1].readiness = READY_NOW; states[1].stop_pending = 1;
+    var items: [2]Lifecycle;
+    test_items(?states[0], ?items[0], 2);
+    var controller: Controller;
+    init(?controller, ?items[0], 2, 2);
+    val pending_start: Transition = start(?controller);
+    if (pending_start.status != TRANSITION_PENDING || controller.state != STARTING
+        || controller.active != 1 || controller.start_index != 0) { ret 1; }
+    if (start(?controller).status != TRANSITION_OK || controller.active != 2 || trace_len != 2) { ret 2; }
+    val pending_stop: Transition = stop(?controller);
+    if (pending_stop.status != TRANSITION_PENDING || controller.state != STOPPING
+        || controller.active != 2 || controller.stop_cursor != 2) { ret 3; }
+    if (stop(?controller).status != TRANSITION_OK || controller.active != 0
+        || trace[2] != 202 || trace[3] != 201) { ret 4; }
+    ret 0;
+}
+
+test "laurel.lifecycle: failures preserve the primary cause and cleanup ownership" {
+    trace_len = 0;
+    var states: [2]TestService;
+    states[0].id = 1; states[0].readiness = READY_NOW;
+    states[1].id = 2; states[1].readiness = READY_NOW; states[1].fail_start = true;
+    var items: [2]Lifecycle;
+    test_items(?states[0], ?items[0], 2);
+    var controller: Controller;
+    init(?controller, ?items[0], 2, 2);
+    val failed: Transition = start(?controller);
+    if (failed.status != TRANSITION_FAILED || failed.component != 1 || controller.state != FAILED
+        || controller.active != 2 || controller.failure_phase != STARTING) { ret 1; }
+    states[1].fail_stop = true;
+    val cleanup_failed: Transition = stop(?controller);
+    if (cleanup_failed.status != TRANSITION_FAILED || controller.active != 2
+        || controller.cleanup_component != 1 || controller.failure_component != 1) { ret 2; }
+    val cleaned: Transition = stop(?controller);
+    if (cleaned.status != TRANSITION_FAILED || controller.active != 0 || controller.state != FAILED
+        || trace[1] != 202 || trace[2] != 201 || !terminal(?controller)) { ret 3; }
+    ret 0;
+}
