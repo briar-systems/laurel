@@ -1,36 +1,1131 @@
-# streamed upload storage contract
+# asynchronous upload transaction ownership
 
-use R: std.types.result;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.view;
 
+pub val MAX_FIELD_NAME_BYTES: usize = 256;
+pub val MAX_FILE_NAME_BYTES: usize = 1024;
+pub val MAX_CONTENT_TYPE_BYTES: usize = 256;
+
+pub def Status: u8;
+pub def Kind: u8;
+pub def Outcome: u8;
+pub def State: u8;
+
+pub val OK: Status = 1;
+pub val PENDING: Status = 2;
+pub val ERROR: Status = 3;
+pub val INVALID: Status = 4;
+pub val LIMIT: Status = 5;
+
+pub val BEGIN: Kind = 1;
+pub val WRITE: Kind = 2;
+pub val COMMIT: Kind = 3;
+pub val ABORT: Kind = 4;
+
+pub val OUTCOME_NONE: Outcome = 0;
+pub val OUTCOME_ACTIVE: Outcome = 1;
+pub val OUTCOME_COMMITTED: Outcome = 2;
+pub val OUTCOME_ABORTED: Outcome = 3;
+pub val OUTCOME_UNKNOWN: Outcome = 4;
+
+pub val UNINITIALIZED: State = 0;
+pub val READY: State = 1;
+pub val BEGINNING: State = 2;
+pub val ACTIVE: State = 3;
+pub val WRITING: State = 4;
+pub val COMMITTING: State = 5;
+pub val ABORTING: State = 6;
+pub val COMMITTED: State = 7;
+pub val ABORTED: State = 8;
+pub val UNKNOWN: State = 9;
+pub val RELEASED: State = 10;
+
 pub rec Metadata {
-    field_name:   view.View;
-    file_name:    view.View;
+    field_name: view.View;
+    file_name: view.View;
     content_type: view.View;
     declared_len: u64;
-    has_length:   u8;
+    has_length: bool;
 }
 
 pub rec Transaction {
-    ctx: ptr;
+    owner: ptr;
+    id: u64;
 }
 
 pub rec StoredFile {
-    id:   view.View;
+    id: view.View;
     size: u64;
 }
 
-pub def BeginFun:  fun(ptr, Metadata) R.Result[Transaction, str];
-pub def WriteFun:  fun(ptr, Transaction, *u8, usize) R.Result[usize, str];
-pub def CommitFun: fun(ptr, Transaction) R.Result[StoredFile, str];
-pub def AbortFun:  fun(ptr, Transaction);
+pub rec Progress {
+    status: Status;
+    kind: Kind;
+    token: u64;
+    transaction: Transaction;
+    written: usize;
+    file: StoredFile;
+    outcome: Outcome;
+    error: str;
+}
+
+pub def AliasesStateFun: fun(ptr, *u8, usize) bool;
+pub def BeginFun: fun(ptr, Metadata) Progress;
+pub def WriteFun: fun(ptr, Transaction, *u8, usize) Progress;
+pub def FinishFun: fun(ptr, Transaction) Progress;
+pub def CompleteFun: fun(ptr, u64) Progress;
 
 pub rec Store {
-    ctx:    ptr;
-    begin:  BeginFun;
-    write:  WriteFun;
-    commit: CommitFun;
-    abort:  AbortFun;
+    ctx: ptr;
+    context_size: usize;
+    aliases_state: AliasesStateFun;
+    begin: BeginFun;
+    write: WriteFun;
+    commit: FinishFun;
+    abort: FinishFun;
+    complete: CompleteFun;
+}
+
+pub rec Upload {
+    store: Store;
+    state: State;
+    transaction: Transaction;
+    file: StoredFile;
+    max_file_bytes: u64;
+    transferred: u64;
+    generation: u64;
+    pending_kind: Kind;
+    pending_token: u64;
+    pending_provider_token: u64;
+    pending_input: *u8;
+    pending_len: usize;
+    field_name: [256]u8;
+    field_name_len: usize;
+    file_name: [1024]u8;
+    file_name_len: usize;
+    content_type: [256]u8;
+    content_type_len: usize;
+    declared_len: u64;
+    has_length: bool;
+}
+
+pub rec Operation {
+    status: Status;
+    kind: Kind;
+    token: u64;
+    written: usize;
+    file: StoredFile;
+    outcome: Outcome;
+    error: str;
+}
+
+fun range_valid(data: *u8, len: usize) bool {
+    if (len == 0) { ret true; }
+    if (data == nil) { ret false; }
+    ret len - 1 <= ~(0::usize) - data::usize;
+}
+
+fun overlap(first: *u8, first_len: usize, second: *u8,
+    second_len: usize) bool {
+    if (first_len == 0 || second_len == 0) { ret false; }
+    if (!range_valid(first, first_len) || !range_valid(second, second_len)) {
+        ret true;
+    }
+    val first_start: usize = first::usize;
+    val second_start: usize = second::usize;
+    ret first_start <= second_start + second_len - 1 &&
+        second_start <= first_start + first_len - 1;
+}
+
+fun bytes_equal(first: *u8, second: *u8, len: usize) bool {
+    if (!range_valid(first, len) || !range_valid(second, len)) { ret false; }
+    var i: usize = 0;
+    for (i < len) {
+        if (first[i] != second[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun view_valid(value: view.View, maximum: usize, allow_empty: bool) bool {
+    ret (allow_empty || value.len != 0) && value.len <= maximum &&
+        range_valid(value.data, value.len);
+}
+
+fun store_shape(value: Store) bool {
+    ret value.ctx != nil && value.context_size != 0 &&
+        range_valid(value.ctx::*u8, value.context_size) &&
+        value.aliases_state::usize != 0 && value.begin::usize != 0 &&
+        value.write::usize != 0 && value.commit::usize != 0 &&
+        value.abort::usize != 0 && value.complete::usize != 0;
+}
+
+fun store_equal(first: Store, second: Store) bool {
+    ret first.ctx == second.ctx && first.context_size == second.context_size &&
+        first.aliases_state::usize == second.aliases_state::usize &&
+        first.begin::usize == second.begin::usize &&
+        first.write::usize == second.write::usize &&
+        first.commit::usize == second.commit::usize &&
+        first.abort::usize == second.abort::usize &&
+        first.complete::usize == second.complete::usize;
+}
+
+fun upload_anchor(value: *Upload) *u8 {
+    if (value == nil) { ret nil; }
+    ret (?value.store)::*u8;
+}
+
+fun store_locally_disjoint(store: Store, data: *u8, len: usize) bool {
+    ret store_shape(store) && range_valid(data, len) &&
+        !overlap(store.ctx::*u8, store.context_size, data, len);
+}
+
+fun upload_unchanged(upload: *Upload, before: *Upload) bool {
+    ret upload != nil && before != nil &&
+        store_equal(upload.store, before.store) &&
+        upload.state == before.state &&
+        upload.transaction.owner == before.transaction.owner &&
+        upload.transaction.id == before.transaction.id &&
+        upload.file.id.data == before.file.id.data &&
+        upload.file.id.len == before.file.id.len &&
+        upload.file.size == before.file.size &&
+        upload.max_file_bytes == before.max_file_bytes &&
+        upload.transferred == before.transferred &&
+        upload.generation == before.generation &&
+        upload.pending_kind == before.pending_kind &&
+        upload.pending_token == before.pending_token &&
+        upload.pending_provider_token == before.pending_provider_token &&
+        upload.pending_input == before.pending_input &&
+        upload.pending_len == before.pending_len &&
+        upload.field_name_len == before.field_name_len &&
+        upload.file_name_len == before.file_name_len &&
+        upload.content_type_len == before.content_type_len &&
+        upload.declared_len == before.declared_len &&
+        upload.has_length == before.has_length &&
+        bytes_equal(?upload.field_name[0], ?before.field_name[0],
+            MAX_FIELD_NAME_BYTES) &&
+        bytes_equal(?upload.file_name[0], ?before.file_name[0],
+            MAX_FILE_NAME_BYTES) &&
+        bytes_equal(?upload.content_type[0], ?before.content_type[0],
+            MAX_CONTENT_TYPE_BYTES);
+}
+
+fun guarded_store_alias(upload: *Upload, store: Store, data: *u8,
+    len: usize) i8 {
+    if (!store_shape(store) || !range_valid(data, len) ||
+        overlap(store.ctx::*u8, store.context_size, data, len)) { ret 1; }
+    var before: Upload = @upload;
+    val aliases: bool = store.aliases_state(store.ctx, data, len);
+    if (!upload_unchanged(upload, ?before)) { ret -1; }
+    if (aliases) { ret 1; }
+    ret 0;
+}
+
+fun transaction_empty(value: Transaction) bool {
+    ret value.owner == nil && value.id == 0;
+}
+
+fun transaction_valid(value: Transaction, store: Store) bool {
+    ret value.owner == store.ctx && value.id != 0;
+}
+
+fun metadata_valid(value: Metadata, max_file_bytes: u64) bool {
+    if (!view_valid(value.field_name, MAX_FIELD_NAME_BYTES, false) ||
+        !view_valid(value.file_name, MAX_FILE_NAME_BYTES, false) ||
+        !view_valid(value.content_type, MAX_CONTENT_TYPE_BYTES, true) ||
+        (value.has_length && value.declared_len > max_file_bytes)) { ret false; }
+    if ((value.file_name.len == 1 && value.file_name.data[0] == '.') ||
+        (value.file_name.len == 2 && value.file_name.data[0] == '.' &&
+            value.file_name.data[1] == '.')) { ret false; }
+    var i: usize = 0;
+    for (i < value.field_name.len) {
+        val current: u8 = value.field_name.data[i];
+        if (current == 0 || current == '\r' || current == '\n') { ret false; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < value.file_name.len) {
+        val current: u8 = value.file_name.data[i];
+        if (current == 0 || current == '/' || current == '\\' ||
+            current == '\r' || current == '\n' || current == ':') { ret false; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < value.content_type.len) {
+        val current: u8 = value.content_type.data[i];
+        if (current == 0 || current == '\r' || current == '\n') { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun metadata_locally_disjoint(upload: *Upload, store: Store,
+    value: Metadata) bool {
+    ret !overlap(store.ctx::*u8, store.context_size,
+            value.field_name.data, value.field_name.len) &&
+        !overlap(store.ctx::*u8, store.context_size,
+            value.file_name.data, value.file_name.len) &&
+        !overlap(store.ctx::*u8, store.context_size,
+            value.content_type.data, value.content_type.len) &&
+        !overlap(upload_anchor(upload), $size_of(Upload),
+            value.field_name.data, value.field_name.len) &&
+        !overlap(upload_anchor(upload), $size_of(Upload),
+            value.file_name.data, value.file_name.len) &&
+        !overlap(upload_anchor(upload), $size_of(Upload),
+            value.content_type.data, value.content_type.len);
+}
+
+fun copy(input: view.View, output: *u8) {
+    var i: usize = 0;
+    for (i < input.len) {
+        output[i] = input.data[i];
+        i = i + 1;
+    }
+}
+
+fun clear(output: *u8, len: usize) {
+    if (output == nil) { ret; }
+    var i: usize = 0;
+    for (i < len) {
+        output[i] = 0;
+        i = i + 1;
+    }
+}
+
+fun staged_metadata(upload: *Upload) Metadata {
+    ret Metadata{
+        field_name: view.view(?upload.field_name[0], upload.field_name_len),
+        file_name: view.view(?upload.file_name[0], upload.file_name_len),
+        content_type: view.view(?upload.content_type[0],
+            upload.content_type_len),
+        declared_len: upload.declared_len,
+        has_length: upload.has_length,
+    };
+}
+
+fun operation(status: Status, kind: Kind, outcome: Outcome,
+    error: str) Operation {
+    ret Operation{status: status, kind: kind, token: 0, written: 0,
+        file: StoredFile{id: view.view(nil, 0), size: 0}, outcome: outcome,
+        error: error};
+}
+
+fun pending(kind: Kind, token: u64) Operation {
+    ret Operation{status: PENDING, kind: kind, token: token,
+        written: 0, file: StoredFile{id: view.view(nil, 0), size: 0},
+        outcome: OUTCOME_ACTIVE, error: nil};
+}
+
+fun record_pending(upload: *Upload, kind: Kind,
+    provider_token: u64) Operation {
+    if (upload.generation == ~(0::u64) || provider_token == 0) {
+        upload.state = UNKNOWN;
+        ret operation(INVALID, kind, OUTCOME_UNKNOWN,
+            "upload completion token space exhausted");
+    }
+    upload.generation = upload.generation + 1;
+    upload.pending_kind = kind;
+    upload.pending_token = upload.generation;
+    upload.pending_provider_token = provider_token;
+    ret pending(kind, upload.pending_token);
+}
+
+fun progress_shape(progress: Progress, kind: Kind) bool {
+    if (progress.kind != kind || progress.status < OK ||
+        progress.status > ERROR || progress.outcome > OUTCOME_UNKNOWN) {
+        ret false;
+    }
+    if (progress.status == PENDING) {
+        ret progress.token != 0 && progress.written == 0 &&
+            transaction_empty(progress.transaction) &&
+            progress.file.id.len == 0 && progress.file.size == 0 &&
+            progress.outcome == OUTCOME_ACTIVE && progress.error == nil;
+    }
+    if (progress.token != 0 || progress.written != 0 && kind != WRITE) {
+        ret false;
+    }
+    if (progress.status == OK) { ret progress.error == nil; }
+    ret progress.error != nil && transaction_empty(progress.transaction) &&
+        progress.file.id.len == 0 && progress.file.size == 0 &&
+        progress.written == 0;
+}
+
+fun descriptor_stable(upload: *Upload, before: Store,
+    transitional: State) bool {
+    ret upload != nil && upload.state == transitional &&
+        store_equal(before, upload.store);
+}
+
+pub fun init(upload: *Upload, store: Store, max_file_bytes: u64) bool {
+    if (upload == nil || !range_valid(upload_anchor(upload), $size_of(Upload)) ||
+        (upload.state != UNINITIALIZED && upload.state != RELEASED) ||
+        max_file_bytes == 0 || !store_shape(store) ||
+        !store_locally_disjoint(store, upload_anchor(upload),
+            $size_of(Upload))) {
+        ret false;
+    }
+    var before: Upload = @upload;
+    val aliases: bool = store.aliases_state(store.ctx,
+        upload_anchor(upload), $size_of(Upload));
+    if (aliases || !upload_unchanged(upload, ?before)) {
+        @upload = before;
+        ret false;
+    }
+    var generation: u64 = 0;
+    if (upload.state == RELEASED) { generation = upload.generation; }
+    clear(upload_anchor(upload), $size_of(Upload));
+    upload.store = store;
+    upload.state = READY;
+    upload.max_file_bytes = max_file_bytes;
+    upload.generation = generation;
+    ret true;
+}
+
+pub fun valid(upload: *Upload) bool {
+    if (upload == nil || !range_valid(upload_anchor(upload), $size_of(Upload)) ||
+        !store_shape(upload.store) || upload.max_file_bytes == 0 ||
+        !store_locally_disjoint(upload.store, upload_anchor(upload),
+            $size_of(Upload))) { ret false; }
+    if (upload.state == READY) {
+        ret transaction_empty(upload.transaction) && upload.transferred == 0 &&
+            upload.pending_kind == 0 && upload.pending_token == 0 &&
+            upload.pending_provider_token == 0 &&
+            upload.pending_input == nil && upload.pending_len == 0 &&
+            upload.field_name_len == 0 && upload.file_name_len == 0 &&
+            upload.content_type_len == 0 && upload.declared_len == 0 &&
+            !upload.has_length && upload.file.id.len == 0 &&
+            upload.file.size == 0;
+    }
+    if (upload.state == ACTIVE) {
+        ret transaction_valid(upload.transaction, upload.store) &&
+            upload.pending_kind == 0 && upload.pending_token == 0 &&
+            upload.pending_provider_token == 0 &&
+            upload.pending_input == nil && upload.pending_len == 0 &&
+            upload.file.id.len == 0 && upload.file.size == 0 &&
+            metadata_valid(staged_metadata(upload), upload.max_file_bytes) &&
+            (!upload.has_length || upload.transferred <= upload.declared_len);
+    }
+    if (upload.state == BEGINNING || upload.state == WRITING ||
+        upload.state == COMMITTING || upload.state == ABORTING) {
+        if (upload.pending_token == 0 || upload.pending_provider_token == 0) {
+            ret false;
+        }
+        if (upload.state == BEGINNING) { ret upload.pending_kind == BEGIN; }
+        if (upload.state == WRITING) {
+            ret upload.pending_kind == WRITE && upload.pending_input != nil &&
+                upload.pending_len != 0;
+        }
+        if (upload.state == COMMITTING) { ret upload.pending_kind == COMMIT; }
+        ret upload.pending_kind == ABORT;
+    }
+    if (upload.state == COMMITTED) {
+        ret transaction_valid(upload.transaction, upload.store) &&
+            upload.file.size == upload.transferred &&
+            view_valid(upload.file.id, 4096, false) &&
+            upload.pending_kind == 0 && upload.pending_token == 0 &&
+            upload.pending_provider_token == 0 &&
+            upload.pending_input == nil && upload.pending_len == 0;
+    }
+    if (upload.state == ABORTED || upload.state == UNKNOWN) {
+        ret upload.pending_kind == 0 && upload.pending_token == 0 &&
+            upload.pending_provider_token == 0 &&
+            upload.pending_input == nil && upload.pending_len == 0;
+    }
+    ret false;
+}
+
+pub fun start(upload: *Upload, metadata: Metadata) Operation {
+    if (!valid(upload) || upload.state != READY ||
+        upload.generation == ~(0::u64) ||
+        !metadata_valid(metadata, upload.max_file_bytes) ||
+        !metadata_locally_disjoint(upload, upload.store, metadata)) {
+        ret operation(INVALID, BEGIN, OUTCOME_NONE, "invalid upload metadata");
+    }
+    clear(?upload.field_name[0], MAX_FIELD_NAME_BYTES);
+    clear(?upload.file_name[0], MAX_FILE_NAME_BYTES);
+    clear(?upload.content_type[0], MAX_CONTENT_TYPE_BYTES);
+    copy(metadata.field_name, ?upload.field_name[0]);
+    copy(metadata.file_name, ?upload.file_name[0]);
+    copy(metadata.content_type, ?upload.content_type[0]);
+    upload.field_name_len = metadata.field_name.len;
+    upload.file_name_len = metadata.file_name.len;
+    upload.content_type_len = metadata.content_type.len;
+    upload.declared_len = metadata.declared_len;
+    upload.has_length = metadata.has_length;
+    val store: Store = upload.store;
+    upload.state = BEGINNING;
+    val field_alias: i8 = guarded_store_alias(upload, store,
+        metadata.field_name.data, metadata.field_name.len);
+    val file_alias: i8 = guarded_store_alias(upload, store,
+        metadata.file_name.data, metadata.file_name.len);
+    val type_alias: i8 = guarded_store_alias(upload, store,
+        metadata.content_type.data, metadata.content_type.len);
+    if (field_alias != 0 || file_alias != 0 || type_alias != 0) {
+        if (field_alias < 0 || file_alias < 0 || type_alias < 0) {
+            upload.state = UNKNOWN;
+            ret operation(INVALID, BEGIN, OUTCOME_UNKNOWN,
+                "upload metadata ownership check mutated state");
+        }
+        clear(?upload.field_name[0], MAX_FIELD_NAME_BYTES);
+        clear(?upload.file_name[0], MAX_FILE_NAME_BYTES);
+        clear(?upload.content_type[0], MAX_CONTENT_TYPE_BYTES);
+        upload.field_name_len = 0;
+        upload.file_name_len = 0;
+        upload.content_type_len = 0;
+        upload.declared_len = 0;
+        upload.has_length = false;
+        upload.state = READY;
+        ret operation(INVALID, BEGIN, OUTCOME_NONE,
+            "upload metadata aliases store state");
+    }
+    var before: Upload = @upload;
+    val progress: Progress = store.begin(store.ctx, staged_metadata(upload));
+    if (!upload_unchanged(upload, ?before) ||
+        !descriptor_stable(upload, store, BEGINNING) ||
+        !progress_shape(progress, BEGIN)) {
+        upload.state = UNKNOWN;
+        ret operation(INVALID, BEGIN, OUTCOME_UNKNOWN,
+            "upload begin provider violated its contract");
+    }
+    if (progress.status == PENDING) {
+        ret record_pending(upload, BEGIN, progress.token);
+    }
+    if (progress.status == OK && progress.outcome == OUTCOME_ACTIVE &&
+        transaction_valid(progress.transaction, store)) {
+        upload.transaction = progress.transaction;
+        upload.state = ACTIVE;
+        ret operation(OK, BEGIN, OUTCOME_ACTIVE, nil);
+    }
+    upload.state = ABORTED;
+    if (progress.status == ERROR && progress.outcome == OUTCOME_ABORTED &&
+        transaction_empty(progress.transaction)) {
+        ret operation(ERROR, BEGIN, OUTCOME_ABORTED, progress.error);
+    }
+    upload.state = UNKNOWN;
+    ret operation(INVALID, BEGIN, OUTCOME_UNKNOWN,
+        "upload begin result was ambiguous");
+}
+
+fun input_locally_valid(upload: *Upload, input: *u8, len: usize) bool {
+    ret range_valid(input, len) && len != 0 &&
+        !overlap(input, len, upload_anchor(upload), $size_of(Upload)) &&
+        !overlap(upload.store.ctx::*u8, upload.store.context_size,
+            input, len);
+}
+
+fun apply_write(upload: *Upload, store: Store, progress: Progress,
+    allowed: usize) Operation {
+    if (!progress_shape(progress, WRITE)) {
+        upload.state = UNKNOWN;
+        ret operation(INVALID, WRITE, OUTCOME_UNKNOWN,
+            "upload write result was invalid");
+    }
+    if (progress.status == PENDING) {
+        val result: Operation = record_pending(upload, WRITE, progress.token);
+        upload.pending_len = allowed;
+        ret result;
+    }
+    upload.pending_input = nil;
+    upload.pending_len = 0;
+    if (progress.status == OK && progress.outcome == OUTCOME_ACTIVE &&
+        progress.written != 0 && progress.written <= allowed &&
+        transaction_empty(progress.transaction) &&
+        progress.written::u64 <= upload.max_file_bytes - upload.transferred) {
+        upload.transferred = upload.transferred + progress.written::u64;
+        upload.state = ACTIVE;
+        ret Operation{status: OK, kind: WRITE, token: 0,
+            written: progress.written,
+            file: StoredFile{id: view.view(nil, 0), size: 0},
+            outcome: OUTCOME_ACTIVE, error: nil};
+    }
+    if (progress.status == ERROR && progress.outcome == OUTCOME_ACTIVE) {
+        upload.state = ACTIVE;
+        ret operation(ERROR, WRITE, OUTCOME_ACTIVE, progress.error);
+    }
+    upload.state = UNKNOWN;
+    ret operation(INVALID, WRITE, OUTCOME_UNKNOWN,
+        "upload write outcome was ambiguous");
+}
+
+pub fun write(upload: *Upload, input: *u8, len: usize) Operation {
+    if (!valid(upload) || upload.state != ACTIVE ||
+        upload.generation == ~(0::u64) ||
+        !input_locally_valid(upload, input, len)) {
+        ret operation(INVALID, WRITE, OUTCOME_NONE, "invalid upload write");
+    }
+    if (len::u64 > upload.max_file_bytes - upload.transferred ||
+        (upload.has_length &&
+            len::u64 > upload.declared_len - upload.transferred)) {
+        ret operation(LIMIT, WRITE, OUTCOME_ACTIVE,
+            "upload file limit reached");
+    }
+    val store: Store = upload.store;
+    upload.pending_input = input;
+    upload.pending_len = len;
+    upload.state = WRITING;
+    val aliases: i8 = guarded_store_alias(upload, store, input, len);
+    if (aliases != 0) {
+        if (aliases < 0) {
+            upload.state = UNKNOWN;
+            ret operation(INVALID, WRITE, OUTCOME_UNKNOWN,
+                "upload input ownership check mutated state");
+        }
+        upload.pending_input = nil;
+        upload.pending_len = 0;
+        upload.state = ACTIVE;
+        ret operation(INVALID, WRITE, OUTCOME_NONE,
+            "upload input aliases store state");
+    }
+    var before: Upload = @upload;
+    val progress: Progress = store.write(store.ctx, upload.transaction,
+        input, len);
+    if (!upload_unchanged(upload, ?before) ||
+        !descriptor_stable(upload, store, WRITING) ||
+        upload.pending_input != input || upload.pending_len != len) {
+        upload.state = UNKNOWN;
+        ret operation(INVALID, WRITE, OUTCOME_UNKNOWN,
+            "upload write provider violated ownership");
+    }
+    ret apply_write(upload, store, progress, len);
+}
+
+fun file_valid(upload: *Upload, file: StoredFile) bool {
+    if (file.size != upload.transferred ||
+        !view_valid(file.id, 4096, false)) { ret false; }
+    if (overlap(upload.store.ctx::*u8, upload.store.context_size,
+            file.id.data, file.id.len)) { ret true; }
+    var before: Upload = @upload;
+    val owned: bool = upload.store.aliases_state(upload.store.ctx,
+        file.id.data, file.id.len);
+    ret upload_unchanged(upload, ?before) && owned;
+}
+
+fun apply_finish(upload: *Upload, progress: Progress,
+    kind: Kind) Operation {
+    if (!progress_shape(progress, kind)) {
+        upload.state = UNKNOWN;
+        ret operation(INVALID, kind, OUTCOME_UNKNOWN,
+            "upload finish result was invalid");
+    }
+    if (progress.status == PENDING) {
+        ret record_pending(upload, kind, progress.token);
+    }
+    if (kind == COMMIT && progress.status == OK &&
+        progress.outcome == OUTCOME_COMMITTED &&
+        transaction_empty(progress.transaction) &&
+        file_valid(upload, progress.file)) {
+        upload.file = progress.file;
+        upload.state = COMMITTED;
+        ret Operation{status: OK, kind: COMMIT, token: 0, written: 0,
+            file: progress.file, outcome: OUTCOME_COMMITTED, error: nil};
+    }
+    if (kind == ABORT && progress.status == OK &&
+        progress.outcome == OUTCOME_ABORTED &&
+        transaction_empty(progress.transaction) && progress.file.id.len == 0) {
+        upload.state = ABORTED;
+        ret operation(OK, ABORT, OUTCOME_ABORTED, nil);
+    }
+    upload.state = UNKNOWN;
+    if (progress.status == ERROR && progress.outcome == OUTCOME_UNKNOWN) {
+        ret operation(ERROR, kind, OUTCOME_UNKNOWN, progress.error);
+    }
+    ret operation(INVALID, kind, OUTCOME_UNKNOWN,
+        "upload finish outcome was ambiguous");
+}
+
+pub fun commit(upload: *Upload) Operation {
+    if (!valid(upload) || upload.state != ACTIVE ||
+        upload.generation == ~(0::u64) ||
+        (upload.has_length && upload.transferred != upload.declared_len)) {
+        ret operation(INVALID, COMMIT, OUTCOME_NONE, "invalid upload commit");
+    }
+    val store: Store = upload.store;
+    upload.state = COMMITTING;
+    var before: Upload = @upload;
+    val progress: Progress = store.commit(store.ctx, upload.transaction);
+    if (!upload_unchanged(upload, ?before) ||
+        !descriptor_stable(upload, store, COMMITTING)) {
+        upload.state = UNKNOWN;
+        ret operation(INVALID, COMMIT, OUTCOME_UNKNOWN,
+            "upload commit provider violated ownership");
+    }
+    ret apply_finish(upload, progress, COMMIT);
+}
+
+pub fun abort(upload: *Upload) Operation {
+    if (!valid(upload) || upload.state != ACTIVE ||
+        upload.generation == ~(0::u64)) {
+        ret operation(INVALID, ABORT, OUTCOME_NONE, "invalid upload abort");
+    }
+    val store: Store = upload.store;
+    upload.state = ABORTING;
+    var before: Upload = @upload;
+    val progress: Progress = store.abort(store.ctx, upload.transaction);
+    if (!upload_unchanged(upload, ?before) ||
+        !descriptor_stable(upload, store, ABORTING)) {
+        upload.state = UNKNOWN;
+        ret operation(INVALID, ABORT, OUTCOME_UNKNOWN,
+            "upload abort provider violated ownership");
+    }
+    ret apply_finish(upload, progress, ABORT);
+}
+
+pub fun complete(upload: *Upload, token: u64) Operation {
+    if (upload == nil || token == 0 || token != upload.pending_token ||
+        !range_valid(upload_anchor(upload), $size_of(Upload)) ||
+        !store_shape(upload.store) ||
+        !store_locally_disjoint(upload.store, upload_anchor(upload),
+            $size_of(Upload)) ||
+        upload.pending_kind < BEGIN || upload.pending_kind > ABORT ||
+        (upload.state != BEGINNING && upload.state != WRITING &&
+            upload.state != COMMITTING && upload.state != ABORTING)) {
+        ret operation(INVALID, 0, OUTCOME_NONE,
+            "invalid upload completion token");
+    }
+    val kind: Kind = upload.pending_kind;
+    val transitional: State = upload.state;
+    val allowed: usize = upload.pending_len;
+    val retained_input: *u8 = upload.pending_input;
+    val provider_token: u64 = upload.pending_provider_token;
+    val store: Store = upload.store;
+    var before: Upload = @upload;
+    val progress: Progress = store.complete(store.ctx, provider_token);
+    if (!upload_unchanged(upload, ?before) ||
+        !descriptor_stable(upload, store, transitional) ||
+        upload.pending_token != token || upload.pending_kind != kind) {
+        upload.state = UNKNOWN;
+        ret operation(INVALID, kind, OUTCOME_UNKNOWN,
+            "upload completion provider violated ownership");
+    }
+    if (kind == WRITE && (upload.pending_input != retained_input ||
+            upload.pending_len != allowed)) {
+        upload.state = UNKNOWN;
+        ret operation(INVALID, kind, OUTCOME_UNKNOWN,
+            "upload completion changed retained input");
+    }
+    if (progress.status == PENDING) {
+        if (!progress_shape(progress, kind)) {
+            upload.state = UNKNOWN;
+            ret operation(INVALID, kind, OUTCOME_UNKNOWN,
+                "upload completion returned invalid pending state");
+        }
+        upload.pending_token = 0;
+        upload.pending_provider_token = 0;
+        ret record_pending(upload, kind, progress.token);
+    }
+    upload.pending_token = 0;
+    upload.pending_provider_token = 0;
+    upload.pending_kind = 0;
+    if (kind == BEGIN) {
+        if (!progress_shape(progress, BEGIN)) {
+            upload.state = UNKNOWN;
+            ret operation(INVALID, BEGIN, OUTCOME_UNKNOWN,
+                "upload begin completion was invalid");
+        }
+        if (progress.status == OK && progress.outcome == OUTCOME_ACTIVE &&
+            transaction_valid(progress.transaction, store)) {
+            upload.transaction = progress.transaction;
+            upload.state = ACTIVE;
+            ret operation(OK, BEGIN, OUTCOME_ACTIVE, nil);
+        }
+        if (progress.status == ERROR &&
+            progress.outcome == OUTCOME_ABORTED &&
+            transaction_empty(progress.transaction)) {
+            upload.state = ABORTED;
+            ret operation(ERROR, BEGIN, OUTCOME_ABORTED, progress.error);
+        }
+        upload.state = UNKNOWN;
+        ret operation(INVALID, BEGIN, OUTCOME_UNKNOWN,
+            "upload begin completion was ambiguous");
+    }
+    if (kind == WRITE) { ret apply_write(upload, store, progress, allowed); }
+    ret apply_finish(upload, progress, kind);
+}
+
+pub fun resolve_unknown(upload: *Upload, outcome: Outcome,
+    file: StoredFile) bool {
+    if (!valid(upload) || upload.state != UNKNOWN ||
+        (outcome != OUTCOME_COMMITTED && outcome != OUTCOME_ABORTED)) {
+        ret false;
+    }
+    if (outcome == OUTCOME_COMMITTED) {
+        if (!file_valid(upload, file)) { ret false; }
+        upload.file = file;
+        upload.state = COMMITTED;
+        ret true;
+    }
+    if (file.id.len != 0 || file.size != 0) { ret false; }
+    upload.state = ABORTED;
+    ret true;
+}
+
+pub fun release(upload: *Upload) bool {
+    if (upload == nil || !range_valid(upload_anchor(upload), $size_of(Upload)) ||
+        (upload.state != COMMITTED &&
+            upload.state != ABORTED)) { ret false; }
+    val generation: u64 = upload.generation;
+    clear(upload_anchor(upload), $size_of(Upload));
+    upload.generation = generation;
+    upload.state = RELEASED;
+    ret true;
+}
+
+rec TestStore {
+    bytes: [64]u8;
+    len: usize;
+    file_id: [8]u8;
+    active: bool;
+    committed: bool;
+    aborted: bool;
+    pending_begin: bool;
+    pending_write: bool;
+    pending_commit: bool;
+    pending_abort: bool;
+    pending_kind: Kind;
+    pending_token: u64;
+    pending_input: *u8;
+    pending_len: usize;
+    partial: usize;
+    fail_write: bool;
+    unknown_commit: bool;
+    unknown_abort: bool;
+    mutate_kind: Kind;
+    target: *Upload;
+    extra: *u8;
+    extra_len: usize;
+    begin_calls: usize;
+    write_calls: usize;
+    commit_calls: usize;
+    abort_calls: usize;
+    complete_calls: usize;
+}
+
+fun test_aliases(ctx: ptr, data: *u8, len: usize) bool {
+    val state: *TestStore = ctx::*TestStore;
+    if (state.extra_len == 0) { ret false; }
+    ret overlap(state.extra, state.extra_len, data, len);
+}
+
+fun test_transaction(state: *TestStore) Transaction {
+    ret Transaction{owner: state::ptr, id: 7};
+}
+
+fun test_progress(status: Status, kind: Kind, outcome: Outcome,
+    error: str) Progress {
+    ret Progress{status: status, kind: kind, token: 0,
+        transaction: Transaction{owner: nil, id: 0}, written: 0,
+        file: StoredFile{id: view.view(nil, 0), size: 0},
+        outcome: outcome, error: error};
+}
+
+fun test_file(state: *TestStore) StoredFile {
+    state.file_id[0] = 'u';
+    state.file_id[1] = 'p';
+    state.file_id[2] = 'l';
+    ret StoredFile{id: view.view(?state.file_id[0], 3), size: state.len::u64};
+}
+
+fun test_pending(state: *TestStore, kind: Kind) Progress {
+    state.pending_kind = kind;
+    state.pending_token = state.pending_token + 1;
+    if (state.pending_token == 0) { state.pending_token = 1; }
+    var result: Progress = test_progress(PENDING, kind,
+        OUTCOME_ACTIVE, nil);
+    result.token = state.pending_token;
+    ret result;
+}
+
+fun test_begin_done(state: *TestStore) Progress {
+    state.active = true;
+    var result: Progress = test_progress(OK, BEGIN, OUTCOME_ACTIVE, nil);
+    result.transaction = test_transaction(state);
+    ret result;
+}
+
+fun test_begin(ctx: ptr, metadata: Metadata) Progress {
+    val state: *TestStore = ctx::*TestStore;
+    state.begin_calls = state.begin_calls + 1;
+    if (state.mutate_kind == BEGIN && state.target != nil) {
+        state.target.field_name_len = state.target.field_name_len + 1;
+    }
+    if (state.pending_begin) {
+        state.pending_begin = false;
+        ret test_pending(state, BEGIN);
+    }
+    ret test_begin_done(state);
+}
+
+fun test_write_done(state: *TestStore, input: *u8,
+    len: usize) Progress {
+    if (state.fail_write) {
+        ret test_progress(ERROR, WRITE, OUTCOME_ACTIVE,
+            "storage write failed");
+    }
+    var written: usize = len;
+    if (state.partial != 0 && written > state.partial) {
+        written = state.partial;
+    }
+    if (written > 64 - state.len) {
+        ret test_progress(ERROR, WRITE, OUTCOME_ACTIVE,
+            "test storage exhausted");
+    }
+    var i: usize = 0;
+    for (i < written) {
+        state.bytes[state.len + i] = input[i];
+        i = i + 1;
+    }
+    state.len = state.len + written;
+    var result: Progress = test_progress(OK, WRITE, OUTCOME_ACTIVE, nil);
+    result.written = written;
+    ret result;
+}
+
+fun test_write(ctx: ptr, transaction: Transaction, input: *u8,
+    len: usize) Progress {
+    val state: *TestStore = ctx::*TestStore;
+    state.write_calls = state.write_calls + 1;
+    if (state.mutate_kind == WRITE && state.target != nil) {
+        state.target.pending_len = state.target.pending_len + 1;
+    }
+    if (state.pending_write) {
+        state.pending_write = false;
+        state.pending_input = input;
+        state.pending_len = len;
+        ret test_pending(state, WRITE);
+    }
+    ret test_write_done(state, input, len);
+}
+
+fun test_commit_done(state: *TestStore) Progress {
+    state.active = false;
+    state.committed = true;
+    if (state.unknown_commit) {
+        ret test_progress(ERROR, COMMIT, OUTCOME_UNKNOWN,
+            "commit outcome unknown");
+    }
+    var result: Progress = test_progress(OK, COMMIT,
+        OUTCOME_COMMITTED, nil);
+    result.file = test_file(state);
+    ret result;
+}
+
+fun test_commit(ctx: ptr, transaction: Transaction) Progress {
+    val state: *TestStore = ctx::*TestStore;
+    state.commit_calls = state.commit_calls + 1;
+    if (state.mutate_kind == COMMIT && state.target != nil) {
+        state.target.transferred = state.target.transferred + 1;
+    }
+    if (state.pending_commit) {
+        state.pending_commit = false;
+        ret test_pending(state, COMMIT);
+    }
+    ret test_commit_done(state);
+}
+
+fun test_abort_done(state: *TestStore) Progress {
+    state.active = false;
+    state.aborted = true;
+    if (state.unknown_abort) {
+        ret test_progress(ERROR, ABORT, OUTCOME_UNKNOWN,
+            "abort outcome unknown");
+    }
+    ret test_progress(OK, ABORT, OUTCOME_ABORTED, nil);
+}
+
+fun test_abort(ctx: ptr, transaction: Transaction) Progress {
+    val state: *TestStore = ctx::*TestStore;
+    state.abort_calls = state.abort_calls + 1;
+    if (state.mutate_kind == ABORT && state.target != nil) {
+        state.target.transferred = state.target.transferred + 1;
+    }
+    if (state.pending_abort) {
+        state.pending_abort = false;
+        ret test_pending(state, ABORT);
+    }
+    ret test_abort_done(state);
+}
+
+fun test_complete(ctx: ptr, token: u64) Progress {
+    val state: *TestStore = ctx::*TestStore;
+    state.complete_calls = state.complete_calls + 1;
+    if (token == 0 || token != state.pending_token) {
+        ret test_progress(ERROR, state.pending_kind, OUTCOME_UNKNOWN,
+            "invalid completion token");
+    }
+    val kind: Kind = state.pending_kind;
+    state.pending_kind = 0;
+    state.pending_token = 0;
+    if (kind == BEGIN) { ret test_begin_done(state); }
+    if (kind == WRITE) {
+        val input: *u8 = state.pending_input;
+        val len: usize = state.pending_len;
+        state.pending_input = nil;
+        state.pending_len = 0;
+        ret test_write_done(state, input, len);
+    }
+    if (kind == COMMIT) { ret test_commit_done(state); }
+    ret test_abort_done(state);
+}
+
+fun test_store(state: *TestStore) Store {
+    ret Store{ctx: state::ptr, context_size: $size_of(TestStore),
+        aliases_state: test_aliases, begin: test_begin, write: test_write,
+        commit: test_commit, abort: test_abort, complete: test_complete};
+}
+
+fun test_str_len(value: str) usize {
+    if (value == nil) { ret 0; }
+    var len: usize = 0;
+    for (value[len] != 0) { len = len + 1; }
+    ret len;
+}
+
+fun test_metadata(file_name: str, declared_len: u64,
+    has_length: bool) Metadata {
+    ret Metadata{field_name: view.view("document", 8),
+        file_name: view.view(file_name, test_str_len(file_name)),
+        content_type: view.view("text/plain", 10),
+        declared_len: declared_len, has_length: has_length};
+}
+
+test "laurel.upload: partial writes commit and release exactly once" {
+    var state: TestStore = TestStore{partial: 2};
+    var upload: Upload;
+    if (!init(?upload, test_store(?state), 16) ||
+        start(?upload, test_metadata("note.txt", 4, true)).status != OK) {
+        ret 1;
+    }
+    var input: [4]u8;
+    input[0] = 'd'; input[1] = 'a'; input[2] = 't'; input[3] = 'a';
+    val first: Operation = write(?upload, ?input[0], 4);
+    val second: Operation = write(?upload, ?input[2], 2);
+    if (first.status != OK || first.written != 2 || second.status != OK ||
+        second.written != 2 || upload.transferred != 4 || state.len != 4 ||
+        state.bytes[0] != 'd' || state.bytes[3] != 'a') { ret 2; }
+    val finished: Operation = commit(?upload);
+    if (state.commit_calls != 1) { ret 3; }
+    if (finished.status != OK) { ret 4; }
+    if (finished.outcome != OUTCOME_COMMITTED || finished.file.size != 4) {
+        ret 5;
+    }
+    if (state.abort_calls != 0) { ret 6; }
+    if (!release(?upload)) { ret 7; }
+    if (release(?upload) || upload.state != RELEASED) { ret 8; }
+    ret 0;
+}
+
+test "laurel.upload: asynchronous operations retain exact ownership" {
+    var state: TestStore = TestStore{pending_begin: true,
+        pending_write: true, pending_commit: true};
+    var upload: Upload;
+    if (!init(?upload, test_store(?state), 16)) { ret 1; }
+    var current: Operation = start(?upload,
+        test_metadata("async.txt", 3, true));
+    if (current.status != PENDING || current.kind != BEGIN) { ret 2; }
+    current = complete(?upload, current.token);
+    if (current.status != OK || upload.state != ACTIVE) { ret 3; }
+    var input: [3]u8;
+    input[0] = 'o'; input[1] = 'n'; input[2] = 'e';
+    current = write(?upload, ?input[0], 3);
+    if (current.status != PENDING || upload.pending_input != ?input[0]) {
+        ret 4;
+    }
+    current = complete(?upload, current.token);
+    if (current.status != OK || current.written != 3 ||
+        upload.pending_input != nil) { ret 5; }
+    current = commit(?upload);
+    if (state.commit_calls != 1) { ret 6; }
+    if (current.status != PENDING) { ret 7; }
+    current = complete(?upload, current.token);
+    if (current.status != OK || upload.state != COMMITTED ||
+        state.complete_calls != 3 || state.begin_calls != 1 ||
+        state.write_calls != 1 || state.commit_calls != 1 ||
+        !release(?upload)) { ret 8; }
+    ret 0;
+}
+
+test "laurel.upload: limits and traversal reject before storage" {
+    var state: TestStore;
+    var upload: Upload;
+    if (!init(?upload, test_store(?state), 4)) { ret 1; }
+    if (start(?upload, test_metadata("../secret", 1, true)).status != INVALID ||
+        state.begin_calls != 0 || upload.state != READY) { ret 2; }
+    if (start(?upload, test_metadata("large.txt", 5, true)).status != INVALID ||
+        state.begin_calls != 0 || upload.state != READY) { ret 3; }
+    if (start(?upload, test_metadata("safe.txt", 0, false)).status != OK) {
+        ret 4;
+    }
+    var input: [5]u8;
+    if (write(?upload, ?input[0], 5).status != LIMIT) { ret 5; }
+    if (state.write_calls != 0 || upload.state != ACTIVE) { ret 6; }
+    val stopped: Operation = abort(?upload);
+    if (state.abort_calls != 1) { ret 7; }
+    if (stopped.status != OK) { ret 8; }
+    if (!release(?upload)) { ret 9; }
+    ret 0;
+}
+
+test "laurel.upload: storage errors preserve a single abort path" {
+    var state: TestStore = TestStore{fail_write: true,
+        pending_abort: true};
+    var upload: Upload;
+    if (!init(?upload, test_store(?state), 8) ||
+        start(?upload, test_metadata("error.txt", 0, false)).status != OK) {
+        ret 1;
+    }
+    var input: [1]u8;
+    if (write(?upload, ?input[0], 1).status != ERROR ||
+        upload.state != ACTIVE) { ret 2; }
+    var stopped: Operation = abort(?upload);
+    if (state.abort_calls != 1) { ret 3; }
+    if (stopped.status != PENDING) { ret 4; }
+    if (abort(?upload).status != INVALID) { ret 5; }
+    stopped = complete(?upload, stopped.token);
+    if (stopped.status != OK || state.abort_calls != 1 ||
+        state.aborted != true || !release(?upload)) { ret 6; }
+    ret 0;
+}
+
+test "laurel.upload: unknown commit requires explicit resolution" {
+    var state: TestStore = TestStore{unknown_commit: true};
+    var upload: Upload;
+    if (!init(?upload, test_store(?state), 8)) { ret 1; }
+    if (start(?upload,
+            test_metadata("unknown.txt", 0, false)).status != OK) { ret 2; }
+    val finished: Operation = commit(?upload);
+    if (state.commit_calls != 1) { ret 3; }
+    if (finished.status != ERROR) { ret 4; }
+    if (upload.state != UNKNOWN || release(?upload)) { ret 5; }
+    val file: StoredFile = test_file(?state);
+    if (!resolve_unknown(?upload, OUTCOME_COMMITTED, file) ||
+        !release(?upload) || state.commit_calls != 1) { ret 6; }
+    ret 0;
+}
+
+test "laurel.upload: physical aliases and provider mutation poison work" {
+    var state: TestStore;
+    var upload: Upload;
+    if (!init(?upload, test_store(?state), 8)) { ret 1; }
+    val alias_metadata: Metadata = Metadata{
+        field_name: view.view(?state.bytes[0], 1),
+        file_name: view.view("a.txt", 5)};
+    if (start(?upload, alias_metadata).status != INVALID ||
+        state.begin_calls != 0 || upload.state != READY) { ret 2; }
+    if (start(?upload, test_metadata("owned.txt", 0, false)).status != OK) {
+        ret 3;
+    }
+    if (write(?upload, ?state.bytes[0], 1).status != INVALID ||
+        state.write_calls != 0 || upload.state != ACTIVE) { ret 4; }
+    state.target = ?upload;
+    state.mutate_kind = WRITE;
+    var input: [1]u8;
+    val corrupted: Operation = write(?upload, ?input[0], 1);
+    if (corrupted.status != INVALID || corrupted.outcome != OUTCOME_UNKNOWN ||
+        upload.state != UNKNOWN || state.write_calls != 1) { ret 5; }
+    ret 0;
 }
