@@ -357,10 +357,18 @@ pub fun parse_request(input: view.View, jar: *Jar, limits: Limits,
 }
 
 pub fun find(jar: *Jar, name: view.View) *Cookie {
-    if (jar == nil || name.len == 0 || name.data == nil || jar.len > jar.cap
-        || (jar.len != 0 && jar.items == nil)) { ret nil; }
+    if (jar == nil || !range_valid(jar::*u8, $size_of(Jar))
+        || name.len == 0 || !view_range_valid(name) || jar.len > jar.cap) {
+        ret nil;
+    }
+    var item_bytes: usize = 0;
+    if (!array_bytes(jar.cap, $size_of(Cookie), ?item_bytes)
+        || !range_valid(jar.items::*u8, item_bytes)
+        || range_overlap(jar::*u8, $size_of(Jar), jar.items::*u8,
+            item_bytes)) { ret nil; }
     var i: usize = 0;
     for (i < jar.len) {
+        if (!cookie_ranges_valid(?jar.items[i])) { ret nil; }
         if (view_equal(jar.items[i].name, name)) { ret ?jar.items[i]; }
         i = i + 1;
     }
@@ -1269,6 +1277,31 @@ test "laurel.cookie: parser and serializer reject every output alias" {
     response.attribute_len = 2;
     if (serialize_set_cookie(?response, ?name[0], 64, configured).status
         != INVALID_INPUT || name[0] != 'a') { ret 8; }
+    ret 0;
+}
+
+test "laurel.cookie: lookup rejects forged jars and nested ranges" {
+    val maximum: usize = ~(0::usize);
+    val near_end: *u8 = (maximum - 1)::*u8;
+    if (find((maximum - 1)::*Jar, view.view("a", 1)) != nil) { ret 1; }
+    var item: Cookie = Cookie{name: view.view("a", 1),
+        value: view.view("b", 1), path: view.view(nil, 0),
+        domain: view.view(nil, 0), same_site: SAME_SITE_DEFAULT,
+        attributes: nil, attribute_len: 0};
+    var jar: Jar = Jar{items: ?item, len: 1, cap: 1, total_bytes: 3};
+    if (find(?jar, view.view(near_end, 4)) != nil) { ret 2; }
+    item.name = view.view(near_end, 4);
+    if (find(?jar, view.view("a", 1)) != nil) { ret 3; }
+    item.name = view.view("a", 1);
+    item.attributes = near_end::*Attribute;
+    item.attribute_len = 2;
+    if (find(?jar, view.view("a", 1)) != nil) { ret 4; }
+    jar.items = near_end::*Cookie;
+    jar.cap = 2;
+    if (find(?jar, view.view("a", 1)) != nil) { ret 5; }
+    jar.items = (?jar)::usize::*Cookie;
+    jar.cap = 1;
+    if (find(?jar, view.view("a", 1)) != nil) { ret 6; }
     ret 0;
 }
 
