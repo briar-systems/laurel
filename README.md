@@ -13,7 +13,7 @@ The framework has no global application registry, hidden allocator, mandatory te
 - `app` owns assembled framework configuration and application state.
 - `context` carries one borrowed exchange, generation-bound route parameters, request identity, cancellation scope, allocator, and application state.
 - `handler` defines application handlers over an explicit context and response.
-- `router` connects framework handlers to caller-owned `mach-http` router storage.
+- `router` compiles typed framework routes into caller-owned `mach-http` matcher storage and decodes parameters from the request scope.
 - `middleware` defines an allocation-free chain contract with explicit next handlers.
 - `error` classifies application failures and maps them to HTTP responses.
 - `session` separates session lifecycle, protected cookie encoding, and durable storage.
@@ -29,8 +29,8 @@ The framework has no global application registry, hidden allocator, mandatory te
 
 ## Local dependencies
 
-The manifest uses pinned Git tags for `mach-std` v0.29.0 and `mach-http` v0.2.1. Build output uses Mach's default `out/` directory.
+The manifest uses pinned Git tags for `mach-std` v0.29.0 and `mach-http` v0.3.0. Build output uses Mach's default `out/` directory.
 
 ## Status
 
-Application composition, lifecycle, bounded admission, and exact request-context ownership are implemented. Route execution, middleware, protected sessions, security defaults, forms, uploads, rendering, realtime responses, and the in-process harness remain tracked work. Security-sensitive operations have no fallback implementation.
+Application composition, lifecycle, bounded admission, exact request-context ownership, compile-once typed routes, request-scoped parameter decoding, and stale-dispatch rejection are implemented. Middleware, protected sessions, security defaults, forms, uploads, rendering, realtime responses, and the in-process harness remain tracked work. Security-sensitive operations have no fallback implementation. The route ownership and decoder contract is documented in [`doc/routing.md`](doc/routing.md).
