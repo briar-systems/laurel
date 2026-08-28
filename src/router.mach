@@ -180,7 +180,8 @@ pub fun non_path() Path {
 }
 
 fun no_error() error.AppError {
-    ret error.make(error.INTERNAL, 0, "", "", false);
+    var empty: error.AppError;
+    ret empty;
 }
 
 fun route_error(kind: error.Kind, status: u16, public_msg: str,
@@ -618,12 +619,12 @@ fun i64_decode(ctx: ptr, allocator: *A.Allocator,
         magnitude = magnitude * 10 + digit;
         i = i + 1;
     }
-    var signed_value: i64 = magnitude::i64;
+    var signed_value: i64 = 0;
     if (negative) {
         if (magnitude == 9223372036854775808) {
             signed_value = -9223372036854775807 - 1;
         } or { signed_value = 0 - magnitude::i64; }
-    }
+    } or { signed_value = magnitude::i64; }
     var decoded: Value;
     decoded.kind = VALUE_I64;
     decoded.signed_value = signed_value;
@@ -885,18 +886,21 @@ test "laurel.router: built-in decoders reject overflow and malformed values" {
         view.view("-9223372036854775808", 20), ?value))
         || value.kind != VALUE_I64
         || value.signed_value != (-9223372036854775807 - 1)) { ret 3; }
+    if (R.is_err[u8, error.AppError](i64_decode(nil, nil,
+        view.view("9223372036854775807", 19), ?value))
+        || value.signed_value != 9223372036854775807) { ret 4; }
     if (!R.is_err[u8, error.AppError](i64_decode(nil, nil,
-        view.view("9223372036854775808", 19), ?value))) { ret 4; }
+        view.view("9223372036854775808", 19), ?value))) { ret 5; }
     if (R.is_err[u8, error.AppError](bool_decode(nil, nil,
         view.view("false", 5), ?value)) || value.kind != VALUE_BOOL
-        || value.boolean_value) { ret 5; }
+        || value.boolean_value) { ret 6; }
     if (!R.is_err[u8, error.AppError](bool_decode(nil, nil,
-        view.view("TRUE", 4), ?value))) { ret 6; }
+        view.view("TRUE", 4), ?value))) { ret 7; }
     if (R.is_err[u8, error.AppError](uuid_decode(nil, nil,
         view.view("00112233-4455-6677-8899-aabbccddeeff", 36), ?value))
         || value.kind != VALUE_UUID || value.uuid_value[0] != 0
-        || value.uuid_value[1] != 0x11 || value.uuid_value[15] != 0xff) { ret 7; }
+        || value.uuid_value[1] != 0x11 || value.uuid_value[15] != 0xff) { ret 8; }
     if (!R.is_err[u8, error.AppError](uuid_decode(nil, nil,
-        view.view("001122334455-6677-8899-aabbccddeeff", 36), ?value))) { ret 8; }
+        view.view("001122334455-6677-8899-aabbccddeeff", 36), ?value))) { ret 9; }
     ret 0;
 }
