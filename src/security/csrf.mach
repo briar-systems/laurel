@@ -385,6 +385,7 @@ pub fun init(protector: *Protector, ring: *KeyRing, entropy: Entropy,
         ring_aliases(ring, protector_anchor(protector), $size_of(Protector)) ||
         ring_aliases(ring, entropy.ctx::*u8, entropy.context_size) ||
         !entropy_disjoint(entropy, protector, ring)) { ret false; }
+    if (protector.active || !ring_shape_valid(ring)) { ret false; }
     protector.ring = ring;
     protector.entropy = entropy;
     protector.policy = policy;
