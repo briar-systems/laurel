@@ -15,9 +15,24 @@ use http.core.message;
 use http.core.method;
 use http.core.target;
 
+pub def ParamKind: u8;
+
+pub val PARAM_TEXT:   ParamKind = 1;
+pub val PARAM_U64:    ParamKind = 2;
+pub val PARAM_I64:    ParamKind = 3;
+pub val PARAM_BOOL:   ParamKind = 4;
+pub val PARAM_UUID:   ParamKind = 5;
+pub val PARAM_CUSTOM: ParamKind = 6;
+
 pub rec Param {
-    name:  view.View;
-    value: view.View;
+    name:           view.View;
+    value:          view.View;
+    kind:           ParamKind;
+    unsigned_value: u64;
+    signed_value:   i64;
+    boolean_value:  bool;
+    uuid_value:     [16]u8;
+    custom_value:   ptr;
 }
 
 pub rec Params {
@@ -63,7 +78,10 @@ fun params_valid(params: Params, generation: u64, limit: usize) bool {
     var i: usize = 0;
     for (i < params.len) {
         if (params.items[i].name.len == 0 || !view_valid(params.items[i].name)
-            || !view_valid(params.items[i].value)) { ret false; }
+            || !view_valid(params.items[i].value)
+            || params.items[i].kind < PARAM_TEXT || params.items[i].kind > PARAM_CUSTOM) {
+            ret false;
+        }
         var previous: usize = 0;
         for (previous < i) {
             if (view_eq(params.items[previous].name, params.items[i].name)) { ret false; }
@@ -242,8 +260,10 @@ test "laurel.context: one binding borrows the exact exchange generation" {
     var fixture: Fixture;
     if (!init_fixture(?fixture, 41, false, time.Time{sec: 0, nsec: 0})) { ret 1; }
     var items: [2]Param;
-    items[0] = Param{name: view.view("id", 2), value: view.view("42", 2)};
-    items[1] = Param{name: view.view("slug", 4), value: view.view("news", 4)};
+    items[0] = Param{name: view.view("id", 2), value: view.view("42", 2),
+        kind: PARAM_TEXT};
+    items[1] = Param{name: view.view("slug", 4), value: view.view("news", 4),
+        kind: PARAM_TEXT};
     val params: Params = Params{items: ?items[0], len: 2, generation: 41};
     var allocator: A.Allocator;
     var owner: i64 = 7;
@@ -287,8 +307,10 @@ test "laurel.context: capture and identity bounds are transactional" {
     var fixture: Fixture;
     if (!init_fixture(?fixture, 61, false, time.Time{sec: 0, nsec: 0})) { ret 1; }
     var duplicate: [2]Param;
-    duplicate[0] = Param{name: view.view("id", 2), value: view.view("1", 1)};
-    duplicate[1] = Param{name: view.view("id", 2), value: view.view("2", 1)};
+    duplicate[0] = Param{name: view.view("id", 2), value: view.view("1", 1),
+        kind: PARAM_TEXT};
+    duplicate[1] = Param{name: view.view("id", 2), value: view.view("2", 1),
+        kind: PARAM_TEXT};
     var allocator: A.Allocator;
     var owner: i64 = 1;
     var context: Context;

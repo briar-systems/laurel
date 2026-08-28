@@ -123,7 +123,8 @@ fun valid_optional_components(assembly: Assembly) bool {
 }
 
 pub fun validate_assembly(assembly: Assembly) bool {
-    if (!validate_limits(assembly.config.limits) || assembly.router == nil || !valid_stack(assembly.middleware)
+    if (!validate_limits(assembly.config.limits) || assembly.router == nil
+        || !assembly.router.initialized || !valid_stack(assembly.middleware)
         || assembly.fallback.call == nil || assembly.errors.render == nil || assembly.security == nil
         || !provider.validate(assembly.providers) || !lifecycle.validate(assembly.lifecycle)
         || assembly.lifecycle.state != lifecycle.ASSEMBLED || !valid_observer(assembly.observer)
@@ -346,6 +347,8 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     var controller: lifecycle.Controller;
     if (!lifecycle.init(?controller, ?lifecycle_item, 1, 1)) { ret 2; }
     var routes: router.Router;
+    if (router.compile(?routes, nil, 0, router.Storage{},
+        router.limits_default()).status != router.COMPILE_OK) { ret 2; }
     var middlewares: middleware.Stack = middleware.Stack{items: nil, len: 0};
     var headers: security.HeadersPolicy;
     var observer: observability.Observer = observability.Observer{ctx: nil, start: test_observer_start,
