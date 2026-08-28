@@ -177,20 +177,32 @@ mutex. Capacity is explicit. Concurrent updates with the same expected version
 produce exactly one success. Stop serializes with active operations and wipes
 identifiers and application data before releasing the started lifecycle.
 
-Store result records and load buffers must not overlap their input views,
-session records, provider owner, or any provider backing region. The same rule
-applies to cancellation scopes and every `replace` or `reap` output. Unsafe
-aliasing fails before a provider lock is acquired or any caller output is written.
+Store result records and complete declared load buffers must not overlap their
+input views, session records, provider owner, or any provider backing region.
+An optional cancellation scope must be disjoint from every input and output
+range in that operation, including `replace` and `reap` results. Unsafe aliasing
+fails before a provider lock is acquired or any caller output is written.
 All session, context, token, identifier, data, guard-token, and result ranges
 are validated before they are read. In-memory store, guard, and key-ring
 initializers check array multiplication, address ranges, and owner/backing
 disjointness before clearing or publishing caller storage.
 
+`init_manager` queries the Store's complete ownership before publishing the
+manager, so the manager record cannot reside in provider owner or backing
+storage. A manager is initialized exactly once, and its provider fields remain
+immutable afterward. Manager lifecycle uses an atomic state transition before
+invoking a provider. Concurrent or callback-reentrant starts and stops return
+`STORE_INVALID` without invoking the provider again. Provider callbacks run
+without a manager mutex held. A failed start restores stopped state, and a
+failed stop restores active state. Use `manager_active` instead of reading
+lifecycle storage directly.
+
 ## Lifecycle order
 
 Initialize nonce and replay guards, key generations and the algorithm and
 nonce-domain-bound key ring, protected codec, store, and manager in that order.
-Start the manager before admission.
+Manager storage must be disjoint from every Store-owned region. Start the
+manager before admission.
 During shutdown, stop admission, settle requests, stop the manager, release the
 codec, release both guards, then release the key ring. Caller storage must
 outlive every object that borrows it.

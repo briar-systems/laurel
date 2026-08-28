@@ -74,6 +74,14 @@ pub def ReplayPolicy: u8;
 pub val REPLAY_ALLOW:  ReplayPolicy = 1;
 pub val REPLAY_REJECT: ReplayPolicy = 2;
 
+pub def ManagerState: i64;
+
+pub val MANAGER_EMPTY:    ManagerState = 0;
+pub val MANAGER_STOPPED:  ManagerState = 1;
+pub val MANAGER_STARTING: ManagerState = 2;
+pub val MANAGER_ACTIVE:   ManagerState = 3;
+pub val MANAGER_STOPPING: ManagerState = 4;
+
 pub rec Session {
     id:              view.View;
     data:            view.View;
@@ -240,7 +248,7 @@ pub rec Manager {
     store:  Store;
     codec:  Codec;
     cookie: CookiePolicy;
-    active: bool;
+    state:  ManagerState;
 }
 
 fun public_equal(a: *u8, b: *u8, len: usize) bool {
@@ -360,6 +368,11 @@ fun memory_store_range_safe(store: *MemoryStore, data: *u8,
         && !memory_store_aliases(store::ptr, data, len);
 }
 
+fun scope_overlaps(scope: *cancel.Scope, data: *u8, len: usize) bool {
+    ret scope != nil && ranges_overlap(scope::*u8, $size_of(cancel.Scope),
+        data, len);
+}
+
 pub fun init_memory_store(store: *MemoryStore, slots: *MemorySlot,
     capacity: usize) bool {
     if (store == nil || !range_valid(store::*u8, $size_of(MemoryStore))) {
@@ -437,7 +450,14 @@ fun memory_load(ctx: ptr, id: view.View, now: i64, data_output: *u8,
         || !memory_store_range_safe(store, data_output, data_capacity)
         || !memory_store_range_safe(store, output::*u8, $size_of(Session))
         || (scope != nil && !memory_store_range_safe(store, scope::*u8,
-            $size_of(cancel.Scope)))) {
+            $size_of(cancel.Scope)))
+        || ranges_overlap(data_output, data_capacity, id.data, id.len)
+        || ranges_overlap(data_output, data_capacity, output::*u8,
+            $size_of(Session))
+        || ranges_overlap(id.data, id.len, output::*u8, $size_of(Session))
+        || scope_overlaps(scope, id.data, id.len)
+        || scope_overlaps(scope, data_output, data_capacity)
+        || scope_overlaps(scope, output::*u8, $size_of(Session))) {
         ret STORE_INVALID;
     }
     if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
@@ -458,14 +478,6 @@ fun memory_load(ctx: ptr, id: view.View, now: i64, data_output: *u8,
         || (slot.data_len != 0 && data_output == nil)) {
         mutex.unlock(?store.lock);
         ret STORE_CAPACITY;
-    }
-    val output_bytes: *u8 = output::*u8;
-    if (ranges_overlap(data_output, slot.data_len, id.data, id.len)
-        || ranges_overlap(data_output, slot.data_len, output_bytes,
-            $size_of(Session))
-        || ranges_overlap(id.data, id.len, output_bytes, $size_of(Session))) {
-        mutex.unlock(?store.lock);
-        ret STORE_INVALID;
     }
     var i: usize = 0;
     for (i < slot.data_len) {
@@ -506,7 +518,12 @@ fun memory_save(ctx: ptr, value: *Session, expected_version: u64,
         || !memory_store_range_safe(store, result_bytes,
             $size_of(SaveResult))
         || (scope != nil && !memory_store_range_safe(store, scope::*u8,
-            $size_of(cancel.Scope)))) { ret STORE_INVALID; }
+            $size_of(cancel.Scope)))
+        || scope_overlaps(scope, value::*u8, $size_of(Session))
+        || scope_overlaps(scope, value.id.data, value.id.len)
+        || scope_overlaps(scope, value.data.data, value.data.len)
+        || scope_overlaps(scope, result_bytes,
+            $size_of(SaveResult))) { ret STORE_INVALID; }
     if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
     mutex.lock(?store.lock);
     if (!store.initialized || !store.active || store.len > store.capacity
@@ -593,7 +610,8 @@ fun memory_delete(ctx: ptr, id: view.View, expected_version: u64,
         || !view_valid(id, MAX_SESSION_ID_BYTES)
         || !memory_store_range_safe(store, id.data, id.len)
         || (scope != nil && !memory_store_range_safe(store, scope::*u8,
-            $size_of(cancel.Scope)))) {
+            $size_of(cancel.Scope)))
+        || scope_overlaps(scope, id.data, id.len)) {
         ret STORE_INVALID;
     }
     if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
@@ -652,7 +670,13 @@ fun memory_replace(ctx: ptr, old_id: view.View, expected_version: u64,
         || !memory_store_range_safe(store, result::*u8,
             $size_of(SaveResult))
         || (scope != nil && !memory_store_range_safe(store, scope::*u8,
-            $size_of(cancel.Scope)))) { ret STORE_INVALID; }
+            $size_of(cancel.Scope)))
+        || scope_overlaps(scope, old_id.data, old_id.len)
+        || scope_overlaps(scope, replacement::*u8, $size_of(Session))
+        || scope_overlaps(scope, replacement.id.data, replacement.id.len)
+        || scope_overlaps(scope, replacement.data.data, replacement.data.len)
+        || scope_overlaps(scope, result::*u8,
+            $size_of(SaveResult))) { ret STORE_INVALID; }
     if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
     mutex.lock(?store.lock);
     if (!store.initialized || !store.active || store.len > store.capacity
@@ -715,7 +739,10 @@ fun memory_reap(ctx: ptr, now: i64, result: *usize,
         || !scope_valid(scope)
         || !memory_store_range_safe(store, result::*u8, $size_of(usize))
         || (scope != nil && !memory_store_range_safe(store, scope::*u8,
-            $size_of(cancel.Scope)))) { ret STORE_INVALID; }
+            $size_of(cancel.Scope)))
+        || scope_overlaps(scope, result::*u8, $size_of(usize))) {
+        ret STORE_INVALID;
+    }
     if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
     mutex.lock(?store.lock);
     if (!store.initialized || !store.active || store.len > store.capacity
@@ -1790,37 +1817,85 @@ pub fun secure_cookie(name: str) CookiePolicy {
         secure: true, http_only: true, max_age: 0};
 }
 
+fun manager_dependencies_valid(store: Store, codec: Codec,
+    cookie: CookiePolicy) bool {
+    ret store.ctx != nil && store.aliases != nil && store.start != nil
+        && store.stop != nil && store.load != nil && store.save != nil
+        && store.delete != nil && store.replace != nil && store.reap != nil
+        && codec.encode != nil && codec.decode != nil && cookie.name != nil
+        && cookie.secure && cookie.http_only;
+}
+
+pub fun manager_valid(manager: *Manager) bool {
+    if (manager == nil || !range_valid(manager::*u8, $size_of(Manager))) {
+        ret false;
+    }
+    val state: ManagerState = atomic.load(?manager.state);
+    ret (state == MANAGER_STOPPED || state == MANAGER_ACTIVE)
+        && manager_dependencies_valid(manager.store, manager.codec,
+            manager.cookie);
+}
+
+pub fun manager_active(manager: *Manager) bool {
+    ret manager != nil && range_valid(manager::*u8, $size_of(Manager))
+        && atomic.load(?manager.state) == MANAGER_ACTIVE;
+}
+
 pub fun init_manager(manager: *Manager, store: Store, codec: Codec,
     cookie: CookiePolicy) bool {
     if (manager == nil || !range_valid(manager::*u8, $size_of(Manager))
-        || manager.active || store.ctx == nil || store.aliases == nil
-        || store.start == nil
-        || store.stop == nil || store.load == nil || store.save == nil
-        || store.delete == nil || store.replace == nil || store.reap == nil
-        || codec.encode == nil || codec.decode == nil
-        || cookie.name == nil || !cookie.secure || !cookie.http_only) {
+        || !manager_dependencies_valid(store, codec, cookie)
+        || store.aliases(store.ctx, manager::*u8, $size_of(Manager))) {
+        ret false;
+    }
+    val current: ManagerState = atomic.load(?manager.state);
+    if (current != MANAGER_EMPTY) { ret false; }
+    var expected: i64 = current;
+    if (!atomic.cas(?manager.state, ?expected, MANAGER_STARTING)) {
         ret false;
     }
     manager.store = store;
     manager.codec = codec;
     manager.cookie = cookie;
-    manager.active = false;
+    atomic.store(?manager.state, MANAGER_STOPPED);
     ret true;
 }
 
 pub fun start_manager(manager: *Manager) StoreStatus {
-    if (manager == nil || !range_valid(manager::*u8, $size_of(Manager))
-        || manager.active) { ret STORE_INVALID; }
-    val started: StoreStatus = manager.store.start(manager.store.ctx);
-    if (started == STORE_OK) { manager.active = true; }
+    if (manager == nil || !range_valid(manager::*u8, $size_of(Manager))) {
+        ret STORE_INVALID;
+    }
+    var expected: i64 = MANAGER_STOPPED;
+    if (!atomic.cas(?manager.state, ?expected, MANAGER_STARTING)) {
+        ret STORE_INVALID;
+    }
+    val store: Store = manager.store;
+    if (!manager_dependencies_valid(store, manager.codec, manager.cookie)) {
+        atomic.store(?manager.state, MANAGER_STOPPED);
+        ret STORE_INVALID;
+    }
+    val started: StoreStatus = store.start(store.ctx);
+    if (started == STORE_OK) { atomic.store(?manager.state, MANAGER_ACTIVE); }
+    or { atomic.store(?manager.state, MANAGER_STOPPED); }
     ret started;
 }
 
 pub fun stop_manager(manager: *Manager) StoreStatus {
-    if (manager == nil || !range_valid(manager::*u8, $size_of(Manager))
-        || !manager.active) { ret STORE_INVALID; }
-    val stopped: StoreStatus = manager.store.stop(manager.store.ctx);
-    if (stopped == STORE_OK) { manager.active = false; }
+    if (manager == nil || !range_valid(manager::*u8, $size_of(Manager))) {
+        ret STORE_INVALID;
+    }
+    var expected: i64 = MANAGER_ACTIVE;
+    if (!atomic.cas(?manager.state, ?expected, MANAGER_STOPPING)) {
+        ret STORE_INVALID;
+    }
+    val store: Store = manager.store;
+    if (!manager_dependencies_valid(store, manager.codec, manager.cookie)) {
+        atomic.store(?manager.state, MANAGER_ACTIVE);
+        ret STORE_INVALID;
+    }
+    val stopped: StoreStatus = store.stop(store.ctx);
+    if (stopped == STORE_OK) { atomic.store(?manager.state, MANAGER_STOPPED); }
+    or { atomic.store(?manager.state, MANAGER_ACTIVE); }
     ret stopped;
 }
 
@@ -2651,6 +2726,12 @@ rec DurableProbe {
     replaces: usize;
     reaps:   usize;
     active:  bool;
+    manager: *Manager;
+    reenter: bool;
+    fail_start: bool;
+    fail_stop: bool;
+    start_reentry: StoreStatus;
+    stop_reentry: StoreStatus;
 }
 
 fun durable_aliases(ctx: ptr, data: *u8, len: usize) bool {
@@ -2663,6 +2744,10 @@ fun durable_start(ctx: ptr) StoreStatus {
     val probe: *DurableProbe = ctx::*DurableProbe;
     if (probe == nil || probe.active) { ret STORE_INVALID; }
     probe.starts = probe.starts + 1;
+    if (probe.reenter && probe.manager != nil) {
+        probe.start_reentry = start_manager(probe.manager);
+    }
+    if (probe.fail_start) { ret STORE_UNAVAILABLE; }
     probe.active = true;
     ret STORE_OK;
 }
@@ -2671,6 +2756,10 @@ fun durable_stop(ctx: ptr) StoreStatus {
     val probe: *DurableProbe = ctx::*DurableProbe;
     if (probe == nil || !probe.active) { ret STORE_INVALID; }
     probe.stops = probe.stops + 1;
+    if (probe.reenter && probe.manager != nil) {
+        probe.stop_reentry = stop_manager(probe.manager);
+    }
+    if (probe.fail_stop) { ret STORE_UNAVAILABLE; }
     probe.active = false;
     ret STORE_OK;
 }
@@ -2729,6 +2818,14 @@ fun durable_delete(ctx: ptr, id: view.View, expected_version: u64,
     if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
     probe.deletes = probe.deletes + 1;
     ret STORE_NOT_FOUND;
+}
+
+fun durable_store(probe: *DurableProbe) Store {
+    if (probe == nil) { ret Store{}; }
+    ret Store{ctx: probe::ptr, aliases: durable_aliases,
+        start: durable_start, stop: durable_stop, load: durable_load,
+        save: durable_save, delete: durable_delete,
+        replace: durable_replace, reap: durable_reap};
 }
 
 test "laurel.session: stores enforce versions, generations, capacity, and release" {
@@ -2817,6 +2914,62 @@ test "laurel.session: stores enforce versions, generations, capacity, and releas
         if (slots[i].used || slots[i].id_len != 0 || slots[i].data_len != 0
             || slots[i].id[0] != 0 || slots[i].data[0] != 0) { ret 17; }
         i = i + 1;
+    }
+    ret 0;
+}
+
+test "laurel.session: store scopes are disjoint from every operation range" {
+    var slots: [2]MemorySlot;
+    var memory: MemoryStore;
+    memory.initialized = false;
+    memory.active = false;
+    if (!init_memory_store(?memory, ?slots[0], 2)) { ret 1; }
+    val store: Store = memory_store(?memory);
+    if (store.start(store.ctx) != STORE_OK) { ret 2; }
+    var value: Session = Session{id: view.view("scope-source", 12),
+        data: view.view("state", 5), issued_at_unix: 1,
+        not_before_unix: 1, expires_at_unix: 100,
+        version: 0, generation: 0};
+    var saved: SaveResult;
+    if (store.save(store.ctx, ?value, 0, 1, ?saved, nil) != STORE_OK) {
+        ret 3;
+    }
+    var data: [2048]u8;
+    var loaded: Session;
+    if (store.load(store.ctx, value.id, 1, ?data[0], 2048, ?loaded, nil)
+        != STORE_OK) { ret 4; }
+    var scope: cancel.Scope;
+    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) {
+        ret 5;
+    }
+    val scope_bytes: *u8 = (?scope)::*u8;
+    if (store.load(store.ctx, value.id, 1, scope_bytes,
+            $size_of(cancel.Scope), ?loaded, ?scope) != STORE_INVALID
+        || store.load(store.ctx, value.id, 1, ?data[0], 2048,
+            scope_bytes::*Session, ?scope) != STORE_INVALID
+        || store.save(store.ctx, ?loaded, loaded.version, 1,
+            scope_bytes::*SaveResult, ?scope) != STORE_INVALID) {
+        ret 6;
+    }
+    var replacement: Session = Session{id: view.view("scope-target", 12),
+        data: view.view("replacement", 11), issued_at_unix: 1,
+        not_before_unix: 1, expires_at_unix: 100,
+        version: 0, generation: 0};
+    if (store.replace(store.ctx, loaded.id, loaded.version,
+            loaded.generation, ?replacement, 1, scope_bytes::*SaveResult,
+            ?scope) != STORE_INVALID
+        || store.reap(store.ctx, 1, scope_bytes::*usize, ?scope)
+            != STORE_INVALID
+        || cancel.reason(?scope) != cancel.ACTIVE || memory.len != 1) {
+        ret 7;
+    }
+    var unchanged: Session;
+    if (store.load(store.ctx, value.id, 1, ?data[0], 2048, ?unchanged, nil)
+            != STORE_OK
+        || unchanged.version != loaded.version
+        || unchanged.generation != loaded.generation
+        || !cancel.destroy(?scope) || store.stop(store.ctx) != STORE_OK) {
+        ret 8;
     }
     ret 0;
 }
@@ -2935,6 +3088,104 @@ test "laurel.session: store lifecycle serializes with active operations" {
     ret 0;
 }
 
+rec ManagerAttempt {
+    manager: *Manager;
+    start:   bool;
+    status:  StoreStatus;
+}
+
+fun manager_transition_worker(arg: *u8) {
+    val attempt: *ManagerAttempt = arg::*ManagerAttempt;
+    if (attempt.start) {
+        attempt.status = start_manager(attempt.manager);
+    } or {
+        attempt.status = stop_manager(attempt.manager);
+    }
+}
+
+test "laurel.session: manager ownership and lifecycle fail closed" {
+    var codec_fixture: CodecFixture;
+    if (!init_codec_fixture(?codec_fixture, AES_256_GCM, REPLAY_ALLOW, 8, 8)) {
+        ret 1;
+    }
+    var slots: [1]MemorySlot;
+    var memory: MemoryStore;
+    memory.initialized = false;
+    memory.active = false;
+    if (!init_memory_store(?memory, ?slots[0], 1)) { ret 2; }
+    slots[0].id[0] = 0x5a;
+    val aliased_manager: *Manager = (?slots[0])::*Manager;
+    if (init_manager(aliased_manager, memory_store(?memory),
+            codec_fixture.codec, secure_cookie("__Host-aliased"))
+        || slots[0].id[0] != 0x5a) { ret 3; }
+
+    var probe: DurableProbe;
+    var manager: Manager;
+    manager.state = MANAGER_EMPTY;
+    probe.manager = ?manager;
+    probe.fail_start = true;
+    if (!init_manager(?manager, durable_store(?probe), codec_fixture.codec,
+            secure_cookie("__Host-managed"))
+        || init_manager(?manager, durable_store(?probe), codec_fixture.codec,
+            secure_cookie("__Host-managed"))
+        || !manager_valid(?manager) || manager_active(?manager)
+        || start_manager(?manager) != STORE_UNAVAILABLE
+        || manager.state != MANAGER_STOPPED || manager_active(?manager)) {
+        ret 4;
+    }
+    probe.fail_start = false;
+    probe.reenter = true;
+    if (start_manager(?manager) != STORE_OK
+        || probe.start_reentry != STORE_INVALID || !manager_active(?manager)
+        || !manager_valid(?manager)) { ret 5; }
+    probe.fail_stop = true;
+    if (stop_manager(?manager) != STORE_UNAVAILABLE
+        || probe.stop_reentry != STORE_INVALID || !manager_active(?manager)
+        || manager.state != MANAGER_ACTIVE) { ret 6; }
+    probe.fail_stop = false;
+    if (stop_manager(?manager) != STORE_OK || manager_active(?manager)
+        || manager.state != MANAGER_STOPPED) { ret 7; }
+
+    probe.reenter = false;
+    var first: ManagerAttempt = ManagerAttempt{manager: ?manager,
+        start: true, status: STORE_UNAVAILABLE};
+    var second: ManagerAttempt = ManagerAttempt{manager: ?manager,
+        start: true, status: STORE_UNAVAILABLE};
+    var first_thread: thread.Thread;
+    var second_thread: thread.Thread;
+    thread.spawn_with(manager_transition_worker, (?first)::*u8,
+        ?first_thread);
+    thread.spawn_with(manager_transition_worker, (?second)::*u8,
+        ?second_thread);
+    if (first_thread.tid < 0 || second_thread.tid < 0
+        || thread.join_result(?first_thread) != 0
+        || thread.join_result(?second_thread) != 0
+        || ((first.status == STORE_OK)::usize
+            + (second.status == STORE_OK)::usize) != 1
+        || ((first.status == STORE_INVALID)::usize
+            + (second.status == STORE_INVALID)::usize) != 1
+        || !manager_active(?manager)) { ret 8; }
+
+    first.start = false;
+    first.status = STORE_UNAVAILABLE;
+    second.start = false;
+    second.status = STORE_UNAVAILABLE;
+    thread.spawn_with(manager_transition_worker, (?first)::*u8,
+        ?first_thread);
+    thread.spawn_with(manager_transition_worker, (?second)::*u8,
+        ?second_thread);
+    if (first_thread.tid < 0 || second_thread.tid < 0
+        || thread.join_result(?first_thread) != 0
+        || thread.join_result(?second_thread) != 0
+        || ((first.status == STORE_OK)::usize
+            + (second.status == STORE_OK)::usize) != 1
+        || ((first.status == STORE_INVALID)::usize
+            + (second.status == STORE_INVALID)::usize) != 1
+        || manager_active(?manager) || !manager_valid(?manager)
+        || !release_codec_fixture(?codec_fixture)) { ret 9; }
+    ret 0;
+}
+
 test "laurel.session: concurrent updates conflict and durable stores inject cleanly" {
     var slots: [1]MemorySlot;
     var memory: MemoryStore;
@@ -2982,15 +3233,14 @@ test "laurel.session: concurrent updates conflict and durable stores inject clea
     var probe: DurableProbe = DurableProbe{starts: 0, stops: 0,
         loads: 0, saves: 0, deletes: 0, replaces: 0, reaps: 0,
         active: false};
-    val durable: Store = Store{ctx: (?probe)::ptr, aliases: durable_aliases,
-        start: durable_start,
-        stop: durable_stop, load: durable_load, save: durable_save,
-        delete: durable_delete, replace: durable_replace, reap: durable_reap};
+    val durable: Store = durable_store(?probe);
     var manager: Manager;
-    manager.active = false;
+    manager.state = MANAGER_EMPTY;
     if (!init_manager(?manager, durable, codec_fixture.codec,
         secure_cookie("__Host-laurel"))
-        || start_manager(?manager) != STORE_OK || !manager.active) { ret 8; }
+        || start_manager(?manager) != STORE_OK || !manager_active(?manager)) {
+        ret 8;
+    }
     saved = SaveResult{};
     if (manager.store.save(manager.store.ctx, ?initial, 0, 1, ?saved, nil)
         != STORE_OK || saved.version != 1 || saved.generation != 77
@@ -2998,7 +3248,7 @@ test "laurel.session: concurrent updates conflict and durable stores inject clea
             ?loaded_data[0], 2048, ?loaded, nil) != STORE_NOT_FOUND
         || manager.store.delete(manager.store.ctx, initial.id, 1, 1, nil)
             != STORE_NOT_FOUND) { ret 9; }
-    if (stop_manager(?manager) != STORE_OK || manager.active
+    if (stop_manager(?manager) != STORE_OK || manager_active(?manager)
         || probe.starts != 1 || probe.stops != 1 || probe.loads != 1
         || probe.saves != 1 || probe.deletes != 1) { ret 10; }
     if (!release_codec_fixture(?codec_fixture)) { ret 11; }

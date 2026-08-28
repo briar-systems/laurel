@@ -38,7 +38,8 @@ Application composition, lifecycle, bounded admission, exact request-context
 ownership, typed routes, immutable middleware execution, value-owned errors,
 strict cookies, AEAD-protected sessions, bounded replay and nonce guards,
 generation-safe in-memory persistence, atomic session identity replacement,
-expired-record reclamation, and the durable store boundary are implemented.
+expired-record reclamation, ownership-safe manager lifecycle, and the durable
+store boundary are implemented.
 Security defaults, forms, uploads, rendering, realtime responses,
 and the in-process harness remain tracked work. Security-sensitive operations
 have no fallback implementation. See [`doc/routing.md`](doc/routing.md),

@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   length component.
 - Bound every key ring to one algorithm and nonce domain, staged callback inputs,
   detected mutated replay claims, and serialized in-memory lifecycle state.
+- Rejected cancellation-scope output aliases before store locking and made
+  manager ownership and lifecycle transitions atomic and reentrancy-safe.
 
 ## [0.2.0] - 2026-08-27
 
