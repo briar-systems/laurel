@@ -81,7 +81,13 @@ allocator.
 Context binding requires non-null allocate, reallocate, and deallocate
 callbacks. Middleware and the default mapper revalidate those callbacks at each
 allocating boundary. An allocator mutated into an invalid state fails closed
-without invoking a callback.
+without invoking another callback. After every allocator callback, the default
+mapper revalidates cancellation, response identity and generation, status,
+commit and body ownership, and exact field and trailer storage. It initializes
+the error response only after the final revalidation. A callback that commits,
+installs a live body, changes field storage or response identity, advances the
+generation, or cancels the request keeps that mutation and causes mapping to
+fail without replacement.
 
 ## Panic policy
 

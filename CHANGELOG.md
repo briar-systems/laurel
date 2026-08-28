@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pinned `mach-std` to v0.29.0 and `mach-http` to v0.3.0.
 - Routed handler response ownership through the bound request context.
 - Required complete allocator callback tables at context binding and allocating boundaries.
+- Revalidated response, body, field storage, generation, and cancellation state after allocator callbacks.
 
 ## [0.2.0] - 2026-08-27
 
