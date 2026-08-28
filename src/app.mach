@@ -1,7 +1,9 @@
 # explicit application assembly and lifecycle ownership
 
 use A: std.allocator;
+use O: std.types.option;
 use R: std.types.result;
+use std.allocator.fixed;
 use std.chrono.time;
 use std.sync.atomic;
 use std.sync.cancel;
@@ -260,7 +262,7 @@ fun invalid_execution(detail: str) middleware.Outcome {
         action: 0,
         app_error: error.make(error.INTERNAL, 500,
             "internal server error", detail, false),
-        render_error: detail,
+        render_error: error.render_failure(detail),
     };
 }
 
@@ -359,8 +361,8 @@ fun test_handler(context_ptr: ptr, request_context: *context.Context) R.Result[u
 }
 
 fun test_error(context_ptr: ptr, app_error: error.AppError,
-    request_context: *context.Context) R.Result[u8, str] {
-    ret R.ok[u8, str](1);
+    request_context: *context.Context) R.Result[u8, error.RenderFailure] {
+    ret R.ok[u8, error.RenderFailure](1);
 }
 
 fun test_observer_start(context_ptr: ptr, event: *observability.RequestEvent) {}
@@ -433,7 +435,11 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     var http_exchange: exchange.Exchange;
     if (!exchange.init(?http_exchange, ?request, ?response, ?informationals[0], 8,
         ?scope, 101, configured) || !exchange.begin(?http_exchange)) { ret 9; }
+    var allocation_bytes: [4096]u8;
+    var allocation_state: fixed.FixedState;
     var allocator: A.Allocator;
+    if (O.is_some[*u8](fixed.make(?allocator, ?allocation_state,
+        ?allocation_bytes[0], 4096))) { ret 10; }
     var request_context: context.Context;
     if (!bind_context(?app, ?request_context, ?http_exchange,
         context.Params{items: nil, len: 0, generation: 101}, ?allocator,

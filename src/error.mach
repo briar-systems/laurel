@@ -9,6 +9,7 @@ use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_len;
 use std.types.view;
+use std.text.utf8;
 use http.core.body;
 use http.core.field;
 use http.core.message;
@@ -27,28 +28,108 @@ pub val UNAVAILABLE:  Kind = 7;
 pub val INTERNAL:     Kind = 8;
 pub val CANCELLED:    Kind = 9;
 
+pub val MAX_PUBLIC_BYTES: usize = 512;
+pub val MAX_DETAIL_BYTES: usize = 2048;
+pub val MAX_RENDER_ERROR_BYTES: usize = 512;
+
 pub rec AppError {
-    kind:       Kind;
-    status:     u16;
-    public_msg: view.View;
-    detail:     view.View;
-    retryable:  bool;
+    kind:         Kind;
+    status:       u16;
+    public_bytes: [512]u8;
+    public_len:   usize;
+    detail_bytes: [2048]u8;
+    detail_len:   usize;
+    retryable:    bool;
+}
+
+pub rec RenderFailure {
+    bytes: [512]u8;
+    len:   usize;
+}
+
+fun copy_view(input: view.View, output: *u8, capacity: usize) usize {
+    if (input.len == 0 || input.len > capacity || input.data == nil || output == nil) {
+        ret 0;
+    }
+    var i: usize = 0;
+    for (i < input.len) {
+        output[i] = input.data[i];
+        i = i + 1;
+    }
+    ret input.len;
+}
+
+fun clear_bytes(output: *u8, capacity: usize) {
+    if (output == nil) { ret; }
+    var i: usize = 0;
+    for (i < capacity) {
+        output[i] = 0;
+        i = i + 1;
+    }
 }
 
 pub fun make_view(kind: Kind, status_code: u16, public_msg: view.View,
     detail: view.View, retryable: bool) AppError {
-    ret AppError{kind: kind, status: status_code, public_msg: public_msg,
-        detail: detail, retryable: retryable};
+    var result: AppError;
+    result.kind = kind;
+    result.status = status_code;
+    clear_bytes(?result.public_bytes[0], MAX_PUBLIC_BYTES);
+    clear_bytes(?result.detail_bytes[0], MAX_DETAIL_BYTES);
+    result.public_len = copy_view(public_msg, ?result.public_bytes[0],
+        MAX_PUBLIC_BYTES);
+    result.detail_len = copy_view(detail, ?result.detail_bytes[0],
+        MAX_DETAIL_BYTES);
+    result.retryable = retryable;
+    ret result;
 }
 
 pub fun make(kind: Kind, status_code: u16, public_msg: str,
     detail: str, retryable: bool) AppError {
-    ret make_view(kind, status_code,
-        view.view(public_msg, str_len(public_msg)),
-        view.view(detail, str_len(detail)), retryable);
+    var public_value: view.View = view.view(nil, 0);
+    var detail_value: view.View = view.view(nil, 0);
+    if (public_msg != nil) {
+        public_value = view.view(public_msg, str_len(public_msg));
+    }
+    if (detail != nil) { detail_value = view.view(detail, str_len(detail)); }
+    ret make_view(kind, status_code, public_value, detail_value, retryable);
 }
 
-pub def RenderFun: fun(ptr, AppError, *context.Context) R.Result[u8, str];
+pub fun public_text(app_error: *AppError) view.View {
+    if (app_error == nil || app_error.public_len == 0
+        || app_error.public_len > MAX_PUBLIC_BYTES) { ret view.view(nil, 0); }
+    ret view.view(?app_error.public_bytes[0], app_error.public_len);
+}
+
+pub fun private_detail(app_error: *AppError) view.View {
+    if (app_error == nil || app_error.detail_len == 0
+        || app_error.detail_len > MAX_DETAIL_BYTES) { ret view.view(nil, 0); }
+    ret view.view(?app_error.detail_bytes[0], app_error.detail_len);
+}
+
+pub fun render_failure_from_view(detail: view.View) RenderFailure {
+    var result: RenderFailure;
+    clear_bytes(?result.bytes[0], MAX_RENDER_ERROR_BYTES);
+    result.len = 0;
+    result.len = copy_view(detail, ?result.bytes[0],
+        MAX_RENDER_ERROR_BYTES);
+    ret result;
+}
+
+pub fun render_failure(detail: str) RenderFailure {
+    if (detail == nil) {
+        ret render_failure_from_view(view.view(nil, 0));
+    }
+    ret render_failure_from_view(view.view(detail, str_len(detail)));
+}
+
+pub fun render_failure_view(failure: *RenderFailure) view.View {
+    if (failure == nil || failure.len == 0
+        || failure.len > MAX_RENDER_ERROR_BYTES) { ret view.view(nil, 0); }
+    ret view.view(?failure.bytes[0], failure.len);
+}
+
+pub def RenderFun: fun(ptr, AppError, *context.Context)
+    R.Result[u8, RenderFailure];
 
 pub rec Mapper {
     ctx:    ptr;
@@ -92,21 +173,26 @@ fun fallback_message(kind: Kind) view.View {
 }
 
 fun public_message_valid(value: view.View, limit: usize) bool {
-    if (value.len == 0 || value.len > limit || value.data == nil) { ret false; }
+    if (value.len == 0 || value.len > limit || value.data == nil
+        || !utf8.validate(value.data, value.len)) { ret false; }
     var i: usize = 0;
     for (i < value.len) {
-        val c: u8 = value.data[i];
-        if (c == 0 || c == '\r' || c == '\n' || c < ' ' || c == 127) { ret false; }
-        i = i + 1;
+        var codepoint: utf8.Codepoint;
+        val consumed: usize = utf8.decode(?value.data[i], value.len - i,
+            ?codepoint);
+        if (consumed == 0 || codepoint <= 0x1f
+            || (codepoint >= 0x7f && codepoint <= 0x9f)) { ret false; }
+        i = i + consumed;
     }
     ret true;
 }
 
-fun public_message(app_error: AppError, limit: usize) view.View {
+fun public_message(app_error: *AppError, limit: usize) view.View {
+    val supplied: view.View = public_text(app_error);
     if (app_error.kind != INTERNAL && app_error.kind >= BAD_REQUEST
         && app_error.kind <= CANCELLED
-        && public_message_valid(app_error.public_msg, limit)) {
-        ret app_error.public_msg;
+        && public_message_valid(supplied, limit)) {
+        ret supplied;
     }
     ret fallback_message(app_error.kind);
 }
@@ -161,6 +247,7 @@ fun default_valid(renderer: *Default) bool {
         || renderer.limits.response_fields.max_value_bytes < 25
         || renderer.limits.response_body.max_chunk_bytes == 0
         || renderer.limits.response_body.max_chunks == 0
+        || renderer.max_public_bytes > MAX_PUBLIC_BYTES
         || renderer.max_public_bytes::u64 > renderer.limits.response_body.max_bytes) {
         ret false;
     }
@@ -186,29 +273,33 @@ pub fun initialize_default(renderer: *Default, limits: message.Limits,
 }
 
 fun render_default(ctx: ptr, app_error: AppError,
-    request_context: *context.Context) R.Result[u8, str] {
+    request_context: *context.Context) R.Result[u8, RenderFailure] {
     val renderer: *Default = ctx::*Default;
     if (!default_valid(renderer) || !context.active(request_context)
-        || request_context.alloc == nil) {
-        ret R.err[u8, str]("invalid default error renderer");
+        || !context.allocator_valid(request_context.alloc)) {
+        ret R.err[u8, RenderFailure](render_failure(
+            "invalid default error renderer"));
     }
     val response: *message.Response = context.response(request_context);
     if (response == nil || response.committed
         || response.body_kind != message.BODY_NONE
         || response.fields.capacity < 2) {
-        ret R.err[u8, str]("error response is unavailable");
+        ret R.err[u8, RenderFailure](render_failure(
+            "error response is unavailable"));
     }
-    val selected_message: view.View = public_message(app_error,
+    val selected_message: view.View = public_message(?app_error,
         renderer.max_public_bytes);
     val body_allocation: R.Result[*DefaultBody, *u8] =
         A.allocate[DefaultBody](request_context.alloc, 1);
     if (R.is_err[*DefaultBody, *u8](body_allocation)) {
-        ret R.err[u8, str]("default error body allocation failed");
+        ret R.err[u8, RenderFailure](render_failure(
+            "default error body allocation failed"));
     }
     val message_allocation: R.Result[*u8, *u8] =
         A.allocate[u8](request_context.alloc, selected_message.len);
     if (R.is_err[*u8, *u8](message_allocation)) {
-        ret R.err[u8, str]("default error message allocation failed");
+        ret R.err[u8, RenderFailure](render_failure(
+            "default error message allocation failed"));
     }
     val message_bytes: *u8 = R.unwrap_ok[*u8, *u8](message_allocation);
     var i: usize = 0;
@@ -225,7 +316,8 @@ fun render_default(ctx: ptr, app_error: AppError,
         renderer.limits.response_body, ?response.trailers,
         request_context.scope);
     if (!state.reader.valid) {
-        ret R.err[u8, str]("default error body is invalid");
+        ret R.err[u8, RenderFailure](render_failure(
+            "default error body is invalid"));
     }
     val response_fields: *field.Field = response.fields.items;
     val response_field_capacity: usize = response.fields.capacity;
@@ -246,9 +338,10 @@ fun render_default(ctx: ptr, app_error: AppError,
             value: view.view("no-store", 8), sensitive: false}) != field.ADD_OK
         || message.set_body_reader(response, ?state.reader, renderer.limits)
             != message.RESPONSE_OK) {
-        ret R.err[u8, str]("default error response initialization failed");
+        ret R.err[u8, RenderFailure](render_failure(
+            "default error response initialization failed"));
     }
-    ret R.ok[u8, str](1);
+    ret R.ok[u8, RenderFailure](1);
 }
 
 pub fun default_mapper(renderer: *Default) Mapper {
@@ -257,10 +350,75 @@ pub fun default_mapper(renderer: *Default) Mapper {
 }
 
 test "laurel.error: make preserves public and private classification" {
-    val app_error: AppError = make(NOT_FOUND, 404,
+    var app_error: AppError = make(NOT_FOUND, 404,
         "not found", "private route name", false);
+    val public_value: view.View = public_text(?app_error);
+    val detail_value: view.View = private_detail(?app_error);
     if (app_error.kind != NOT_FOUND || app_error.status != 404
-        || app_error.retryable || app_error.public_msg.len != 9
-        || app_error.detail.len != 18) { ret 1; }
+        || app_error.retryable || public_value.len != 9
+        || detail_value.len != 18 || public_value.data[0] != 'n'
+        || detail_value.data[0] != 'p') { ret 1; }
+    var source: [5]u8;
+    source[0] = 'h';
+    source[1] = 'e';
+    source[2] = 'l';
+    source[3] = 'l';
+    source[4] = 'o';
+    app_error = make_view(CONFLICT, 409, view.view(?source[0], 5),
+        view.view(?source[0], 5), true);
+    source[0] = 'x';
+    if (public_text(?app_error).data[0] != 'h'
+        || private_detail(?app_error).data[0] != 'h') { ret 2; }
+    ret 0;
+}
+
+test "laurel.error: public text requires RFC 3629 UTF-8 without controls" {
+    var valid: [7]u8;
+    valid[0] = 'o';
+    valid[1] = 'k';
+    valid[2] = 0xe2;
+    valid[3] = 0x82;
+    valid[4] = 0xac;
+    valid[5] = '!';
+    valid[6] = '?';
+    if (!public_message_valid(view.view(?valid[0], 7), 7)) { ret 1; }
+    var overlong: [2]u8;
+    overlong[0] = 0xc0;
+    overlong[1] = 0xaf;
+    var surrogate: [3]u8;
+    surrogate[0] = 0xed;
+    surrogate[1] = 0xa0;
+    surrogate[2] = 0x80;
+    var truncated: [2]u8;
+    truncated[0] = 0xe2;
+    truncated[1] = 0x82;
+    var continuation: [1]u8;
+    continuation[0] = 0x80;
+    var newline: [3]u8;
+    newline[0] = 'a';
+    newline[1] = 0x0a;
+    newline[2] = 'b';
+    var delete: [1]u8;
+    delete[0] = 0x7f;
+    var c1: [2]u8;
+    c1[0] = 0xc2;
+    c1[1] = 0x85;
+    if (public_message_valid(view.view(?overlong[0], 2), 8)
+        || public_message_valid(view.view(?surrogate[0], 3), 8)
+        || public_message_valid(view.view(?truncated[0], 2), 8)
+        || public_message_valid(view.view(?continuation[0], 1), 8)
+        || public_message_valid(view.view(?newline[0], 3), 8)
+        || public_message_valid(view.view(?delete[0], 1), 8)
+        || public_message_valid(view.view(?c1[0], 2), 8)) { ret 2; }
+    var invalid: AppError = make_view(CONFLICT, 409,
+        view.view(?newline[0], 3), view.view(nil, 0), false);
+    val fallback: view.View = public_message(?invalid, 8);
+    if (fallback.len != 8 || fallback.data[0] != 'c') { ret 3; }
+    var public_oversize: [513]u8;
+    var detail_oversize: [2049]u8;
+    invalid = make_view(CONFLICT, 409, view.view(?public_oversize[0], 513),
+        view.view(?detail_oversize[0], 2049), false);
+    if (public_text(?invalid).len != 0
+        || private_detail(?invalid).len != 0) { ret 4; }
     ret 0;
 }

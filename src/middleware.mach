@@ -38,12 +38,13 @@ pub rec Policy {
 }
 
 pub rec Next {
-    state:      ptr;
-    generation: u64;
-    index:      usize;
+    context:            *context.Context;
+    request_generation: u64;
+    execution_id:       u64;
+    index:              usize;
 }
 
-pub def MiddlewareFun: fun(ptr, *Next, *context.Context)
+pub def MiddlewareFun: fun(ptr, Next, *context.Context)
     R.Result[u8, error.AppError];
 
 pub rec Middleware {
@@ -60,24 +61,25 @@ pub rec Outcome {
     status:       ExecutionStatus;
     action:       u8;
     app_error:    error.AppError;
-    render_error: str;
+    render_error: error.RenderFailure;
 }
 
-rec Frame {
-    execution:  ptr;
-    generation: u64;
-    index:      usize;
-    calls:      usize;
-    active:     bool;
+rec Slot {
+    middleware:   Middleware;
+    execution_id: u64;
+    index:        usize;
+    calls:        usize;
+    active:       bool;
 }
 
 rec Execution {
-    stack:      *Stack;
-    terminal:   handler.Handler;
-    context:    *context.Context;
-    frames:     *Frame;
-    generation: u64;
-    active:     bool;
+    terminal:     handler.Handler;
+    context:      *context.Context;
+    slots:        *Slot;
+    len:          usize;
+    generation:   u64;
+    execution_id: u64;
+    active:       bool;
 }
 
 pub fun policy_default() Policy {
@@ -113,16 +115,17 @@ fun current_cancellation(request_context: *context.Context) error.AppError {
 
 fun advance(execution: *Execution, index: usize)
     R.Result[u8, error.AppError] {
-    if (execution == nil || !execution.active || execution.stack == nil
+    if (execution == nil || !execution.active
         || execution.context == nil || execution.generation == 0
+        || execution.execution_id == 0
         || execution.context.generation != execution.generation
-        || index > execution.stack.len) {
+        || index > execution.len) {
         ret R.err[u8, error.AppError](internal("invalid middleware execution"));
     }
     if (!context.active(execution.context)) {
         ret R.err[u8, error.AppError](current_cancellation(execution.context));
     }
-    if (index == execution.stack.len) {
+    if (index == execution.len) {
         val terminal_result: R.Result[u8, error.AppError] =
             execution.terminal.call(execution.terminal.ctx, execution.context);
         if (!context.active(execution.context)) {
@@ -135,19 +138,21 @@ fun advance(execution: *Execution, index: usize)
         }
         ret terminal_result;
     }
-    val middleware_item: *Middleware = ?execution.stack.items[index];
-    val frame: *Frame = ?execution.frames[index];
-    frame.execution = execution::ptr;
-    frame.generation = execution.generation;
-    frame.index = index;
-    frame.calls = 0;
-    frame.active = true;
-    var next_handler: Next = Next{state: frame::ptr,
-        generation: execution.generation, index: index};
-    val result: R.Result[u8, error.AppError] = middleware_item.call(
-        middleware_item.ctx, ?next_handler, execution.context);
-    frame.active = false;
-    if (frame.calls > 1) {
+    if (execution.slots == nil) {
+        ret R.err[u8, error.AppError](internal("middleware snapshot is unavailable"));
+    }
+    val slot: *Slot = ?execution.slots[index];
+    slot.execution_id = execution.execution_id;
+    slot.index = index;
+    slot.calls = 0;
+    slot.active = true;
+    val next_handler: Next = Next{context: execution.context,
+        request_generation: execution.generation,
+        execution_id: execution.execution_id, index: index};
+    val result: R.Result[u8, error.AppError] = slot.middleware.call(
+        slot.middleware.ctx, next_handler, execution.context);
+    slot.active = false;
+    if (slot.calls > 1) {
         ret R.err[u8, error.AppError](internal("middleware invoked next more than once"));
     }
     if (!context.active(execution.context)) {
@@ -161,115 +166,155 @@ fun advance(execution: *Execution, index: usize)
     ret result;
 }
 
-pub fun call(next_handler: *Next, request_context: *context.Context)
+pub fun call(next_handler: Next, request_context: *context.Context)
     R.Result[u8, error.AppError] {
-    if (next_handler == nil || next_handler.state == nil
-        || next_handler.generation == 0) {
+    if (next_handler.context == nil || request_context == nil
+        || next_handler.context != request_context
+        || next_handler.request_generation == 0
+        || next_handler.execution_id == 0) {
         ret R.err[u8, error.AppError](internal("invalid middleware next token"));
     }
-    val frame: *Frame = next_handler.state::*Frame;
-    val execution: *Execution = frame.execution::*Execution;
-    if (execution == nil || !execution.active || !frame.active
-        || frame.generation != next_handler.generation
-        || frame.index != next_handler.index
-        || execution.generation != next_handler.generation
-        || execution.context != request_context) {
+    val state: ptr = context.active_execution(request_context,
+        next_handler.request_generation, next_handler.execution_id);
+    if (state == nil) {
         ret R.err[u8, error.AppError](internal("stale middleware next token"));
     }
-    if (frame.calls != 0) {
-        frame.calls = 2;
+    val execution: *Execution = state::*Execution;
+    if (execution == nil || !execution.active || execution.slots == nil
+        || execution.execution_id != next_handler.execution_id
+        || execution.generation != next_handler.request_generation
+        || execution.context != request_context
+        || next_handler.index >= execution.len) {
+        ret R.err[u8, error.AppError](internal("stale middleware next token"));
+    }
+    val slot: *Slot = ?execution.slots[next_handler.index];
+    if (!slot.active || slot.execution_id != next_handler.execution_id
+        || slot.index != next_handler.index) {
+        ret R.err[u8, error.AppError](internal("stale middleware next token"));
+    }
+    if (slot.calls != 0) {
+        slot.calls = 2;
         ret R.err[u8, error.AppError](internal("middleware next invoked more than once"));
     }
-    frame.calls = 1;
-    ret advance(execution, frame.index + 1);
+    slot.calls = 1;
+    ret advance(execution, slot.index + 1);
 }
 
 fun outcome(status: ExecutionStatus, action: u8,
-    app_error: error.AppError, render_error: str) Outcome {
+    app_error: error.AppError, render_error: error.RenderFailure) Outcome {
     ret Outcome{status: status, action: action,
         app_error: app_error, render_error: render_error};
+}
+
+fun empty_render_failure() error.RenderFailure {
+    ret error.RenderFailure{};
+}
+
+fun unmapped(app_error: error.AppError, detail: str) Outcome {
+    ret outcome(EXECUTION_ERROR_UNMAPPED, 0, app_error,
+        error.render_failure(detail));
+}
+
+fun map_error(app_error: error.AppError, mapper: error.Mapper,
+    request_context: *context.Context) Outcome {
+    if (app_error.kind == error.CANCELLED || !context.active(request_context)) {
+        ret outcome(EXECUTION_CANCELLED, 0, app_error,
+            empty_render_failure());
+    }
+    if (mapper.render == nil || !context.allocator_valid(request_context.alloc)) {
+        ret unmapped(app_error, "error mapper unavailable");
+    }
+    val rendered: R.Result[u8, error.RenderFailure] = mapper.render(mapper.ctx,
+        app_error, request_context);
+    if (R.is_err[u8, error.RenderFailure](rendered)) {
+        ret outcome(EXECUTION_ERROR_UNMAPPED, 0, app_error,
+            R.unwrap_err[u8, error.RenderFailure](rendered));
+    }
+    ret outcome(EXECUTION_ERROR_RENDERED, 0, app_error,
+        empty_render_failure());
+}
+
+fun execute_claimed(source_items: *Middleware, source_len: usize,
+    execution: *Execution, mapper: error.Mapper) Outcome {
+    if (source_len != 0) {
+        val allocation: R.Result[*Slot, *u8] =
+            A.allocate[Slot](execution.context.alloc, source_len);
+        if (R.is_err[*Slot, *u8](allocation)) {
+            ret map_error(unavailable("middleware snapshot allocation failed"),
+                mapper, execution.context);
+        }
+        execution.slots = R.unwrap_ok[*Slot, *u8](allocation);
+    }
+    var i: usize = 0;
+    for (i < source_len) {
+        if (source_items[i].call == nil) {
+            ret map_error(internal("middleware callback is missing"), mapper,
+                execution.context);
+        }
+        execution.slots[i].middleware = source_items[i];
+        execution.slots[i].execution_id = execution.execution_id;
+        execution.slots[i].index = i;
+        execution.slots[i].calls = 0;
+        execution.slots[i].active = false;
+        i = i + 1;
+    }
+    val result: R.Result[u8, error.AppError] = advance(execution, 0);
+    execution.active = false;
+    if (!R.is_err[u8, error.AppError](result)) {
+        val action: u8 = R.unwrap_ok[u8, error.AppError](result);
+        if (action == handler.RESPOND) {
+            ret outcome(EXECUTION_RESPOND, action, error.AppError{},
+                empty_render_failure());
+        }
+        ret outcome(EXECUTION_NEXT, action, error.AppError{},
+            empty_render_failure());
+    }
+    ret map_error(R.unwrap_err[u8, error.AppError](result), mapper,
+        execution.context);
 }
 
 pub fun execute(stack: *Stack, terminal: handler.Handler,
     mapper: error.Mapper, request_context: *context.Context,
     policy: Policy) Outcome {
+    if (request_context != nil) {
+        val reason: cancel.Reason = context.reason(request_context);
+        if (reason == cancel.CANCELLED || reason == cancel.TIMED_OUT) {
+            ret outcome(EXECUTION_CANCELLED, 0, cancellation(reason),
+                empty_render_failure());
+        }
+    }
     if (stack == nil || (stack.len != 0 && stack.items == nil)
         || terminal.call == nil || request_context == nil
-        || !context.active(request_context) || request_context.alloc == nil
+        || !context.active(request_context)
+        || !context.allocator_valid(request_context.alloc)
         || policy.max_depth == 0 || stack.len > policy.max_depth
         || policy.panic_policy != PANIC_ABORT || mapper.render == nil) {
         val app_error: error.AppError = internal("invalid middleware policy or input");
         if (request_context != nil && context.active(request_context)
+            && context.allocator_valid(request_context.alloc)
             && mapper.render != nil) {
-            val rendered: R.Result[u8, str] = mapper.render(mapper.ctx,
-                app_error, request_context);
-            if (!R.is_err[u8, str](rendered)) {
-                ret outcome(EXECUTION_ERROR_RENDERED, 0, app_error, nil);
-            }
-            ret outcome(EXECUTION_ERROR_UNMAPPED, 0, app_error,
-                R.unwrap_err[u8, str](rendered));
+            ret map_error(app_error, mapper, request_context);
         }
-        ret outcome(EXECUTION_ERROR_UNMAPPED, 0, app_error,
-            "error mapper unavailable");
+        ret unmapped(app_error, "error mapper unavailable");
     }
-    var i: usize = 0;
-    for (i < stack.len) {
-        if (stack.items[i].call == nil) {
-            val app_error: error.AppError = internal("middleware callback is missing");
-            val rendered: R.Result[u8, str] = mapper.render(mapper.ctx,
-                app_error, request_context);
-            if (!R.is_err[u8, str](rendered)) {
-                ret outcome(EXECUTION_ERROR_RENDERED, 0, app_error, nil);
-            }
-            ret outcome(EXECUTION_ERROR_UNMAPPED, 0, app_error,
-                R.unwrap_err[u8, str](rendered));
-        }
-        i = i + 1;
+    val source_items: *Middleware = stack.items;
+    val source_len: usize = stack.len;
+    var execution: Execution = Execution{terminal: terminal,
+        context: request_context, slots: nil, len: source_len,
+        generation: request_context.generation, execution_id: 0, active: true};
+    var execution_id: u64 = 0;
+    if (!context.claim_execution(request_context, (?execution)::ptr,
+        ?execution_id)) {
+        execution.active = false;
+        ret unmapped(internal("middleware context already executing"),
+            "middleware context already executing");
     }
-    var frames: *Frame = nil;
-    if (stack.len != 0) {
-        val allocation: R.Result[*Frame, *u8] =
-            A.allocate[Frame](request_context.alloc, stack.len);
-        if (R.is_err[*Frame, *u8](allocation)) {
-            val app_error: error.AppError = unavailable(
-                "middleware frame allocation failed");
-            val rendered: R.Result[u8, str] = mapper.render(mapper.ctx,
-                app_error, request_context);
-            if (!R.is_err[u8, str](rendered)) {
-                ret outcome(EXECUTION_ERROR_RENDERED, 0, app_error, nil);
-            }
-            ret outcome(EXECUTION_ERROR_UNMAPPED, 0, app_error,
-                R.unwrap_err[u8, str](rendered));
-        }
-        frames = R.unwrap_ok[*Frame, *u8](allocation);
-    }
-    var execution: Execution = Execution{stack: stack, terminal: terminal,
-        context: request_context, frames: frames,
-        generation: request_context.generation, active: true};
-    val result: R.Result[u8, error.AppError] = advance(?execution, 0);
+    execution.execution_id = execution_id;
+    val completed: Outcome = execute_claimed(source_items, source_len,
+        ?execution, mapper);
     execution.active = false;
-    if (!R.is_err[u8, error.AppError](result)) {
-        val action: u8 = R.unwrap_ok[u8, error.AppError](result);
-        if (action == handler.RESPOND) {
-            ret outcome(EXECUTION_RESPOND, action, error.AppError{}, nil);
-        }
-        ret outcome(EXECUTION_NEXT, action, error.AppError{}, nil);
-    }
-    val app_error: error.AppError = R.unwrap_err[u8, error.AppError](result);
-    if (app_error.kind == error.CANCELLED || !context.active(request_context)) {
-        ret outcome(EXECUTION_CANCELLED, 0, app_error, nil);
-    }
-    if (mapper.render == nil) {
-        ret outcome(EXECUTION_ERROR_UNMAPPED, 0, app_error,
-            "error mapper unavailable");
-    }
-    val rendered: R.Result[u8, str] = mapper.render(mapper.ctx,
-        app_error, request_context);
-    if (R.is_err[u8, str](rendered)) {
-        ret outcome(EXECUTION_ERROR_UNMAPPED, 0, app_error,
-            R.unwrap_err[u8, str](rendered));
-    }
-    ret outcome(EXECUTION_ERROR_RENDERED, 0, app_error, nil);
+    context.release_execution(request_context, execution_id);
+    ret completed;
 }
 
 rec Fixture {
@@ -298,6 +343,27 @@ rec Trace {
 
 rec MutableError {
     message: [14]u8;
+}
+
+rec RetainedNext {
+    token: Next;
+    saved: bool;
+}
+
+rec StackMutation {
+    trace:             *Trace;
+    stack:             *Stack;
+    replacement_items: *Middleware;
+    replacement_len:   usize;
+}
+
+rec Reentrant {
+    trace:        *Trace;
+    stack:        *Stack;
+    terminal:     handler.Handler;
+    mapper:       error.Mapper;
+    calls:        usize;
+    inner_status: ExecutionStatus;
 }
 
 fun fixture_init(fixture: *Fixture, generation: u64) bool {
@@ -353,7 +419,7 @@ fun record(trace: *Trace, event: u8) bool {
     ret true;
 }
 
-fun first_middleware(ctx: ptr, next_handler: *Next,
+fun first_middleware(ctx: ptr, next_handler: Next,
     request_context: *context.Context) R.Result[u8, error.AppError] {
     val trace: *Trace = ctx::*Trace;
     if (!record(trace, 1)) { ret R.err[u8, error.AppError](internal("trace overflow")); }
@@ -362,7 +428,7 @@ fun first_middleware(ctx: ptr, next_handler: *Next,
     ret result;
 }
 
-fun second_middleware(ctx: ptr, next_handler: *Next,
+fun second_middleware(ctx: ptr, next_handler: Next,
     request_context: *context.Context) R.Result[u8, error.AppError] {
     val trace: *Trace = ctx::*Trace;
     if (!record(trace, 2)) { ret R.err[u8, error.AppError](internal("trace overflow")); }
@@ -379,14 +445,14 @@ fun traced_terminal(ctx: ptr, request_context: *context.Context)
     ret R.ok[u8, error.AppError](handler.RESPOND);
 }
 
-fun short_middleware(ctx: ptr, next_handler: *Next,
+fun short_middleware(ctx: ptr, next_handler: Next,
     request_context: *context.Context) R.Result[u8, error.AppError] {
     val trace: *Trace = ctx::*Trace;
     if (!record(trace, 7)) { ret R.err[u8, error.AppError](internal("trace overflow")); }
     ret R.ok[u8, error.AppError](handler.RESPOND);
 }
 
-fun double_middleware(ctx: ptr, next_handler: *Next,
+fun double_middleware(ctx: ptr, next_handler: Next,
     request_context: *context.Context) R.Result[u8, error.AppError] {
     val first: R.Result[u8, error.AppError] = call(next_handler, request_context);
     val second: R.Result[u8, error.AppError] = call(next_handler, request_context);
@@ -417,7 +483,7 @@ fun mutable_error_terminal(ctx: ptr, request_context: *context.Context)
         view.view("private detail", 14), false));
 }
 
-fun inner_error(ctx: ptr, next_handler: *Next,
+fun inner_error(ctx: ptr, next_handler: Next,
     request_context: *context.Context) R.Result[u8, error.AppError] {
     val trace: *Trace = ctx::*Trace;
     if (!record(trace, 2)) { ret R.err[u8, error.AppError](internal("trace overflow")); }
@@ -425,7 +491,7 @@ fun inner_error(ctx: ptr, next_handler: *Next,
         "inner forbidden", "inner private detail", false));
 }
 
-fun replace_error(ctx: ptr, next_handler: *Next,
+fun replace_error(ctx: ptr, next_handler: Next,
     request_context: *context.Context) R.Result[u8, error.AppError] {
     val trace: *Trace = ctx::*Trace;
     if (!record(trace, 1)) { ret R.err[u8, error.AppError](internal("trace overflow")); }
@@ -438,7 +504,7 @@ fun replace_error(ctx: ptr, next_handler: *Next,
     ret result;
 }
 
-fun cancel_middleware(ctx: ptr, next_handler: *Next,
+fun cancel_middleware(ctx: ptr, next_handler: Next,
     request_context: *context.Context) R.Result[u8, error.AppError] {
     val trace: *Trace = ctx::*Trace;
     if (!record(trace, 1) || !cancel.cancel(request_context.scope)) {
@@ -447,6 +513,49 @@ fun cancel_middleware(ctx: ptr, next_handler: *Next,
     val result: R.Result[u8, error.AppError] = call(next_handler, request_context);
     if (!record(trace, 2)) { ret R.err[u8, error.AppError](internal("trace overflow")); }
     ret result;
+}
+
+fun retain_middleware(ctx: ptr, next_handler: Next,
+    request_context: *context.Context) R.Result[u8, error.AppError] {
+    val retained: *RetainedNext = ctx::*RetainedNext;
+    retained.token = next_handler;
+    retained.saved = true;
+    ret call(next_handler, request_context);
+}
+
+fun mutate_stack_middleware(ctx: ptr, next_handler: Next,
+    request_context: *context.Context) R.Result[u8, error.AppError] {
+    val mutation: *StackMutation = ctx::*StackMutation;
+    if (mutation == nil || mutation.stack == nil || mutation.trace == nil
+        || !record(mutation.trace, 8)) {
+        ret R.err[u8, error.AppError](internal("invalid stack mutation test"));
+    }
+    mutation.stack.items = mutation.replacement_items;
+    mutation.stack.len = mutation.replacement_len;
+    ret call(next_handler, request_context);
+}
+
+fun reentrant_middleware(ctx: ptr, next_handler: Next,
+    request_context: *context.Context) R.Result[u8, error.AppError] {
+    val reentrant: *Reentrant = ctx::*Reentrant;
+    if (reentrant == nil || reentrant.stack == nil || reentrant.trace == nil) {
+        ret R.err[u8, error.AppError](internal("invalid reentrant test"));
+    }
+    val inner: Outcome = execute(reentrant.stack, reentrant.terminal,
+        reentrant.mapper, request_context, policy_default());
+    reentrant.calls = reentrant.calls + 1;
+    reentrant.inner_status = inner.status;
+    if (inner.status != EXECUTION_ERROR_UNMAPPED) {
+        ret R.err[u8, error.AppError](internal("reentrant execution was accepted"));
+    }
+    ret call(next_handler, request_context);
+}
+
+fun failing_mapper(ctx: ptr, app_error: error.AppError,
+    request_context: *context.Context) R.Result[u8, error.RenderFailure] {
+    val failure: error.RenderFailure = error.render_failure(
+        "mapper stack-local failure");
+    ret R.err[u8, error.RenderFailure](failure);
 }
 
 fun response_text(fixture: *Fixture, output: *u8,
@@ -606,7 +715,11 @@ test "laurel.middleware: next is at most once and private errors never render" {
         || copied_fixture.response.status != 409
         || !response_text(?copied_fixture, ?rendered[0], 64, ?rendered_len)
         || !bytes_equal(?rendered[0], rendered_len,
-            "original error", 14) || !fixture_end(?copied_fixture)) { ret 11; }
+            "original error", 14)
+        || !bytes_equal(error.public_text(?copied.app_error).data,
+            error.public_text(?copied.app_error).len,
+            "original error", 14)
+        || !fixture_end(?copied_fixture)) { ret 11; }
     ret 0;
 }
 
@@ -653,5 +766,174 @@ test "laurel.middleware: nested errors and cancellation unwind in order" {
         || cancelled_trace.terminal_calls != 0
         || cancelled_fixture.response.body_kind != message.BODY_NONE
         || !fixture_end(?cancelled_fixture)) { ret 5; }
+    ret 0;
+}
+
+test "laurel.middleware: stack snapshots survive growth and shrinkage" {
+    var shrink_fixture: Fixture;
+    if (!fixture_init(?shrink_fixture, 61)) { ret 1; }
+    var shrink_renderer: error.Default;
+    val shrink_mapper: error.Mapper = default_error_mapper(
+        ?shrink_fixture, ?shrink_renderer);
+    var shrink_trace: Trace;
+    var shrink_stack: Stack;
+    var shrink_state: StackMutation = StackMutation{trace: ?shrink_trace,
+        stack: ?shrink_stack, replacement_items: nil, replacement_len: 0};
+    var shrink_items: [2]Middleware;
+    shrink_items[0] = Middleware{ctx: ?shrink_state,
+        call: mutate_stack_middleware};
+    shrink_items[1] = Middleware{ctx: ?shrink_trace, call: second_middleware};
+    shrink_stack = Stack{items: ?shrink_items[0], len: 2};
+    val shrunk: Outcome = execute(?shrink_stack,
+        handler.Handler{ctx: ?shrink_trace, call: traced_terminal},
+        shrink_mapper, ?shrink_fixture.request_context, policy_default());
+    if (shrunk.status != EXECUTION_RESPOND || shrink_trace.len != 4
+        || shrink_trace.events[0] != 8 || shrink_trace.events[1] != 2
+        || shrink_trace.events[2] != 3 || shrink_trace.events[3] != 4
+        || shrink_trace.terminal_calls != 1 || !fixture_end(?shrink_fixture)) {
+        ret 2;
+    }
+
+    var grow_fixture: Fixture;
+    if (!fixture_init(?grow_fixture, 62)) { ret 3; }
+    var grow_renderer: error.Default;
+    val grow_mapper: error.Mapper = default_error_mapper(
+        ?grow_fixture, ?grow_renderer);
+    var grow_trace: Trace;
+    var grow_stack: Stack;
+    var replacement: [2]Middleware;
+    replacement[0] = Middleware{ctx: ?grow_trace, call: short_middleware};
+    replacement[1] = Middleware{ctx: ?grow_trace, call: short_middleware};
+    var grow_state: StackMutation = StackMutation{trace: ?grow_trace,
+        stack: ?grow_stack, replacement_items: ?replacement[0],
+        replacement_len: 2};
+    var grow_item: Middleware = Middleware{ctx: ?grow_state,
+        call: mutate_stack_middleware};
+    grow_stack = Stack{items: ?grow_item, len: 1};
+    val grown: Outcome = execute(?grow_stack,
+        handler.Handler{ctx: ?grow_trace, call: traced_terminal},
+        grow_mapper, ?grow_fixture.request_context, policy_default());
+    if (grown.status != EXECUTION_RESPOND || grow_trace.len != 2
+        || grow_trace.events[0] != 8 || grow_trace.events[1] != 3
+        || grow_trace.terminal_calls != 1 || !fixture_end(?grow_fixture)) {
+        ret 4;
+    }
+    ret 0;
+}
+
+test "laurel.middleware: next retention and reentrancy fail closed" {
+    var retained_fixture: Fixture;
+    if (!fixture_init(?retained_fixture, 71)) { ret 1; }
+    var retained_renderer: error.Default;
+    val retained_mapper: error.Mapper = default_error_mapper(
+        ?retained_fixture, ?retained_renderer);
+    var retained: RetainedNext;
+    var trace: Trace;
+    var retained_item: Middleware = Middleware{ctx: ?retained,
+        call: retain_middleware};
+    var retained_stack: Stack = Stack{items: ?retained_item, len: 1};
+    val completed: Outcome = execute(?retained_stack,
+        handler.Handler{ctx: ?trace, call: traced_terminal}, retained_mapper,
+        ?retained_fixture.request_context, policy_default());
+    if (completed.status != EXECUTION_RESPOND || !retained.saved
+        || trace.terminal_calls != 1) { ret 2; }
+    val stale: R.Result[u8, error.AppError] = call(retained.token,
+        ?retained_fixture.request_context);
+    if (!R.is_err[u8, error.AppError](stale)
+        || R.unwrap_err[u8, error.AppError](stale).kind != error.INTERNAL
+        || !fixture_end(?retained_fixture)) { ret 3; }
+
+    var reentrant_fixture: Fixture;
+    if (!fixture_init(?reentrant_fixture, 72)) { ret 4; }
+    var reentrant_renderer: error.Default;
+    val reentrant_mapper: error.Mapper = default_error_mapper(
+        ?reentrant_fixture, ?reentrant_renderer);
+    var reentrant_trace: Trace;
+    var reentrant_stack: Stack;
+    var reentrant: Reentrant = Reentrant{trace: ?reentrant_trace,
+        stack: ?reentrant_stack,
+        terminal: handler.Handler{ctx: ?reentrant_trace,
+            call: traced_terminal}, mapper: reentrant_mapper};
+    var reentrant_item: Middleware = Middleware{ctx: ?reentrant,
+        call: reentrant_middleware};
+    reentrant_stack = Stack{items: ?reentrant_item, len: 1};
+    val first: Outcome = execute(?reentrant_stack, reentrant.terminal,
+        reentrant_mapper, ?reentrant_fixture.request_context,
+        policy_default());
+    val second: Outcome = execute(?reentrant_stack, reentrant.terminal,
+        reentrant_mapper, ?reentrant_fixture.request_context,
+        policy_default());
+    if (first.status != EXECUTION_RESPOND || second.status != EXECUTION_RESPOND
+        || reentrant.calls != 2 || reentrant.inner_status != EXECUTION_ERROR_UNMAPPED
+        || reentrant_trace.terminal_calls != 2
+        || !fixture_end(?reentrant_fixture)) { ret 5; }
+    ret 0;
+}
+
+test "laurel.middleware: pre-cancel and allocator failures do not render" {
+    var cancelled_fixture: Fixture;
+    if (!fixture_init(?cancelled_fixture, 81)) { ret 1; }
+    var cancelled_renderer: error.Default;
+    val cancelled_mapper: error.Mapper = default_error_mapper(
+        ?cancelled_fixture, ?cancelled_renderer);
+    var trace: Trace;
+    var empty_stack: Stack = Stack{items: nil, len: 0};
+    if (!cancel.cancel(?cancelled_fixture.scope)) { ret 2; }
+    val cancelled: Outcome = execute(?empty_stack,
+        handler.Handler{ctx: ?trace, call: traced_terminal}, cancelled_mapper,
+        ?cancelled_fixture.request_context, policy_default());
+    if (cancelled.status != EXECUTION_CANCELLED
+        || cancelled.app_error.kind != error.CANCELLED
+        || trace.terminal_calls != 0
+        || cancelled_fixture.response.body_kind != message.BODY_NONE
+        || !fixture_end(?cancelled_fixture)) { ret 3; }
+
+    var timed_fixture: Fixture;
+    if (!fixture_init(?timed_fixture, 82)) { ret 4; }
+    var timed_renderer: error.Default;
+    val timed_mapper: error.Mapper = default_error_mapper(
+        ?timed_fixture, ?timed_renderer);
+    if (!cancel.timeout(?timed_fixture.scope)) { ret 5; }
+    val timed: Outcome = execute(?empty_stack,
+        handler.Handler{ctx: ?trace, call: traced_terminal}, timed_mapper,
+        ?timed_fixture.request_context, policy_default());
+    if (timed.status != EXECUTION_CANCELLED
+        || timed.app_error.kind != error.CANCELLED
+        || timed.app_error.retryable == false || trace.terminal_calls != 0
+        || timed_fixture.response.body_kind != message.BODY_NONE
+        || !fixture_end(?timed_fixture)) { ret 6; }
+
+    var allocator_fixture: Fixture;
+    if (!fixture_init(?allocator_fixture, 83)) { ret 7; }
+    var allocator_renderer: error.Default;
+    val allocator_mapper: error.Mapper = default_error_mapper(
+        ?allocator_fixture, ?allocator_renderer);
+    allocator_fixture.allocator.fn_allocate = nil;
+    val direct: R.Result[u8, error.RenderFailure] = allocator_mapper.render(
+        allocator_mapper.ctx, internal("direct allocator test"),
+        ?allocator_fixture.request_context);
+    val failed: Outcome = execute(?empty_stack,
+        handler.Handler{ctx: ?trace, call: traced_terminal}, allocator_mapper,
+        ?allocator_fixture.request_context, policy_default());
+    if (!R.is_err[u8, error.RenderFailure](direct)
+        || failed.status != EXECUTION_ERROR_UNMAPPED
+        || allocator_fixture.response.body_kind != message.BODY_NONE
+        || !fixture_end(?allocator_fixture)) { ret 8; }
+    ret 0;
+}
+
+test "laurel.middleware: mapper failures are value owned" {
+    var fixture: Fixture;
+    if (!fixture_init(?fixture, 91)) { ret 1; }
+    var empty_stack: Stack = Stack{items: nil, len: 0};
+    val mapped: Outcome = execute(?empty_stack,
+        handler.Handler{ctx: nil, call: private_error_terminal},
+        error.Mapper{ctx: nil, render: failing_mapper},
+        ?fixture.request_context, policy_default());
+    val detail: view.View = error.render_failure_view(?mapped.render_error);
+    if (mapped.status != EXECUTION_ERROR_UNMAPPED
+        || !bytes_equal(detail.data, detail.len,
+            "mapper stack-local failure", 26)
+        || !fixture_end(?fixture)) { ret 2; }
     ret 0;
 }
