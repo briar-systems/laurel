@@ -12,10 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Caller-owned application composition and deterministic service lifecycle.
 - Atomic bounded request admission with graceful drain ownership.
 - Generation-bound request contexts over exact `mach-http` exchanges and cancellation scopes.
+- Compile-once typed method, host, path, parameter, wildcard, and handler routes.
+- Request-scoped text, integer, boolean, UUID, and custom parameter decoding.
+- Structured route conflict, malformed target, decoder, capacity, and stale-dispatch errors.
 
 ### Changed
 
-- Pinned `mach-std` to v0.29.0 and `mach-http` to v0.2.1.
+- Pinned `mach-std` to v0.29.0 and `mach-http` to v0.3.0.
 - Routed handler response ownership through the bound request context.
 
 ## [0.2.0] - 2026-08-27
