@@ -36,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Routed handler response ownership through the bound request context.
 - Required complete allocator callback tables at context binding and allocating boundaries.
 - Revalidated response, body, field storage, generation, and cancellation state after allocator callbacks.
+- Applied attribute bounds to every standard Set-Cookie member and rejected all
+  parser and serializer ownership aliases before mutation.
+- Retained nonce and replay claims for their complete cryptographic and accepted
+  decode horizons, with distinct guard domains and hardened regeneration ownership.
 
 ## [0.2.0] - 2026-08-27
 

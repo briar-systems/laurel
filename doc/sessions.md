@@ -16,7 +16,9 @@ The parser enforces independent count, name, value, per-cookie, total, and
 storage bounds. A caller selects exactly one case-sensitive duplicate-name
 policy: reject, first wins, or last wins. Validation completes before `Jar.len`
 is published. Cookie name and value views borrow the request field and must not
-outlive it.
+outlive it. The request field, `Jar` record, and complete caller-provided item
+storage must be mutually disjoint. Invalid, overflowing, or aliased ranges fail
+before parser-owned storage is changed.
 
 `cookie.serialize_set_cookie` preflights the complete result before writing.
 It independently bounds the name, value, attribute count, attribute name,
@@ -28,7 +30,10 @@ are rejected. `__Secure-` requires `Secure`. `__Host-` requires `Secure`, path
 require `Secure`. An expiry is accepted as bounded Unix seconds and serialized
 as one canonical IMF-fixdate through year 9999.
 Serialization leaves the caller output unchanged on every failure and does not
-append a null terminator.
+append a null terminator. Attribute name and value limits apply independently
+to every emitted standard attribute as well as extensions. The exact output
+range must not overlap the cookie record, attribute records, or any borrowed
+name, value, path, or domain view.
 
 The default cookie limits are 64 cookies, 128-byte names, 4096-byte values, 16
 attributes, 128-byte attribute names, 1024-byte attribute values, 4096 bytes per
@@ -46,10 +51,13 @@ encoded for one context cannot authenticate in another.
 
 The entropy callback must fill the entire requested output with cryptographic
 randomness or return nonzero. Each encode claims its nonce before encryption.
-The supplied nonce guard must reject reuse for a key generation. The bounded
-in-memory guard is suitable for one process. A deployment with multiple writers
-must inject a shared atomic claim implementation or allocate disjoint nonce
-domains per writer.
+The supplied nonce guard must reject reuse for the full key generation. Claims
+remain live through the generation's decode deadline plus accepted clock skew,
+not merely through the encoded session's expiry. The bounded in-memory guard is
+suitable for one process when its capacity covers every token encoded during a
+generation. Exhaustion fails closed. A deployment with multiple writers must
+inject a shared atomic claim implementation or allocate disjoint nonce domains
+per writer.
 
 Caller-owned key generation storage transfers exclusive mutation rights to the
 active `KeyRing`. Do not modify an item until `release_key_ring` returns. A
@@ -80,15 +88,24 @@ input storage because the complete envelope is staged before plaintext release.
 
 `REPLAY_ALLOW` permits repeated valid tokens. `REPLAY_REJECT` atomically claims
 the authenticated key and nonce after all validation and capacity checks but
-before publishing plaintext. Distributed single-use sessions require a shared
-claim implementation with the same contract. Guard exhaustion fails closed.
+before publishing plaintext. A replay claim remains live through session expiry
+plus the configured clock skew, matching the complete interval in which decode
+accepts that token. Nonce and replay guards must expose distinct context
+identities because their claim namespaces have different lifetimes and
+semantics. `init_protected_codec` rejects one context used for both. Distributed
+single-use sessions require a shared claim implementation with the same
+contract. Guard exhaustion fails closed.
 
 `regenerate_id` draws 256 random bits and emits a 43-byte unpadded base64url
 identifier. It rejects the existing identifier and retries at most four times.
 Success resets the persistence version and generation to zero, so the new
 identity must be inserted rather than updating the old record. Applications
 must regenerate after authentication or privilege changes, save the new
-session, and delete the old identity.
+session, and delete the old identity. The source record, source identifier and
+data, identifier output, session output, and active codec storage must not
+overlap any writable output range. Regeneration snapshots the source record and
+identifier before entropy is requested, and every invalid ownership shape fails
+before entropy or output mutation.
 
 ## Store boundary
 
