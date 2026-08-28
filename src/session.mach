@@ -235,6 +235,16 @@ fun public_equal(a: *u8, b: *u8, len: usize) bool {
     ret true;
 }
 
+fun ranges_overlap(a: *u8, a_len: usize, b: *u8, b_len: usize) bool {
+    if (a_len == 0 || b_len == 0) { ret false; }
+    if (a == nil || b == nil) { ret true; }
+    val a_start: usize = a::usize;
+    val b_start: usize = b::usize;
+    if (a_len > ~(0::usize) - a_start
+        || b_len > ~(0::usize) - b_start) { ret true; }
+    ret a_start < b_start + b_len && b_start < a_start + a_len;
+}
+
 fun view_valid(value: view.View, maximum: usize) bool {
     ret value.len <= maximum && (value.len == 0 || value.data != nil);
 }
@@ -872,7 +882,8 @@ fun base64url_text_len(input_len: usize) usize {
 fun encode_protected(ctx: ptr, value: *Session, context_value: view.View,
     now: i64, output: *u8, output_capacity: usize) CodecOperation {
     val codec: *ProtectedCodec = ctx::*ProtectedCodec;
-    if (!protected_valid(codec) || !view_valid(context_value,
+    if (!protected_valid(codec) || context_value.len == 0
+        || !view_valid(context_value,
         codec.max_context_bytes) || !time_valid_for_encode(codec, value, now)) {
         ret codec_result(CODEC_INVALID);
     }
@@ -1001,6 +1012,7 @@ fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
     output: *Session) CodecOperation {
     val codec: *ProtectedCodec = ctx::*ProtectedCodec;
     if (!protected_valid(codec) || output == nil || now < 0
+        || context_value.len == 0
         || !view_valid(context_value, codec.max_context_bytes)
         || !token_text_valid(input, input_len)) {
         ret codec_result(CODEC_INVALID);
@@ -1096,6 +1108,14 @@ fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
         || id_output == nil || (data_len != 0 && data_output == nil)) {
         ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
         ret codec_result(CODEC_OUTPUT_TOO_SMALL);
+    }
+    val output_bytes: *u8 = output::*u8;
+    if (ranges_overlap(id_output, id_len, data_output, data_len)
+        || ranges_overlap(id_output, id_len, output_bytes, $size_of(Session))
+        || ranges_overlap(data_output, data_len, output_bytes,
+            $size_of(Session))) {
+        ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+        ret codec_result(CODEC_INVALID);
     }
     if (codec.replay_policy == REPLAY_REJECT) {
         val replay: GuardStatus = codec.replay_guard.claim(
@@ -1316,6 +1336,11 @@ test "laurel.session: authenticated codecs reject hostile tokens transactionally
         ret 1;
     }
     var value: Session = sample_session();
+    var rejected: [4096]u8;
+    rejected[0] = 0xa5;
+    if (fixture.codec.encode(fixture.codec.ctx, ?value, view.view(nil, 0),
+        100, ?rejected[0], 4096).status != CODEC_INVALID
+        || rejected[0] != 0xa5 || fixture.entropy.calls != 0) { ret 32; }
     var tiny: [1]u8;
     tiny[0] = 0xa5;
     if (fixture.codec.encode(fixture.codec.ctx, ?value,
@@ -1344,6 +1369,10 @@ test "laurel.session: authenticated codecs reject hostile tokens transactionally
         || data_output[0] != 0x5a || decoded.version != 9) {
         ret 4;
     }
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+        view.view(nil, 0), 100, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_INVALID
+        || decoded.version != 9) { ret 30; }
 
     var tampered: [4096]u8;
     var i: usize = 0;
@@ -1367,6 +1396,10 @@ test "laurel.session: authenticated codecs reject hostile tokens transactionally
         ?data_output[0], 2048, ?decoded).status != CODEC_OUTPUT_TOO_SMALL
         || id_output[0] != 0xa5 || data_output[0] != 0x5a
         || decoded.version != 9) { ret 7; }
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+        view.view("tenant:a", 8), 100, ?id_output[0], 64,
+        ?id_output[0], 64, ?decoded).status != CODEC_INVALID
+        || decoded.version != 9) { ret 31; }
 
     val opened: CodecOperation = fixture.codec.decode(fixture.codec.ctx,
         ?token[0], encoded.written, view.view("tenant:a", 8), 100,
