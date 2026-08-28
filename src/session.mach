@@ -1,39 +1,237 @@
-# protected session lifecycle and persistence contracts
+# protected session codecs, replay windows, and persistence
 
-use O: std.types.option;
-use R: std.types.result;
+use crypto.aead.aes_gcm;
+use crypto.aead.chacha20_poly1305;
+use crypto.contracts;
+use std.crypto.ct;
+use std.chrono.time;
+use std.encoding.base64;
+use std.sync.cancel;
+use std.sync.atomic;
+use std.sync.mutex;
+use std.sync.thread;
 use std.types.bool.bool;
+use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.view;
 
+pub val MAX_SESSION_ID_BYTES: usize = 64;
+pub val MAX_SESSION_DATA_BYTES: usize = 2048;
+pub val MAX_CONTEXT_BYTES: usize = 256;
+pub val MAX_RAW_TOKEN_BYTES: usize = 3072;
+pub val MAX_TOKEN_BYTES: usize = 4096;
+pub val GENERATED_ID_BYTES: usize = 32;
+pub val GENERATED_ID_TEXT_BYTES: usize = 43;
+
+val ENVELOPE_BYTES: usize = 20;
+val PLAINTEXT_HEADER_BYTES: usize = 48;
+val MAX_SECRET_PLAINTEXT_BYTES: usize = 2160;
+
+pub def StoreStatus: u8;
+
+pub val STORE_OK:               StoreStatus = 0;
+pub val STORE_NOT_FOUND:        StoreStatus = 1;
+pub val STORE_CONFLICT:         StoreStatus = 2;
+pub val STORE_CAPACITY:         StoreStatus = 3;
+pub val STORE_STALE_GENERATION: StoreStatus = 4;
+pub val STORE_CANCELLED:        StoreStatus = 5;
+pub val STORE_INVALID:          StoreStatus = 6;
+pub val STORE_UNAVAILABLE:      StoreStatus = 7;
+
+pub def CodecStatus: u8;
+
+pub val CODEC_OK:                 CodecStatus = 0;
+pub val CODEC_INVALID:            CodecStatus = 1;
+pub val CODEC_OUTPUT_TOO_SMALL:   CodecStatus = 2;
+pub val CODEC_ENTROPY_UNAVAILABLE: CodecStatus = 3;
+pub val CODEC_NONCE_REUSED:       CodecStatus = 4;
+pub val CODEC_AUTH_FAILED:        CodecStatus = 5;
+pub val CODEC_TRUNCATED:          CodecStatus = 6;
+pub val CODEC_UNKNOWN_KEY:        CodecStatus = 7;
+pub val CODEC_KEY_INACTIVE:       CodecStatus = 8;
+pub val CODEC_NOT_YET_VALID:      CodecStatus = 9;
+pub val CODEC_EXPIRED:            CodecStatus = 10;
+pub val CODEC_REPLAYED:           CodecStatus = 11;
+pub val CODEC_REPLAY_CAPACITY:    CodecStatus = 12;
+pub val CODEC_FIXATION_FAILED:    CodecStatus = 13;
+
+pub def GuardStatus: u8;
+
+pub val GUARD_OK:       GuardStatus = 0;
+pub val GUARD_SEEN:     GuardStatus = 1;
+pub val GUARD_CAPACITY: GuardStatus = 2;
+pub val GUARD_INVALID:  GuardStatus = 3;
+
+pub def Algorithm: u8;
+
+pub val AES_256_GCM:            Algorithm = 1;
+pub val CHACHA20_POLY1305:      Algorithm = 2;
+
+pub def ReplayPolicy: u8;
+
+pub val REPLAY_ALLOW:  ReplayPolicy = 1;
+pub val REPLAY_REJECT: ReplayPolicy = 2;
+
+pub def ManagerState: i64;
+
+pub val MANAGER_EMPTY:    ManagerState = 0;
+pub val MANAGER_STOPPED:  ManagerState = 1;
+pub val MANAGER_STARTING: ManagerState = 2;
+pub val MANAGER_ACTIVE:   ManagerState = 3;
+pub val MANAGER_STOPPING: ManagerState = 4;
+
 pub rec Session {
     id:              view.View;
-    data:            *u8;
-    len:             usize;
+    data:            view.View;
+    issued_at_unix:  i64;
+    not_before_unix: i64;
     expires_at_unix: i64;
     version:         u64;
+    generation:      u64;
 }
 
-pub def LoadFun:   fun(ptr, view.View) R.Result[O.Option[Session], str];
-pub def SaveFun:   fun(ptr, *Session) R.Result[u8, str];
-pub def DeleteFun: fun(ptr, view.View) R.Result[u8, str];
+pub rec SaveResult {
+    version:    u64;
+    generation: u64;
+}
+
+pub def AliasesFun: fun(ptr, *u8, usize) bool;
+pub def OverlapsFun: fun(ptr, ptr, AliasesFun) bool;
+pub def StartFun: fun(ptr) StoreStatus;
+pub def StopFun: fun(ptr) StoreStatus;
+pub def LoadFun: fun(ptr, view.View, i64, *u8, usize, *Session,
+    *cancel.Scope) StoreStatus;
+pub def SaveFun: fun(ptr, *Session, u64, i64, *SaveResult,
+    *cancel.Scope) StoreStatus;
+pub def DeleteFun: fun(ptr, view.View, u64, u64,
+    *cancel.Scope) StoreStatus;
+pub def ReplaceFun: fun(ptr, view.View, u64, u64, *Session, i64,
+    *SaveResult, *cancel.Scope) StoreStatus;
+pub def ReapFun: fun(ptr, i64, *usize, *cancel.Scope) StoreStatus;
 
 pub rec Store {
-    ctx:    ptr;
-    load:   LoadFun;
-    save:   SaveFun;
-    delete: DeleteFun;
+    ctx:     ptr;
+    aliases: AliasesFun;
+    start:   StartFun;
+    stop:    StopFun;
+    load:    LoadFun;
+    save:    SaveFun;
+    delete:  DeleteFun;
+    replace: ReplaceFun;
+    reap:    ReapFun;
 }
 
-pub def EncodeFun: fun(ptr, *Session, *u8, usize) R.Result[usize, str];
-pub def DecodeFun: fun(ptr, *u8, usize) R.Result[Session, str];
+pub rec MemorySlot {
+    id:              [64]u8;
+    id_len:          usize;
+    data:            [2048]u8;
+    data_len:        usize;
+    issued_at_unix:  i64;
+    not_before_unix: i64;
+    expires_at_unix: i64;
+    version:         u64;
+    generation:      u64;
+    used:            bool;
+}
+
+pub rec MemoryStore {
+    slots:           *MemorySlot;
+    capacity:        usize;
+    len:             usize;
+    next_generation: u64;
+    lock:            mutex.Mutex;
+    initialized:     bool;
+    active:          bool;
+}
+
+pub def ClaimFun: fun(ptr, u32, *u8, usize, i64, i64) GuardStatus;
+pub def ForgetFun: fun(ptr, u32, *u8, usize) GuardStatus;
+
+pub rec Guard {
+    ctx:      ptr;
+    domain:   ptr;
+    aliases:  AliasesFun;
+    overlaps: OverlapsFun;
+    claim:    ClaimFun;
+    forget:   ForgetFun;
+}
+
+pub rec GuardSlot {
+    key_id:     u32;
+    token:      [12]u8;
+    token_len:  usize;
+    expires_at: i64;
+    used:       bool;
+}
+
+pub rec MemoryGuard {
+    slots:       *GuardSlot;
+    capacity:    usize;
+    lock:        mutex.Mutex;
+    initialized: bool;
+    active:      bool;
+}
+
+pub rec KeyGeneration {
+    id:            u32;
+    key:           [32]u8;
+    key_len:       usize;
+    activated_at:  i64;
+    encode_until:  i64;
+    decode_until:  i64;
+}
+
+pub rec KeyRing {
+    items:       *KeyGeneration;
+    len:         usize;
+    current_id:  u32;
+    max_retired: usize;
+    algorithm:   Algorithm;
+    nonce_domain: ptr;
+    lock:        mutex.Mutex;
+    initialized: bool;
+    active:      bool;
+}
+
+pub rec CodecOperation {
+    status:         CodecStatus;
+    written:        usize;
+    key_id:         u32;
+    needs_rotation: bool;
+}
+
+pub def EncodeFun: fun(ptr, *Session, view.View, i64, *u8, usize)
+    CodecOperation;
+pub def DecodeFun: fun(ptr, *u8, usize, view.View, i64,
+    *u8, usize, *u8, usize, *Session) CodecOperation;
 
 pub rec Codec {
     ctx:    ptr;
     encode: EncodeFun;
     decode: DecodeFun;
+}
+
+pub def EntropyFun: fun(ptr, *u8, usize) i64;
+
+pub rec Entropy {
+    ctx:     ptr;
+    aliases: AliasesFun;
+    fill:    EntropyFun;
+}
+
+pub rec ProtectedCodec {
+    ring:             *KeyRing;
+    entropy:          Entropy;
+    nonce_guard:      Guard;
+    replay_guard:     Guard;
+    replay_policy:    ReplayPolicy;
+    algorithm:        Algorithm;
+    clock_skew_s:     i64;
+    max_lifetime_s:   i64;
+    max_context_bytes: usize;
+    active:           bool;
 }
 
 pub rec CookiePolicy {
@@ -46,26 +244,3038 @@ pub rec CookiePolicy {
     max_age:   i64;
 }
 
-pub fun secure_cookie(name: str) CookiePolicy {
-    ret CookiePolicy{
-        name: name,
-        path: "/",
-        domain: nil,
-        same_site: "Lax",
-        secure: true,
-        http_only: true,
-        max_age: 0,
-    };
-}
-
 pub rec Manager {
     store:  Store;
     codec:  Codec;
     cookie: CookiePolicy;
+    state:  ManagerState;
 }
 
-test "laurel.session: default cookie is transport and script protected" {
-    val p: CookiePolicy = secure_cookie("session");
-    if (!p.secure || !p.http_only || p.path[0] != '/') { ret 1; }
+fun public_equal(a: *u8, b: *u8, len: usize) bool {
+    if (len != 0 && (a == nil || b == nil)) { ret false; }
+    var i: usize = 0;
+    for (i < len) {
+        if (a[i] != b[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun range_valid(data: *u8, len: usize) bool {
+    if (len == 0) { ret true; }
+    if (data == nil) { ret false; }
+    ret len - 1 <= ~(0::usize) - data::usize;
+}
+
+fun multiply_size(count: usize, item_size: usize, output: *usize) bool {
+    if (output == nil || (count != 0 && item_size > ~(0::usize) / count)) {
+        ret false;
+    }
+    @output = count * item_size;
+    ret true;
+}
+
+fun array_valid(data: *u8, count: usize, item_size: usize,
+    output_bytes: *usize) bool {
+    ret multiply_size(count, item_size, output_bytes)
+        && range_valid(data, @output_bytes);
+}
+
+fun ranges_overlap(a: *u8, a_len: usize, b: *u8, b_len: usize) bool {
+    if (a_len == 0 || b_len == 0) { ret false; }
+    if (!range_valid(a, a_len) || !range_valid(b, b_len)) { ret true; }
+    val a_start: usize = a::usize;
+    val b_start: usize = b::usize;
+    val a_end: usize = a_start + (a_len - 1);
+    val b_end: usize = b_start + (b_len - 1);
+    ret a_start <= b_end && b_start <= a_end;
+}
+
+fun view_valid(value: view.View, maximum: usize) bool {
+    ret value.len <= maximum && range_valid(value.data, value.len);
+}
+
+fun session_valid(value: *Session) bool {
+    ret value != nil && range_valid(value::*u8, $size_of(Session))
+        && value.id.len > 0
+        && view_valid(value.id, MAX_SESSION_ID_BYTES)
+        && view_valid(value.data, MAX_SESSION_DATA_BYTES)
+        && value.issued_at_unix >= 0
+        && value.not_before_unix >= value.issued_at_unix
+        && value.expires_at_unix > value.not_before_unix;
+}
+
+fun scope_valid(scope: *cancel.Scope) bool {
+    ret scope == nil || range_valid(scope::*u8, $size_of(cancel.Scope));
+}
+
+fun scope_cancelled(scope: *cancel.Scope) bool {
+    if (scope == nil) { ret false; }
+    if (!scope_valid(scope)) { ret true; }
+    val reason: cancel.Reason = cancel.reason(scope);
+    ret reason != cancel.ACTIVE;
+}
+
+fun clear_public(data: *u8, len: usize) {
+    if (data == nil) { ret; }
+    var i: usize = 0;
+    for (i < len) {
+        data[i] = 0;
+        i = i + 1;
+    }
+}
+
+fun clear_slot(slot: *MemorySlot) {
+    if (slot == nil) { ret; }
+    clear_public(?slot.id[0], MAX_SESSION_ID_BYTES);
+    clear_public(?slot.data[0], MAX_SESSION_DATA_BYTES);
+    slot.id_len = 0;
+    slot.data_len = 0;
+    slot.issued_at_unix = 0;
+    slot.not_before_unix = 0;
+    slot.expires_at_unix = 0;
+    slot.version = 0;
+    slot.generation = 0;
+    slot.used = false;
+}
+
+fun memory_store_shape_valid(store: *MemoryStore) bool {
+    if (store == nil || !range_valid(store::*u8, $size_of(MemoryStore))
+        || !store.initialized || store.capacity == 0) { ret false; }
+    var slot_bytes: usize = 0;
+    ret array_valid(store.slots::*u8, store.capacity,
+        $size_of(MemorySlot), ?slot_bytes)
+        && !ranges_overlap(store::*u8, $size_of(MemoryStore),
+            store.slots::*u8, slot_bytes);
+}
+
+fun memory_store_aliases(ctx: ptr, data: *u8, len: usize) bool {
+    val store: *MemoryStore = ctx::*MemoryStore;
+    if (!range_valid(data, len) || !memory_store_shape_valid(store)) {
+        ret true;
+    }
+    var slot_bytes: usize = 0;
+    if (!multiply_size(store.capacity, $size_of(MemorySlot), ?slot_bytes)) {
+        ret true;
+    }
+    ret ranges_overlap(data, len, store::*u8, $size_of(MemoryStore))
+        || ranges_overlap(data, len, store.slots::*u8, slot_bytes);
+}
+
+fun memory_store_range_safe(store: *MemoryStore, data: *u8,
+    len: usize) bool {
+    ret range_valid(data, len)
+        && !memory_store_aliases(store::ptr, data, len);
+}
+
+fun scope_overlaps(scope: *cancel.Scope, data: *u8, len: usize) bool {
+    ret scope != nil && ranges_overlap(scope::*u8, $size_of(cancel.Scope),
+        data, len);
+}
+
+pub fun init_memory_store(store: *MemoryStore, slots: *MemorySlot,
+    capacity: usize) bool {
+    if (store == nil || !range_valid(store::*u8, $size_of(MemoryStore))) {
+        ret false;
+    }
+    var slot_bytes: usize = 0;
+    if (store.initialized || store.active || capacity == 0
+        || !array_valid(slots::*u8, capacity, $size_of(MemorySlot),
+            ?slot_bytes)
+        || ranges_overlap(store::*u8, $size_of(MemoryStore),
+            slots::*u8, slot_bytes)) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < capacity) {
+        clear_slot(?slots[i]);
+        i = i + 1;
+    }
+    store.slots = slots;
+    store.capacity = capacity;
+    store.len = 0;
+    store.next_generation = 1;
+    store.lock = mutex.make();
+    store.initialized = true;
+    store.active = false;
+    ret true;
+}
+
+fun memory_start(ctx: ptr) StoreStatus {
+    val store: *MemoryStore = ctx::*MemoryStore;
+    if (!memory_store_shape_valid(store)) { ret STORE_INVALID; }
+    mutex.lock(?store.lock);
+    if (!store.initialized || store.active || store.len != 0) {
+        mutex.unlock(?store.lock);
+        ret STORE_INVALID;
+    }
+    store.active = true;
+    mutex.unlock(?store.lock);
+    ret STORE_OK;
+}
+
+fun find_slot(store: *MemoryStore, id: view.View) usize {
+    var i: usize = 0;
+    for (i < store.capacity) {
+        if (store.slots[i].used && store.slots[i].id_len == id.len
+            && public_equal(?store.slots[i].id[0], id.data, id.len)) { ret i; }
+        i = i + 1;
+    }
+    ret store.capacity;
+}
+
+fun reap_expired_locked(store: *MemoryStore, now: i64) usize {
+    var reaped: usize = 0;
+    var i: usize = 0;
+    for (i < store.capacity) {
+        val slot: *MemorySlot = ?store.slots[i];
+        if (slot.used && slot.expires_at_unix <= now) {
+            clear_slot(slot);
+            reaped = reaped + 1;
+        }
+        i = i + 1;
+    }
+    store.len = store.len - reaped;
+    ret reaped;
+}
+
+fun memory_load(ctx: ptr, id: view.View, now: i64, data_output: *u8,
+    data_capacity: usize, output: *Session,
+    scope: *cancel.Scope) StoreStatus {
+    val store: *MemoryStore = ctx::*MemoryStore;
+    if (!memory_store_shape_valid(store) || now < 0 || !scope_valid(scope)
+        || output == nil || id.len == 0
+        || !view_valid(id, MAX_SESSION_ID_BYTES)
+        || !memory_store_range_safe(store, id.data, id.len)
+        || !memory_store_range_safe(store, data_output, data_capacity)
+        || !memory_store_range_safe(store, output::*u8, $size_of(Session))
+        || (scope != nil && !memory_store_range_safe(store, scope::*u8,
+            $size_of(cancel.Scope)))
+        || ranges_overlap(data_output, data_capacity, id.data, id.len)
+        || ranges_overlap(data_output, data_capacity, output::*u8,
+            $size_of(Session))
+        || ranges_overlap(id.data, id.len, output::*u8, $size_of(Session))
+        || scope_overlaps(scope, id.data, id.len)
+        || scope_overlaps(scope, data_output, data_capacity)
+        || scope_overlaps(scope, output::*u8, $size_of(Session))) {
+        ret STORE_INVALID;
+    }
+    if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
+    mutex.lock(?store.lock);
+    if (!store.initialized || !store.active || store.len > store.capacity
+        || scope_cancelled(scope)) {
+        mutex.unlock(?store.lock);
+        ret STORE_CANCELLED;
+    }
+    reap_expired_locked(store, now);
+    val index: usize = find_slot(store, id);
+    if (index == store.capacity) {
+        mutex.unlock(?store.lock);
+        ret STORE_NOT_FOUND;
+    }
+    val slot: *MemorySlot = ?store.slots[index];
+    if (data_capacity < slot.data_len
+        || (slot.data_len != 0 && data_output == nil)) {
+        mutex.unlock(?store.lock);
+        ret STORE_CAPACITY;
+    }
+    var i: usize = 0;
+    for (i < slot.data_len) {
+        data_output[i] = slot.data[i];
+        i = i + 1;
+    }
+    var loaded: Session = Session{id: id,
+        data: view.view(data_output, slot.data_len),
+        issued_at_unix: slot.issued_at_unix,
+        not_before_unix: slot.not_before_unix,
+        expires_at_unix: slot.expires_at_unix, version: slot.version,
+        generation: slot.generation};
+    @output = loaded;
+    mutex.unlock(?store.lock);
+    ret STORE_OK;
+}
+
+fun memory_save(ctx: ptr, value: *Session, expected_version: u64,
+    now: i64, result: *SaveResult, scope: *cancel.Scope) StoreStatus {
+    val store: *MemoryStore = ctx::*MemoryStore;
+    if (!memory_store_shape_valid(store) || now < 0 || !scope_valid(scope)
+        || !session_valid(value)
+        || value.expires_at_unix <= now
+        || result == nil || !range_valid(result::*u8, $size_of(SaveResult))
+        || value.version != expected_version) {
+        ret STORE_INVALID;
+    }
+    val result_bytes: *u8 = result::*u8;
+    if (ranges_overlap(result_bytes, $size_of(SaveResult), value::*u8,
+            $size_of(Session))
+        || ranges_overlap(result_bytes, $size_of(SaveResult), value.id.data,
+            value.id.len)
+        || ranges_overlap(result_bytes, $size_of(SaveResult), value.data.data,
+            value.data.len)
+        || !memory_store_range_safe(store, value::*u8, $size_of(Session))
+        || !memory_store_range_safe(store, value.id.data, value.id.len)
+        || !memory_store_range_safe(store, value.data.data, value.data.len)
+        || !memory_store_range_safe(store, result_bytes,
+            $size_of(SaveResult))
+        || (scope != nil && !memory_store_range_safe(store, scope::*u8,
+            $size_of(cancel.Scope)))
+        || scope_overlaps(scope, value::*u8, $size_of(Session))
+        || scope_overlaps(scope, value.id.data, value.id.len)
+        || scope_overlaps(scope, value.data.data, value.data.len)
+        || scope_overlaps(scope, result_bytes,
+            $size_of(SaveResult))) { ret STORE_INVALID; }
+    if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
+    mutex.lock(?store.lock);
+    if (!store.initialized || !store.active || store.len > store.capacity
+        || scope_cancelled(scope)) {
+        mutex.unlock(?store.lock);
+        ret STORE_CANCELLED;
+    }
+    reap_expired_locked(store, now);
+    var index: usize = find_slot(store, value.id);
+    if (index < store.capacity) {
+        val slot: *MemorySlot = ?store.slots[index];
+        if (expected_version != slot.version) {
+            mutex.unlock(?store.lock);
+            ret STORE_CONFLICT;
+        }
+        if (value.generation != slot.generation || value.generation == 0) {
+            mutex.unlock(?store.lock);
+            ret STORE_STALE_GENERATION;
+        }
+        if (slot.version == 18446744073709551615) {
+            mutex.unlock(?store.lock);
+            ret STORE_CONFLICT;
+        }
+        clear_public(?slot.data[0], MAX_SESSION_DATA_BYTES);
+        var i: usize = 0;
+        for (i < value.data.len) {
+            slot.data[i] = value.data.data[i];
+            i = i + 1;
+        }
+        slot.data_len = value.data.len;
+        slot.issued_at_unix = value.issued_at_unix;
+        slot.not_before_unix = value.not_before_unix;
+        slot.expires_at_unix = value.expires_at_unix;
+        slot.version = slot.version + 1;
+        @result = SaveResult{version: slot.version,
+            generation: slot.generation};
+        mutex.unlock(?store.lock);
+        ret STORE_OK;
+    }
+    if (expected_version != 0 || value.generation != 0) {
+        mutex.unlock(?store.lock);
+        ret STORE_CONFLICT;
+    }
+    if (store.len == store.capacity
+        || store.next_generation == 18446744073709551615) {
+        mutex.unlock(?store.lock);
+        ret STORE_CAPACITY;
+    }
+    index = 0;
+    for (index < store.capacity && store.slots[index].used) {
+        index = index + 1;
+    }
+    val slot: *MemorySlot = ?store.slots[index];
+    clear_slot(slot);
+    var i: usize = 0;
+    for (i < value.id.len) {
+        slot.id[i] = value.id.data[i];
+        i = i + 1;
+    }
+    i = 0;
+    for (i < value.data.len) {
+        slot.data[i] = value.data.data[i];
+        i = i + 1;
+    }
+    slot.id_len = value.id.len;
+    slot.data_len = value.data.len;
+    slot.issued_at_unix = value.issued_at_unix;
+    slot.not_before_unix = value.not_before_unix;
+    slot.expires_at_unix = value.expires_at_unix;
+    slot.version = 1;
+    slot.generation = store.next_generation;
+    slot.used = true;
+    store.next_generation = store.next_generation + 1;
+    store.len = store.len + 1;
+    @result = SaveResult{version: 1, generation: slot.generation};
+    mutex.unlock(?store.lock);
+    ret STORE_OK;
+}
+
+fun memory_delete(ctx: ptr, id: view.View, expected_version: u64,
+    generation: u64, scope: *cancel.Scope) StoreStatus {
+    val store: *MemoryStore = ctx::*MemoryStore;
+    if (!memory_store_shape_valid(store) || !scope_valid(scope) || id.len == 0
+        || !view_valid(id, MAX_SESSION_ID_BYTES)
+        || !memory_store_range_safe(store, id.data, id.len)
+        || (scope != nil && !memory_store_range_safe(store, scope::*u8,
+            $size_of(cancel.Scope)))
+        || scope_overlaps(scope, id.data, id.len)) {
+        ret STORE_INVALID;
+    }
+    if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
+    mutex.lock(?store.lock);
+    if (!store.initialized || !store.active || store.len > store.capacity
+        || scope_cancelled(scope)) {
+        mutex.unlock(?store.lock);
+        ret STORE_CANCELLED;
+    }
+    val index: usize = find_slot(store, id);
+    if (index == store.capacity) {
+        mutex.unlock(?store.lock);
+        ret STORE_NOT_FOUND;
+    }
+    val slot: *MemorySlot = ?store.slots[index];
+    if (slot.version != expected_version) {
+        mutex.unlock(?store.lock);
+        ret STORE_CONFLICT;
+    }
+    if (generation == 0 || slot.generation != generation) {
+        mutex.unlock(?store.lock);
+        ret STORE_STALE_GENERATION;
+    }
+    clear_slot(slot);
+    store.len = store.len - 1;
+    mutex.unlock(?store.lock);
+    ret STORE_OK;
+}
+
+fun memory_replace(ctx: ptr, old_id: view.View, expected_version: u64,
+    generation: u64, replacement: *Session, now: i64,
+    result: *SaveResult, scope: *cancel.Scope) StoreStatus {
+    val store: *MemoryStore = ctx::*MemoryStore;
+    if (!memory_store_shape_valid(store) || now < 0 || !scope_valid(scope)
+        || old_id.len == 0 || !view_valid(old_id, MAX_SESSION_ID_BYTES)
+        || !session_valid(replacement) || replacement.version != 0
+        || replacement.generation != 0 || replacement.expires_at_unix <= now
+        || result == nil || !range_valid(result::*u8, $size_of(SaveResult))
+        || (old_id.len == replacement.id.len
+            && public_equal(old_id.data, replacement.id.data, old_id.len))
+        || ranges_overlap(result::*u8, $size_of(SaveResult),
+            replacement::*u8, $size_of(Session))
+        || ranges_overlap(result::*u8, $size_of(SaveResult), old_id.data,
+            old_id.len)
+        || ranges_overlap(result::*u8, $size_of(SaveResult),
+            replacement.id.data, replacement.id.len)
+        || ranges_overlap(result::*u8, $size_of(SaveResult),
+            replacement.data.data, replacement.data.len)
+        || !memory_store_range_safe(store, old_id.data, old_id.len)
+        || !memory_store_range_safe(store, replacement::*u8,
+            $size_of(Session))
+        || !memory_store_range_safe(store, replacement.id.data,
+            replacement.id.len)
+        || !memory_store_range_safe(store, replacement.data.data,
+            replacement.data.len)
+        || !memory_store_range_safe(store, result::*u8,
+            $size_of(SaveResult))
+        || (scope != nil && !memory_store_range_safe(store, scope::*u8,
+            $size_of(cancel.Scope)))
+        || scope_overlaps(scope, old_id.data, old_id.len)
+        || scope_overlaps(scope, replacement::*u8, $size_of(Session))
+        || scope_overlaps(scope, replacement.id.data, replacement.id.len)
+        || scope_overlaps(scope, replacement.data.data, replacement.data.len)
+        || scope_overlaps(scope, result::*u8,
+            $size_of(SaveResult))) { ret STORE_INVALID; }
+    if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
+    mutex.lock(?store.lock);
+    if (!store.initialized || !store.active || store.len > store.capacity
+        || scope_cancelled(scope)) {
+        mutex.unlock(?store.lock);
+        ret STORE_CANCELLED;
+    }
+    reap_expired_locked(store, now);
+    val old_index: usize = find_slot(store, old_id);
+    if (old_index == store.capacity) {
+        mutex.unlock(?store.lock);
+        ret STORE_NOT_FOUND;
+    }
+    val old_slot: *MemorySlot = ?store.slots[old_index];
+    if (old_slot.version != expected_version) {
+        mutex.unlock(?store.lock);
+        ret STORE_CONFLICT;
+    }
+    if (generation == 0 || old_slot.generation != generation) {
+        mutex.unlock(?store.lock);
+        ret STORE_STALE_GENERATION;
+    }
+    if (find_slot(store, replacement.id) != store.capacity) {
+        mutex.unlock(?store.lock);
+        ret STORE_CONFLICT;
+    }
+    if (store.next_generation == 18446744073709551615) {
+        mutex.unlock(?store.lock);
+        ret STORE_CAPACITY;
+    }
+    clear_slot(old_slot);
+    var i: usize = 0;
+    for (i < replacement.id.len) {
+        old_slot.id[i] = replacement.id.data[i];
+        i = i + 1;
+    }
+    i = 0;
+    for (i < replacement.data.len) {
+        old_slot.data[i] = replacement.data.data[i];
+        i = i + 1;
+    }
+    old_slot.id_len = replacement.id.len;
+    old_slot.data_len = replacement.data.len;
+    old_slot.issued_at_unix = replacement.issued_at_unix;
+    old_slot.not_before_unix = replacement.not_before_unix;
+    old_slot.expires_at_unix = replacement.expires_at_unix;
+    old_slot.version = 1;
+    old_slot.generation = store.next_generation;
+    old_slot.used = true;
+    store.next_generation = store.next_generation + 1;
+    @result = SaveResult{version: 1, generation: old_slot.generation};
+    mutex.unlock(?store.lock);
+    ret STORE_OK;
+}
+
+fun memory_reap(ctx: ptr, now: i64, result: *usize,
+    scope: *cancel.Scope) StoreStatus {
+    val store: *MemoryStore = ctx::*MemoryStore;
+    if (!memory_store_shape_valid(store) || now < 0 || result == nil
+        || !scope_valid(scope)
+        || !memory_store_range_safe(store, result::*u8, $size_of(usize))
+        || (scope != nil && !memory_store_range_safe(store, scope::*u8,
+            $size_of(cancel.Scope)))
+        || scope_overlaps(scope, result::*u8, $size_of(usize))) {
+        ret STORE_INVALID;
+    }
+    if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
+    mutex.lock(?store.lock);
+    if (!store.initialized || !store.active || store.len > store.capacity
+        || scope_cancelled(scope)) {
+        mutex.unlock(?store.lock);
+        ret STORE_CANCELLED;
+    }
+    val reaped: usize = reap_expired_locked(store, now);
+    @result = reaped;
+    mutex.unlock(?store.lock);
+    ret STORE_OK;
+}
+
+fun memory_stop(ctx: ptr) StoreStatus {
+    val store: *MemoryStore = ctx::*MemoryStore;
+    if (!memory_store_shape_valid(store)) { ret STORE_INVALID; }
+    mutex.lock(?store.lock);
+    if (!store.initialized || !store.active || store.len > store.capacity) {
+        mutex.unlock(?store.lock);
+        ret STORE_INVALID;
+    }
+    var i: usize = 0;
+    for (i < store.capacity) {
+        clear_slot(?store.slots[i]);
+        i = i + 1;
+    }
+    store.len = 0;
+    store.active = false;
+    mutex.unlock(?store.lock);
+    ret STORE_OK;
+}
+
+pub fun memory_store(store: *MemoryStore) Store {
+    if (!memory_store_shape_valid(store)) { ret Store{}; }
+    ret Store{ctx: store::ptr, aliases: memory_store_aliases,
+        start: memory_start, stop: memory_stop, load: memory_load,
+        save: memory_save, delete: memory_delete, replace: memory_replace,
+        reap: memory_reap};
+}
+
+fun guard_token_equal(slot: *GuardSlot, key_id: u32, token: *u8,
+    token_len: usize) bool {
+    ret slot.used && slot.key_id == key_id && slot.token_len == token_len
+        && public_equal(?slot.token[0], token, token_len);
+}
+
+fun memory_guard_shape_valid(guard: *MemoryGuard) bool {
+    if (guard == nil || !range_valid(guard::*u8, $size_of(MemoryGuard))
+        || !guard.initialized || guard.capacity == 0) { ret false; }
+    var slot_bytes: usize = 0;
+    ret array_valid(guard.slots::*u8, guard.capacity,
+        $size_of(GuardSlot), ?slot_bytes)
+        && !ranges_overlap(guard::*u8, $size_of(MemoryGuard),
+            guard.slots::*u8, slot_bytes);
+}
+
+fun memory_guard_aliases(ctx: ptr, data: *u8, len: usize) bool {
+    val guard: *MemoryGuard = ctx::*MemoryGuard;
+    if (!range_valid(data, len) || !memory_guard_shape_valid(guard)) {
+        ret true;
+    }
+    var slot_bytes: usize = 0;
+    if (!multiply_size(guard.capacity, $size_of(GuardSlot), ?slot_bytes)) {
+        ret true;
+    }
+    ret ranges_overlap(data, len, guard::*u8, $size_of(MemoryGuard))
+        || ranges_overlap(data, len, guard.slots::*u8, slot_bytes);
+}
+
+fun memory_guard_overlaps(ctx: ptr, other_ctx: ptr,
+    other_aliases: AliasesFun) bool {
+    val guard: *MemoryGuard = ctx::*MemoryGuard;
+    if (!memory_guard_shape_valid(guard) || other_ctx == nil
+        || other_aliases == nil) { ret true; }
+    var slot_bytes: usize = 0;
+    if (!multiply_size(guard.capacity, $size_of(GuardSlot), ?slot_bytes)) {
+        ret true;
+    }
+    ret other_aliases(other_ctx, guard::*u8, $size_of(MemoryGuard))
+        || other_aliases(other_ctx, guard.slots::*u8, slot_bytes);
+}
+
+pub fun init_memory_guard(guard: *MemoryGuard, slots: *GuardSlot,
+    capacity: usize) bool {
+    if (guard == nil || !range_valid(guard::*u8, $size_of(MemoryGuard))) {
+        ret false;
+    }
+    var slot_bytes: usize = 0;
+    if (guard.initialized || guard.active || capacity == 0
+        || !array_valid(slots::*u8, capacity, $size_of(GuardSlot),
+            ?slot_bytes)
+        || ranges_overlap(guard::*u8, $size_of(MemoryGuard),
+            slots::*u8, slot_bytes)) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < capacity) {
+        clear_public(?slots[i].token[0], 12);
+        slots[i].used = false;
+        slots[i].token_len = 0;
+        slots[i].key_id = 0;
+        slots[i].expires_at = 0;
+        i = i + 1;
+    }
+    guard.slots = slots;
+    guard.capacity = capacity;
+    guard.lock = mutex.make();
+    guard.initialized = true;
+    guard.active = true;
+    ret true;
+}
+
+fun memory_guard_claim(ctx: ptr, key_id: u32, token: *u8,
+    token_len: usize, expires_at: i64, now: i64) GuardStatus {
+    val guard: *MemoryGuard = ctx::*MemoryGuard;
+    if (!memory_guard_shape_valid(guard) || key_id == 0 || token_len == 0
+        || token_len > 12 || !range_valid(token, token_len)
+        || memory_guard_aliases(guard::ptr, token, token_len)
+        || expires_at <= now || now < 0) {
+        ret GUARD_INVALID;
+    }
+    mutex.lock(?guard.lock);
+    if (!guard.initialized || !guard.active) {
+        mutex.unlock(?guard.lock);
+        ret GUARD_INVALID;
+    }
+    var reusable: usize = guard.capacity;
+    var i: usize = 0;
+    for (i < guard.capacity) {
+        val slot: *GuardSlot = ?guard.slots[i];
+        if (slot.used && slot.expires_at <= now) {
+            clear_public(?slot.token[0], 12);
+            slot.used = false;
+        }
+        if (guard_token_equal(slot, key_id, token, token_len)) {
+            mutex.unlock(?guard.lock);
+            ret GUARD_SEEN;
+        }
+        if (!slot.used && reusable == guard.capacity) { reusable = i; }
+        i = i + 1;
+    }
+    if (reusable == guard.capacity) {
+        mutex.unlock(?guard.lock);
+        ret GUARD_CAPACITY;
+    }
+    val slot: *GuardSlot = ?guard.slots[reusable];
+    clear_public(?slot.token[0], 12);
+    i = 0;
+    for (i < token_len) {
+        slot.token[i] = token[i];
+        i = i + 1;
+    }
+    slot.key_id = key_id;
+    slot.token_len = token_len;
+    slot.expires_at = expires_at;
+    slot.used = true;
+    mutex.unlock(?guard.lock);
+    ret GUARD_OK;
+}
+
+fun memory_guard_forget(ctx: ptr, key_id: u32, token: *u8,
+    token_len: usize) GuardStatus {
+    val guard: *MemoryGuard = ctx::*MemoryGuard;
+    if (!memory_guard_shape_valid(guard) || token_len == 0 || token_len > 12
+        || !range_valid(token, token_len)
+        || memory_guard_aliases(guard::ptr, token, token_len)) {
+        ret GUARD_INVALID;
+    }
+    mutex.lock(?guard.lock);
+    if (!guard.initialized || !guard.active) {
+        mutex.unlock(?guard.lock);
+        ret GUARD_INVALID;
+    }
+    var i: usize = 0;
+    for (i < guard.capacity) {
+        val slot: *GuardSlot = ?guard.slots[i];
+        if (guard_token_equal(slot, key_id, token, token_len)) {
+            clear_public(?slot.token[0], 12);
+            slot.used = false;
+            slot.token_len = 0;
+            slot.key_id = 0;
+            slot.expires_at = 0;
+            mutex.unlock(?guard.lock);
+            ret GUARD_OK;
+        }
+        i = i + 1;
+    }
+    mutex.unlock(?guard.lock);
+    ret GUARD_OK;
+}
+
+pub fun memory_guard(guard: *MemoryGuard) Guard {
+    if (!memory_guard_shape_valid(guard)) { ret Guard{}; }
+    mutex.lock(?guard.lock);
+    val active: bool = guard.active;
+    mutex.unlock(?guard.lock);
+    if (!active) { ret Guard{}; }
+    ret Guard{ctx: guard::ptr, domain: guard::ptr,
+        aliases: memory_guard_aliases, overlaps: memory_guard_overlaps,
+        claim: memory_guard_claim, forget: memory_guard_forget};
+}
+
+pub fun release_memory_guard(guard: *MemoryGuard) bool {
+    if (!memory_guard_shape_valid(guard)) { ret false; }
+    mutex.lock(?guard.lock);
+    if (!guard.initialized || !guard.active) {
+        mutex.unlock(?guard.lock);
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < guard.capacity) {
+        clear_public(?guard.slots[i].token[0], 12);
+        guard.slots[i].used = false;
+        guard.slots[i].token_len = 0;
+        guard.slots[i].key_id = 0;
+        guard.slots[i].expires_at = 0;
+        i = i + 1;
+    }
+    guard.active = false;
+    mutex.unlock(?guard.lock);
+    ret true;
+}
+
+fun key_at_locked(ring: *KeyRing, id: u32) *KeyGeneration {
+    if (ring == nil) { ret nil; }
+    var i: usize = 0;
+    for (i < ring.len) {
+        if (ring.items[i].id == id) { ret ?ring.items[i]; }
+        i = i + 1;
+    }
+    ret nil;
+}
+
+fun key_ring_shape_valid(ring: *KeyRing) bool {
+    if (ring == nil || !range_valid(ring::*u8, $size_of(KeyRing))
+        || !ring.initialized || ring.len == 0
+        || ring.len - 1 > ring.max_retired) { ret false; }
+    var item_bytes: usize = 0;
+    ret array_valid(ring.items::*u8, ring.len,
+        $size_of(KeyGeneration), ?item_bytes)
+        && !ranges_overlap(ring::*u8, $size_of(KeyRing),
+            ring.items::*u8, item_bytes);
+}
+
+fun key_ring_aliases(ring: *KeyRing, data: *u8, len: usize) bool {
+    if (!range_valid(data, len) || !key_ring_shape_valid(ring)) { ret true; }
+    var item_bytes: usize = 0;
+    if (!multiply_size(ring.len, $size_of(KeyGeneration), ?item_bytes)) {
+        ret true;
+    }
+    ret ranges_overlap(data, len, ring::*u8, $size_of(KeyRing))
+        || ranges_overlap(data, len, ring.items::*u8, item_bytes);
+}
+
+fun key_material_equal(left: *u8, right: *u8) bool {
+    var left_secret: [32]^u8;
+    var right_secret: [32]^u8;
+    ct.zeroize(?left_secret[0], 32);
+    ct.zeroize(?right_secret[0], 32);
+    var i: usize = 0;
+    for (i < 32) {
+        left_secret[i] = left[i];
+        right_secret[i] = right[i];
+        i = i + 1;
+    }
+    ct.begin();
+    val equal: ^u8 = ct.eq_bytes(?left_secret[0], ?right_secret[0], 32);
+    ct.zeroize(?left_secret[0], 32);
+    ct.zeroize(?right_secret[0], 32);
+    if (equal:^ == 1) {
+        ct.end();
+        ret true;
+    }
+    ct.end();
+    ret false;
+}
+
+pub fun init_key_ring(ring: *KeyRing, items: *KeyGeneration, len: usize,
+    current_id: u32, max_retired: usize, algorithm: Algorithm,
+    nonce_domain: ptr) bool {
+    if (ring == nil || !range_valid(ring::*u8, $size_of(KeyRing))) {
+        ret false;
+    }
+    var item_bytes: usize = 0;
+    if (ring.initialized || ring.active || len == 0
+        || len - 1 > max_retired || current_id == 0 || nonce_domain == nil
+        || (algorithm != AES_256_GCM && algorithm != CHACHA20_POLY1305)
+        || !array_valid(items::*u8, len, $size_of(KeyGeneration),
+            ?item_bytes)
+        || ranges_overlap(ring::*u8, $size_of(KeyRing),
+            items::*u8, item_bytes)) { ret false; }
+    var current_found: bool = false;
+    var i: usize = 0;
+    for (i < len) {
+        val item: *KeyGeneration = ?items[i];
+        if (item.id == 0 || item.key_len != 32
+            || item.activated_at < 0 || item.encode_until <= item.activated_at
+            || item.decode_until < item.encode_until) { ret false; }
+        if (item.id == current_id) { current_found = true; }
+        var previous: usize = 0;
+        for (previous < i) {
+            if (items[previous].id == item.id
+                || key_material_equal(?items[previous].key[0],
+                    ?item.key[0])) { ret false; }
+            previous = previous + 1;
+        }
+        i = i + 1;
+    }
+    if (!current_found) { ret false; }
+    ring.items = items;
+    ring.len = len;
+    ring.current_id = current_id;
+    ring.max_retired = max_retired;
+    ring.algorithm = algorithm;
+    ring.nonce_domain = nonce_domain;
+    ring.lock = mutex.make();
+    ring.initialized = true;
+    ring.active = true;
+    ret true;
+}
+
+pub fun release_key_ring(ring: *KeyRing) bool {
+    if (!key_ring_shape_valid(ring)) { ret false; }
+    mutex.lock(?ring.lock);
+    if (!ring.active) {
+        mutex.unlock(?ring.lock);
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < ring.len) {
+        clear_public(?ring.items[i].key[0], 32);
+        ring.items[i].id = 0;
+        ring.items[i].key_len = 0;
+        ring.items[i].activated_at = 0;
+        ring.items[i].encode_until = 0;
+        ring.items[i].decode_until = 0;
+        i = i + 1;
+    }
+    ring.current_id = 0;
+    ring.active = false;
+    mutex.unlock(?ring.lock);
+    ret true;
+}
+
+pub fun rotate_key_ring(ring: *KeyRing, current_id: u32,
+    now: i64) bool {
+    if (!key_ring_shape_valid(ring) || current_id == 0 || now < 0) {
+        ret false;
+    }
+    mutex.lock(?ring.lock);
+    if (!ring.active) {
+        mutex.unlock(?ring.lock);
+        ret false;
+    }
+    val current: *KeyGeneration = key_at_locked(ring, current_id);
+    if (current == nil || now < current.activated_at
+        || now >= current.encode_until) {
+        mutex.unlock(?ring.lock);
+        ret false;
+    }
+    ring.current_id = current_id;
+    mutex.unlock(?ring.lock);
+    ret true;
+}
+
+fun guard_valid(guard: Guard) bool {
+    ret guard.ctx != nil && guard.domain != nil && guard.aliases != nil
+        && guard.overlaps != nil && guard.claim != nil && guard.forget != nil;
+}
+
+fun guards_overlap(left: Guard, right: Guard) bool {
+    if (!guard_valid(left) || !guard_valid(right)) { ret true; }
+    ret left.overlaps(left.ctx, right.ctx, right.aliases)
+        || right.overlaps(right.ctx, left.ctx, left.aliases);
+}
+
+fun protected_valid(codec: *ProtectedCodec) bool {
+    ret codec != nil && range_valid(codec::*u8, $size_of(ProtectedCodec))
+        && codec.active && key_ring_shape_valid(codec.ring)
+        && codec.entropy.ctx != nil && codec.entropy.aliases != nil
+        && codec.entropy.fill != nil && guard_valid(codec.nonce_guard)
+        && (codec.replay_policy == REPLAY_ALLOW
+            || (codec.replay_policy == REPLAY_REJECT
+                && guard_valid(codec.replay_guard)
+                && codec.replay_guard.ctx != codec.nonce_guard.ctx
+                && codec.replay_guard.domain != codec.nonce_guard.domain))
+        && (codec.algorithm == AES_256_GCM
+            || codec.algorithm == CHACHA20_POLY1305)
+        && codec.clock_skew_s >= 0 && codec.max_lifetime_s > 0
+        && codec.max_context_bytes > 0
+        && codec.max_context_bytes <= MAX_CONTEXT_BYTES;
+}
+
+fun protected_aliases(codec: *ProtectedCodec, data: *u8,
+    len: usize) bool {
+    if (!range_valid(data, len) || !protected_valid(codec)) { ret true; }
+    if (ranges_overlap(data, len, codec::*u8, $size_of(ProtectedCodec))
+        || key_ring_aliases(codec.ring, data, len)
+        || codec.entropy.aliases(codec.entropy.ctx, data, len)
+        || codec.nonce_guard.aliases(codec.nonce_guard.ctx, data, len)) {
+        ret true;
+    }
+    ret codec.replay_policy == REPLAY_REJECT
+        && codec.replay_guard.aliases(codec.replay_guard.ctx, data, len);
+}
+
+pub fun init_protected_codec(codec: *ProtectedCodec, ring: *KeyRing,
+    entropy: Entropy, nonce_guard: Guard, replay_policy: ReplayPolicy,
+    replay_guard: Guard, algorithm: Algorithm, clock_skew_s: i64,
+    max_lifetime_s: i64, max_context_bytes: usize) bool {
+    if (codec == nil || !range_valid(codec::*u8, $size_of(ProtectedCodec))
+        || codec.active || !key_ring_shape_valid(ring)
+        || ranges_overlap(codec::*u8, $size_of(ProtectedCodec),
+            ring::*u8, $size_of(KeyRing))) { ret false; }
+    var ring_item_bytes: usize = 0;
+    if (!multiply_size(ring.len, $size_of(KeyGeneration),
+            ?ring_item_bytes)
+        || ranges_overlap(codec::*u8, $size_of(ProtectedCodec),
+            ring.items::*u8, ring_item_bytes)) { ret false; }
+    var candidate: ProtectedCodec = ProtectedCodec{ring: ring,
+        entropy: entropy, nonce_guard: nonce_guard,
+        replay_guard: replay_guard, replay_policy: replay_policy,
+        algorithm: algorithm, clock_skew_s: clock_skew_s,
+        max_lifetime_s: max_lifetime_s,
+        max_context_bytes: max_context_bytes, active: true};
+    if (!protected_valid(?candidate)) { ret false; }
+    mutex.lock(?ring.lock);
+    val binding_valid: bool = ring.active && ring.algorithm == algorithm
+        && ring.nonce_domain == nonce_guard.domain;
+    mutex.unlock(?ring.lock);
+    if (!binding_valid
+        || (replay_policy == REPLAY_REJECT
+            && guards_overlap(nonce_guard, replay_guard))
+        || entropy.aliases(entropy.ctx, codec::*u8,
+            $size_of(ProtectedCodec))
+        || entropy.aliases(entropy.ctx, ring::*u8, $size_of(KeyRing))
+        || entropy.aliases(entropy.ctx, ring.items::*u8, ring_item_bytes)
+        || nonce_guard.aliases(nonce_guard.ctx, codec::*u8,
+            $size_of(ProtectedCodec))
+        || nonce_guard.aliases(nonce_guard.ctx, ring::*u8,
+            $size_of(KeyRing))
+        || nonce_guard.aliases(nonce_guard.ctx, ring.items::*u8,
+            ring_item_bytes)
+        || nonce_guard.overlaps(nonce_guard.ctx, entropy.ctx,
+            entropy.aliases)
+        || (replay_policy == REPLAY_REJECT
+            && (replay_guard.aliases(replay_guard.ctx, codec::*u8,
+                    $size_of(ProtectedCodec))
+                || replay_guard.aliases(replay_guard.ctx, ring::*u8,
+                    $size_of(KeyRing))
+                || replay_guard.aliases(replay_guard.ctx, ring.items::*u8,
+                    ring_item_bytes)
+                || replay_guard.overlaps(replay_guard.ctx, entropy.ctx,
+                    entropy.aliases)))) { ret false; }
+    @codec = candidate;
+    ret true;
+}
+
+fun write_u16_secret(output: *^u8, offset: usize, value: u16) {
+    output[offset] = (value >> 8)::u8;
+    output[offset + 1] = value::u8;
+}
+
+fun write_u32_public(output: *u8, offset: usize, value: u32) {
+    output[offset] = (value >> 24)::u8;
+    output[offset + 1] = (value >> 16)::u8;
+    output[offset + 2] = (value >> 8)::u8;
+    output[offset + 3] = value::u8;
+}
+
+fun write_u32_secret(output: *^u8, offset: usize, value: u32) {
+    output[offset] = (value >> 24)::u8;
+    output[offset + 1] = (value >> 16)::u8;
+    output[offset + 2] = (value >> 8)::u8;
+    output[offset + 3] = value::u8;
+}
+
+fun write_u64_secret(output: *^u8, offset: usize, value: u64) {
+    output[offset] = (value >> 56)::u8;
+    output[offset + 1] = (value >> 48)::u8;
+    output[offset + 2] = (value >> 40)::u8;
+    output[offset + 3] = (value >> 32)::u8;
+    output[offset + 4] = (value >> 24)::u8;
+    output[offset + 5] = (value >> 16)::u8;
+    output[offset + 6] = (value >> 8)::u8;
+    output[offset + 7] = value::u8;
+}
+
+fun read_u16_secret(input: *^u8, offset: usize) u16 {
+    ret ((input[offset]:^)::u16 << 8) | (input[offset + 1]:^)::u16;
+}
+
+fun read_u32_public(input: *u8, offset: usize) u32 {
+    ret (input[offset]::u32 << 24) | (input[offset + 1]::u32 << 16)
+        | (input[offset + 2]::u32 << 8) | input[offset + 3]::u32;
+}
+
+fun read_u32_secret(input: *^u8, offset: usize) u32 {
+    ret ((input[offset]:^)::u32 << 24)
+        | ((input[offset + 1]:^)::u32 << 16)
+        | ((input[offset + 2]:^)::u32 << 8)
+        | (input[offset + 3]:^)::u32;
+}
+
+fun read_u64_secret(input: *^u8, offset: usize) u64 {
+    ret ((input[offset]:^)::u64 << 56)
+        | ((input[offset + 1]:^)::u64 << 48)
+        | ((input[offset + 2]:^)::u64 << 40)
+        | ((input[offset + 3]:^)::u64 << 32)
+        | ((input[offset + 4]:^)::u64 << 24)
+        | ((input[offset + 5]:^)::u64 << 16)
+        | ((input[offset + 6]:^)::u64 << 8)
+        | (input[offset + 7]:^)::u64;
+}
+
+fun time_valid_for_encode(codec: *ProtectedCodec, value: *Session,
+    now: i64) bool {
+    if (now < 0 || !session_valid(value)
+        || value.expires_at_unix - value.issued_at_unix
+            > codec.max_lifetime_s
+        || now >= value.expires_at_unix
+        || value.expires_at_unix > 9223372036854775807
+            - codec.clock_skew_s) { ret false; }
+    if (value.issued_at_unix > now
+        && value.issued_at_unix - now > codec.clock_skew_s) { ret false; }
+    ret true;
+}
+
+fun not_yet_valid(not_before: i64, now: i64, skew: i64) bool {
+    ret not_before > now && not_before - now > skew;
+}
+
+fun expired(expires: i64, now: i64, skew: i64) bool {
+    if (expires < 0 || skew < 0
+        || expires > 9223372036854775807 - skew) { ret true; }
+    ret now >= expires + skew;
+}
+
+fun key_decode_active(key: *KeyGeneration, now: i64, skew: i64) bool {
+    if (key == nil || now < 0) { ret false; }
+    if (key.activated_at > now && key.activated_at - now > skew) { ret false; }
+    ret now < key.decode_until
+        || (now - key.decode_until < skew);
+}
+
+fun build_aad(header: *u8, context_value: view.View,
+    output: *u8) usize {
+    var i: usize = 0;
+    for (i < 8) {
+        output[i] = header[i];
+        i = i + 1;
+    }
+    i = 0;
+    for (i < context_value.len) {
+        output[8 + i] = context_value.data[i];
+        i = i + 1;
+    }
+    ret 8 + context_value.len;
+}
+
+fun seal_aead(algorithm: Algorithm, key: contracts.SecretBytes,
+    nonce: contracts.Bytes, aad: contracts.Bytes,
+    plaintext: contracts.SecretBytes, output: contracts.Buffer)
+    contracts.Operation {
+    if (algorithm == AES_256_GCM) {
+        ret aes_gcm.seal(key, nonce, aad, plaintext, output);
+    }
+    ret chacha20_poly1305.seal(key, nonce, aad, plaintext, output);
+}
+
+fun open_aead(algorithm: Algorithm, key: contracts.SecretBytes,
+    nonce: contracts.Bytes, aad: contracts.Bytes, input: contracts.Bytes,
+    output: contracts.SecretBuffer) contracts.Operation {
+    if (algorithm == AES_256_GCM) {
+        ret aes_gcm.open(key, nonce, aad, input, output);
+    }
+    ret chacha20_poly1305.open(key, nonce, aad, input, output);
+}
+
+fun codec_result(status: CodecStatus) CodecOperation {
+    ret CodecOperation{status: status, written: 0, key_id: 0,
+        needs_rotation: false};
+}
+
+fun map_guard(status: GuardStatus, nonce: bool) CodecStatus {
+    if (status == GUARD_SEEN) {
+        if (nonce) { ret CODEC_NONCE_REUSED; }
+        ret CODEC_REPLAYED;
+    }
+    if (status == GUARD_CAPACITY) { ret CODEC_REPLAY_CAPACITY; }
+    ret CODEC_INVALID;
+}
+
+fun forget_nonce(guard: Guard, key_id: u32, nonce: *u8) {
+    var token: [12]u8;
+    var i: usize = 0;
+    for (i < 12) {
+        token[i] = nonce[i];
+        i = i + 1;
+    }
+    guard.forget(guard.ctx, key_id, ?token[0], 12);
+    clear_public(?token[0], 12);
+}
+
+fun base64url_text_len(input_len: usize) usize {
+    val complete: usize = input_len / 3 * 4;
+    val remaining: usize = input_len % 3;
+    if (remaining == 0) { ret complete; }
+    ret complete + remaining + 1;
+}
+
+fun encode_protected(ctx: ptr, value: *Session, context_value: view.View,
+    now: i64, output: *u8, output_capacity: usize) CodecOperation {
+    val codec: *ProtectedCodec = ctx::*ProtectedCodec;
+    if (!protected_valid(codec) || context_value.len == 0
+        || !view_valid(context_value,
+        codec.max_context_bytes) || !time_valid_for_encode(codec, value, now)) {
+        ret codec_result(CODEC_INVALID);
+    }
+    val config: ProtectedCodec = @codec;
+    val source: Session = @value;
+    val plaintext_len: usize = PLAINTEXT_HEADER_BYTES
+        + source.id.len + source.data.len;
+    val raw_len: usize = ENVELOPE_BYTES + plaintext_len + 16;
+    if (plaintext_len > MAX_SECRET_PLAINTEXT_BYTES
+        || raw_len > MAX_RAW_TOKEN_BYTES) { ret codec_result(CODEC_INVALID); }
+    val required_output: usize = base64url_text_len(raw_len);
+    if (required_output > output_capacity || required_output > MAX_TOKEN_BYTES
+        || output == nil) { ret codec_result(CODEC_OUTPUT_TOO_SMALL); }
+    var plaintext: [2160]^u8;
+    ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+    plaintext[0] = 1;
+    plaintext[1] = 0;
+    write_u16_secret(?plaintext[0], 2, source.id.len::u16);
+    write_u32_secret(?plaintext[0], 4, source.data.len::u32);
+    write_u64_secret(?plaintext[0], 8, source.issued_at_unix::u64);
+    write_u64_secret(?plaintext[0], 16, source.not_before_unix::u64);
+    write_u64_secret(?plaintext[0], 24, source.expires_at_unix::u64);
+    write_u64_secret(?plaintext[0], 32, source.version);
+    write_u64_secret(?plaintext[0], 40, source.generation);
+    var i: usize = 0;
+    for (i < source.id.len) {
+        plaintext[PLAINTEXT_HEADER_BYTES + i] = source.id.data[i];
+        i = i + 1;
+    }
+    i = 0;
+    for (i < source.data.len) {
+        plaintext[PLAINTEXT_HEADER_BYTES + source.id.len + i]
+            = source.data.data[i];
+        i = i + 1;
+    }
+    var context_snapshot: [256]u8;
+    i = 0;
+    for (i < context_value.len) {
+        context_snapshot[i] = context_value.data[i];
+        i = i + 1;
+    }
+    val context_copy: view.View = view.view(?context_snapshot[0],
+        context_value.len);
+    if (!range_valid(output, required_output)
+        || protected_aliases(codec, output, required_output)
+        || protected_aliases(codec, value::*u8, $size_of(Session))
+        || protected_aliases(codec, source.id.data, source.id.len)
+        || protected_aliases(codec, source.data.data, source.data.len)
+        || protected_aliases(codec, context_value.data, context_value.len)
+        || ranges_overlap(output, required_output, value::*u8,
+            $size_of(Session))
+        || ranges_overlap(output, required_output, source.id.data,
+            source.id.len)
+        || ranges_overlap(output, required_output, source.data.data,
+            source.data.len)) {
+        ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+        ret codec_result(CODEC_INVALID);
+    }
+    var secret_key: [32]^u8;
+    ct.zeroize(?secret_key[0], 32);
+    mutex.lock(?config.ring.lock);
+    val key: *KeyGeneration = key_at_locked(config.ring,
+        config.ring.current_id);
+    if (!config.ring.active || config.ring.algorithm != config.algorithm
+        || config.ring.nonce_domain != config.nonce_guard.domain
+        || key == nil || now < key.activated_at || now >= key.encode_until
+        || key.decode_until > 9223372036854775807 - config.clock_skew_s) {
+        mutex.unlock(?config.ring.lock);
+        ct.zeroize(?secret_key[0], 32);
+        ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+        ret codec_result(CODEC_KEY_INACTIVE);
+    }
+    val key_id: u32 = key.id;
+    val nonce_deadline: i64 = key.decode_until + config.clock_skew_s;
+    i = 0;
+    for (i < 32) {
+        secret_key[i] = key.key[i];
+        i = i + 1;
+    }
+    mutex.unlock(?config.ring.lock);
+    var staged: [3072]u8;
+    staged[0] = 'L';
+    staged[1] = 'S';
+    staged[2] = 1;
+    staged[3] = config.algorithm;
+    write_u32_public(?staged[0], 4, key_id);
+    var aad: [264]u8;
+    val aad_len: usize = build_aad(?staged[0], context_copy, ?aad[0]);
+    var nonce_value: [12]u8;
+    clear_public(?nonce_value[0], 12);
+    if (config.entropy.fill(config.entropy.ctx, ?nonce_value[0], 12) != 0) {
+        clear_public(?nonce_value[0], 12);
+        ct.zeroize(?secret_key[0], 32);
+        ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+        ret codec_result(CODEC_ENTROPY_UNAVAILABLE);
+    }
+    i = 0;
+    for (i < 12) {
+        staged[8 + i] = nonce_value[i];
+        i = i + 1;
+    }
+    clear_public(?nonce_value[0], 12);
+    var claim_token: [12]u8;
+    i = 0;
+    for (i < 12) {
+        claim_token[i] = staged[8 + i];
+        i = i + 1;
+    }
+    val claimed: GuardStatus = config.nonce_guard.claim(config.nonce_guard.ctx,
+        key_id, ?claim_token[0], 12, nonce_deadline, now);
+    val claim_unchanged: bool = public_equal(?claim_token[0], ?staged[8], 12);
+    clear_public(?claim_token[0], 12);
+    if (!claim_unchanged) {
+        ct.zeroize(?secret_key[0], 32);
+        ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+        ret codec_result(CODEC_INVALID);
+    }
+    if (claimed != GUARD_OK) {
+        ct.zeroize(?secret_key[0], 32);
+        ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+        ret codec_result(map_guard(claimed, true));
+    }
+    val key_bytes: contracts.SecretBytes = contracts.SecretBytes{
+        data: ?secret_key[0], len: 32};
+    val sealed: contracts.Operation = seal_aead(config.algorithm, key_bytes,
+        contracts.Bytes{data: ?staged[8], len: 12},
+        contracts.Bytes{data: ?aad[0], len: aad_len},
+        contracts.SecretBytes{data: ?plaintext[0], len: plaintext_len},
+        contracts.Buffer{data: ?staged[ENVELOPE_BYTES],
+            capacity: MAX_RAW_TOKEN_BYTES - ENVELOPE_BYTES});
+    ct.zeroize(?secret_key[0], 32);
+    ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+    if (sealed.error != contracts.OK || sealed.written != plaintext_len + 16) {
+        forget_nonce(config.nonce_guard, key_id, ?staged[8]);
+        ret codec_result(CODEC_INVALID);
+    }
+    var encoded: [4097]u8;
+    val encoded_len: usize = base64.encode_url(?staged[0], raw_len,
+        ?encoded[0], 4097);
+    if (encoded_len == 0 || encoded_len != required_output) {
+        forget_nonce(config.nonce_guard, key_id, ?staged[8]);
+        ret codec_result(CODEC_INVALID);
+    }
+    i = 0;
+    for (i < encoded_len) {
+        output[i] = encoded[i];
+        i = i + 1;
+    }
+    ret CodecOperation{status: CODEC_OK, written: encoded_len,
+        key_id: key_id, needs_rotation: false};
+}
+
+fun token_text_valid(input: *u8, input_len: usize) bool {
+    if (input_len == 0 || input_len >= MAX_TOKEN_BYTES
+        || input_len % 4 == 1 || !range_valid(input, input_len)) { ret false; }
+    var i: usize = 0;
+    for (i < input_len) {
+        val c: u8 = input[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+            || (c >= '0' && c <= '9') || c == '-' || c == '_')) {
+            ret false;
+        }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
+    context_value: view.View, now: i64, id_output: *u8, id_capacity: usize,
+    data_output: *u8, data_capacity: usize,
+    output: *Session) CodecOperation {
+    val codec: *ProtectedCodec = ctx::*ProtectedCodec;
+    if (!protected_valid(codec) || output == nil
+        || !range_valid(output::*u8, $size_of(Session)) || now < 0
+        || context_value.len == 0
+        || !view_valid(context_value, codec.max_context_bytes)
+        || !token_text_valid(input, input_len)) {
+        ret codec_result(CODEC_INVALID);
+    }
+    val config: ProtectedCodec = @codec;
+    var context_snapshot: [256]u8;
+    var context_index: usize = 0;
+    for (context_index < context_value.len) {
+        context_snapshot[context_index] = context_value.data[context_index];
+        context_index = context_index + 1;
+    }
+    val context_copy: view.View = view.view(?context_snapshot[0],
+        context_value.len);
+    var raw: [3072]u8;
+    val raw_len: usize = base64.decode(input, input_len, ?raw[0], 3072);
+    if (raw_len < ENVELOPE_BYTES + 16 + PLAINTEXT_HEADER_BYTES) {
+        ret codec_result(CODEC_TRUNCATED);
+    }
+    var canonical: [4097]u8;
+    val canonical_len: usize = base64.encode_url(?raw[0], raw_len,
+        ?canonical[0], 4097);
+    if (canonical_len != input_len
+        || !public_equal(?canonical[0], input, input_len)
+        || raw[0] != 'L' || raw[1] != 'S' || raw[2] != 1
+        || raw[3] != config.algorithm) { ret codec_result(CODEC_INVALID); }
+    if (protected_aliases(codec, input, input_len)
+        || protected_aliases(codec, context_value.data, context_value.len)
+        || protected_aliases(codec, output::*u8, $size_of(Session))) {
+        ret codec_result(CODEC_INVALID);
+    }
+    val key_id: u32 = read_u32_public(?raw[0], 4);
+    var secret_key: [32]^u8;
+    ct.zeroize(?secret_key[0], 32);
+    mutex.lock(?config.ring.lock);
+    val key: *KeyGeneration = key_at_locked(config.ring, key_id);
+    if (!config.ring.active || config.ring.algorithm != config.algorithm
+        || config.ring.nonce_domain != config.nonce_guard.domain
+        || key == nil) {
+        mutex.unlock(?config.ring.lock);
+        ct.zeroize(?secret_key[0], 32);
+        ret codec_result(CODEC_UNKNOWN_KEY);
+    }
+    if (!key_decode_active(key, now, config.clock_skew_s)) {
+        mutex.unlock(?config.ring.lock);
+        ct.zeroize(?secret_key[0], 32);
+        ret codec_result(CODEC_KEY_INACTIVE);
+    }
+    val needs_rotation: bool = key_id != config.ring.current_id;
+    var i: usize = 0;
+    for (i < 32) {
+        secret_key[i] = key.key[i];
+        i = i + 1;
+    }
+    mutex.unlock(?config.ring.lock);
+    val plaintext_len: usize = raw_len - ENVELOPE_BYTES - 16;
+    if (plaintext_len > MAX_SECRET_PLAINTEXT_BYTES) {
+        ct.zeroize(?secret_key[0], 32);
+        ret codec_result(CODEC_INVALID);
+    }
+    var aad: [264]u8;
+    val aad_len: usize = build_aad(?raw[0], context_copy, ?aad[0]);
+    var plaintext: [2160]^u8;
+    ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+    val key_bytes: contracts.SecretBytes = contracts.SecretBytes{
+        data: ?secret_key[0], len: 32};
+    val opened: contracts.Operation = open_aead(config.algorithm, key_bytes,
+        contracts.Bytes{data: ?raw[8], len: 12},
+        contracts.Bytes{data: ?aad[0], len: aad_len},
+        contracts.Bytes{data: ?raw[ENVELOPE_BYTES],
+            len: raw_len - ENVELOPE_BYTES},
+        contracts.SecretBuffer{data: ?plaintext[0], capacity: plaintext_len});
+    ct.zeroize(?secret_key[0], 32);
+    if (opened.error != contracts.OK || opened.written != plaintext_len) {
+        ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+        ret codec_result(CODEC_AUTH_FAILED);
+    }
+    if (plaintext[0]:^ != 1 || plaintext[1]:^ != 0) {
+        ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+        ret codec_result(CODEC_INVALID);
+    }
+    val id_len: usize = read_u16_secret(?plaintext[0], 2)::usize;
+    val data_len: usize = read_u32_secret(?plaintext[0], 4)::usize;
+    if (id_len == 0 || id_len > MAX_SESSION_ID_BYTES
+        || data_len > MAX_SESSION_DATA_BYTES
+        || PLAINTEXT_HEADER_BYTES + id_len > plaintext_len
+        || data_len != plaintext_len - PLAINTEXT_HEADER_BYTES - id_len) {
+        ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+        ret codec_result(CODEC_INVALID);
+    }
+    val issued: i64 = read_u64_secret(?plaintext[0], 8)::i64;
+    val not_before: i64 = read_u64_secret(?plaintext[0], 16)::i64;
+    val expires: i64 = read_u64_secret(?plaintext[0], 24)::i64;
+    val version: u64 = read_u64_secret(?plaintext[0], 32);
+    val generation: u64 = read_u64_secret(?plaintext[0], 40);
+    if (issued < 0 || not_before < issued || expires <= not_before
+        || expires - issued > config.max_lifetime_s
+        || expires > 9223372036854775807 - config.clock_skew_s) {
+        ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+        ret codec_result(CODEC_INVALID);
+    }
+    if (not_yet_valid(not_before, now, config.clock_skew_s)) {
+        ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+        ret codec_result(CODEC_NOT_YET_VALID);
+    }
+    if (expired(expires, now, config.clock_skew_s)) {
+        ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+        ret codec_result(CODEC_EXPIRED);
+    }
+    if (id_capacity < id_len || data_capacity < data_len
+        || id_output == nil || (data_len != 0 && data_output == nil)) {
+        ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+        ret codec_result(CODEC_OUTPUT_TOO_SMALL);
+    }
+    val output_bytes: *u8 = output::*u8;
+    if (!range_valid(id_output, id_len) || !range_valid(data_output, data_len)
+        || protected_aliases(codec, id_output, id_len)
+        || protected_aliases(codec, data_output, data_len)
+        || ranges_overlap(id_output, id_len, data_output, data_len)
+        || ranges_overlap(id_output, id_len, output_bytes, $size_of(Session))
+        || ranges_overlap(data_output, data_len, output_bytes,
+            $size_of(Session))) {
+        ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+        ret codec_result(CODEC_INVALID);
+    }
+    if (config.replay_policy == REPLAY_REJECT) {
+        var claim_token: [12]u8;
+        i = 0;
+        for (i < 12) {
+            claim_token[i] = raw[8 + i];
+            i = i + 1;
+        }
+        val replay: GuardStatus = config.replay_guard.claim(
+            config.replay_guard.ctx, key_id, ?claim_token[0], 12,
+            expires + config.clock_skew_s, now);
+        val claim_unchanged: bool = public_equal(?claim_token[0], ?raw[8], 12);
+        clear_public(?claim_token[0], 12);
+        if (!claim_unchanged) {
+            ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+            ret codec_result(CODEC_INVALID);
+        }
+        if (replay != GUARD_OK) {
+            ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+            ret codec_result(map_guard(replay, false));
+        }
+    }
+    i = 0;
+    for (i < id_len) {
+        id_output[i] = plaintext[PLAINTEXT_HEADER_BYTES + i]:^;
+        i = i + 1;
+    }
+    i = 0;
+    for (i < data_len) {
+        data_output[i] = plaintext[PLAINTEXT_HEADER_BYTES + id_len + i]:^;
+        i = i + 1;
+    }
+    var decoded: Session = Session{id: view.view(id_output, id_len),
+        data: view.view(data_output, data_len),
+        issued_at_unix: issued, not_before_unix: not_before,
+        expires_at_unix: expires, version: version, generation: generation};
+    @output = decoded;
+    ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
+    ret CodecOperation{status: CODEC_OK, written: id_len + data_len,
+        key_id: key_id, needs_rotation: needs_rotation};
+}
+
+pub fun protected_codec(codec: *ProtectedCodec) Codec {
+    if (!protected_valid(codec)) { ret Codec{}; }
+    ret Codec{ctx: codec::ptr, encode: encode_protected,
+        decode: decode_protected};
+}
+
+pub fun release_protected_codec(codec: *ProtectedCodec) bool {
+    if (codec == nil || !range_valid(codec::*u8, $size_of(ProtectedCodec))
+        || !codec.active) { ret false; }
+    codec.ring = nil;
+    codec.entropy = Entropy{};
+    codec.nonce_guard = Guard{};
+    codec.replay_guard = Guard{};
+    codec.replay_policy = 0;
+    codec.algorithm = 0;
+    codec.clock_skew_s = 0;
+    codec.max_lifetime_s = 0;
+    codec.max_context_bytes = 0;
+    codec.active = false;
+    ret true;
+}
+
+pub fun regenerate_id(codec: *ProtectedCodec, source: *Session,
+    id_output: *u8, id_capacity: usize, output: *Session) CodecStatus {
+    if (!protected_valid(codec) || source == nil
+        || !range_valid(source::*u8, $size_of(Session))
+        || !session_valid(source) || output == nil
+        || id_output == nil || id_capacity < GENERATED_ID_TEXT_BYTES
+        || !range_valid(output::*u8, $size_of(Session))
+        || !range_valid(id_output, GENERATED_ID_TEXT_BYTES)
+        || source.generation == 18446744073709551615) {
+        ret CODEC_INVALID;
+    }
+    val config: ProtectedCodec = @codec;
+    var source_snapshot: Session = @source;
+    var source_id: [64]u8;
+    var snapshot_index: usize = 0;
+    for (snapshot_index < source_snapshot.id.len) {
+        source_id[snapshot_index] = source_snapshot.id.data[snapshot_index];
+        snapshot_index = snapshot_index + 1;
+    }
+    if (protected_aliases(codec, id_output, GENERATED_ID_TEXT_BYTES)
+        || protected_aliases(codec, output::*u8, $size_of(Session))
+        || protected_aliases(codec, source::*u8, $size_of(Session))
+        || protected_aliases(codec, source.id.data, source.id.len)
+        || protected_aliases(codec, source.data.data, source.data.len)
+        || ranges_overlap(source::*u8, $size_of(Session), output::*u8,
+            $size_of(Session))
+        || ranges_overlap(id_output, GENERATED_ID_TEXT_BYTES,
+            codec::*u8, $size_of(ProtectedCodec))
+        || ranges_overlap(output::*u8, $size_of(Session),
+            codec::*u8, $size_of(ProtectedCodec))
+        || ranges_overlap(id_output, GENERATED_ID_TEXT_BYTES,
+            source::*u8, $size_of(Session))
+        || ranges_overlap(id_output, GENERATED_ID_TEXT_BYTES,
+            source.id.data, source.id.len)
+        || ranges_overlap(id_output, GENERATED_ID_TEXT_BYTES,
+            source.data.data, source.data.len)
+        || ranges_overlap(id_output, GENERATED_ID_TEXT_BYTES,
+            output::*u8, $size_of(Session))
+        || ranges_overlap(output::*u8, $size_of(Session),
+            source.id.data, source.id.len)
+        || ranges_overlap(output::*u8, $size_of(Session),
+            source.data.data, source.data.len)) { ret CODEC_INVALID; }
+    var random: [32]u8;
+    var candidate: [45]u8;
+    var attempt: usize = 0;
+    for (attempt < 4) {
+        clear_public(?random[0], 32);
+        if (config.entropy.fill(config.entropy.ctx, ?random[0], 32) != 0) {
+            clear_public(?random[0], 32);
+            clear_public(?candidate[0], 45);
+            clear_public(?source_id[0], 64);
+            ret CODEC_ENTROPY_UNAVAILABLE;
+        }
+        var public_random: [32]u8;
+        var i: usize = 0;
+        for (i < 32) {
+            public_random[i] = random[i];
+            i = i + 1;
+        }
+        clear_public(?random[0], 32);
+        val encoded: usize = base64.encode_url(?public_random[0], 32,
+            ?candidate[0], 45);
+        clear_public(?public_random[0], 32);
+        if (encoded != GENERATED_ID_TEXT_BYTES) {
+            clear_public(?candidate[0], 45);
+            clear_public(?source_id[0], 64);
+            ret CODEC_INVALID;
+        }
+        if (source_snapshot.id.len != encoded
+            || !public_equal(?source_id[0], ?candidate[0], encoded)) {
+            i = 0;
+            for (i < encoded) {
+                id_output[i] = candidate[i];
+                i = i + 1;
+            }
+            var regenerated: Session = source_snapshot;
+            regenerated.id = view.view(id_output, encoded);
+            regenerated.version = 0;
+            regenerated.generation = 0;
+            @output = regenerated;
+            clear_public(?candidate[0], 45);
+            clear_public(?source_id[0], 64);
+            ret CODEC_OK;
+        }
+        attempt = attempt + 1;
+    }
+    clear_public(?candidate[0], 45);
+    clear_public(?source_id[0], 64);
+    ret CODEC_FIXATION_FAILED;
+}
+
+pub fun secure_cookie(name: str) CookiePolicy {
+    ret CookiePolicy{name: name, path: "/", domain: nil, same_site: "Lax",
+        secure: true, http_only: true, max_age: 0};
+}
+
+fun manager_dependencies_valid(store: Store, codec: Codec,
+    cookie: CookiePolicy) bool {
+    ret store.ctx != nil && store.aliases != nil && store.start != nil
+        && store.stop != nil && store.load != nil && store.save != nil
+        && store.delete != nil && store.replace != nil && store.reap != nil
+        && codec.encode != nil && codec.decode != nil && cookie.name != nil
+        && cookie.secure && cookie.http_only;
+}
+
+pub fun manager_valid(manager: *Manager) bool {
+    if (manager == nil || !range_valid(manager::*u8, $size_of(Manager))) {
+        ret false;
+    }
+    val state: ManagerState = atomic.load(?manager.state);
+    ret (state == MANAGER_STOPPED || state == MANAGER_ACTIVE)
+        && manager_dependencies_valid(manager.store, manager.codec,
+            manager.cookie);
+}
+
+pub fun manager_active(manager: *Manager) bool {
+    ret manager != nil && range_valid(manager::*u8, $size_of(Manager))
+        && atomic.load(?manager.state) == MANAGER_ACTIVE;
+}
+
+pub fun init_manager(manager: *Manager, store: Store, codec: Codec,
+    cookie: CookiePolicy) bool {
+    if (manager == nil || !range_valid(manager::*u8, $size_of(Manager))
+        || !manager_dependencies_valid(store, codec, cookie)
+        || store.aliases(store.ctx, manager::*u8, $size_of(Manager))) {
+        ret false;
+    }
+    val current: ManagerState = atomic.load(?manager.state);
+    if (current != MANAGER_EMPTY) { ret false; }
+    var expected: i64 = current;
+    if (!atomic.cas(?manager.state, ?expected, MANAGER_STARTING)) {
+        ret false;
+    }
+    manager.store = store;
+    manager.codec = codec;
+    manager.cookie = cookie;
+    atomic.store(?manager.state, MANAGER_STOPPED);
+    ret true;
+}
+
+pub fun start_manager(manager: *Manager) StoreStatus {
+    if (manager == nil || !range_valid(manager::*u8, $size_of(Manager))) {
+        ret STORE_INVALID;
+    }
+    var expected: i64 = MANAGER_STOPPED;
+    if (!atomic.cas(?manager.state, ?expected, MANAGER_STARTING)) {
+        ret STORE_INVALID;
+    }
+    val store: Store = manager.store;
+    if (!manager_dependencies_valid(store, manager.codec, manager.cookie)) {
+        atomic.store(?manager.state, MANAGER_STOPPED);
+        ret STORE_INVALID;
+    }
+    val started: StoreStatus = store.start(store.ctx);
+    if (started == STORE_OK) { atomic.store(?manager.state, MANAGER_ACTIVE); }
+    or { atomic.store(?manager.state, MANAGER_STOPPED); }
+    ret started;
+}
+
+pub fun stop_manager(manager: *Manager) StoreStatus {
+    if (manager == nil || !range_valid(manager::*u8, $size_of(Manager))) {
+        ret STORE_INVALID;
+    }
+    var expected: i64 = MANAGER_ACTIVE;
+    if (!atomic.cas(?manager.state, ?expected, MANAGER_STOPPING)) {
+        ret STORE_INVALID;
+    }
+    val store: Store = manager.store;
+    if (!manager_dependencies_valid(store, manager.codec, manager.cookie)) {
+        atomic.store(?manager.state, MANAGER_ACTIVE);
+        ret STORE_INVALID;
+    }
+    val stopped: StoreStatus = store.stop(store.ctx);
+    if (stopped == STORE_OK) { atomic.store(?manager.state, MANAGER_STOPPED); }
+    or { atomic.store(?manager.state, MANAGER_ACTIVE); }
+    ret stopped;
+}
+
+rec TestEntropyState {
+    seed:   u8;
+    calls:  usize;
+    fail:   bool;
+    repeat: bool;
+}
+
+fun test_entropy_fill(ctx: ptr, output: *u8, len: usize) i64 {
+    val state: *TestEntropyState = ctx::*TestEntropyState;
+    if (state == nil || state.fail || (len != 0 && output == nil)) { ret -1; }
+    var i: usize = 0;
+    for (i < len) {
+        output[i] = state.seed + i::u8;
+        i = i + 1;
+    }
+    state.calls = state.calls + 1;
+    if (!state.repeat) { state.seed = state.seed + 1; }
+    ret 0;
+}
+
+fun test_entropy_aliases(ctx: ptr, data: *u8, len: usize) bool {
+    val state: *TestEntropyState = ctx::*TestEntropyState;
+    if (state == nil || !range_valid(state::*u8, $size_of(TestEntropyState))
+        || !range_valid(data, len)) { ret true; }
+    ret ranges_overlap(data, len, state::*u8, $size_of(TestEntropyState));
+}
+
+rec MutatingEntropyState {
+    source: *Session;
+    calls:  usize;
+}
+
+fun mutating_entropy_fill(ctx: ptr, output: *u8, len: usize) i64 {
+    val state: *MutatingEntropyState = ctx::*MutatingEntropyState;
+    if (state == nil || state.source == nil || output == nil) { ret -1; }
+    state.source.data = view.view("mutated", ~(0::usize));
+    state.source.issued_at_unix = 999;
+    var i: usize = 0;
+    for (i < len) {
+        output[i] = 0x40 + i::u8;
+        i = i + 1;
+    }
+    state.calls = state.calls + 1;
+    ret 0;
+}
+
+fun mutating_entropy_aliases(ctx: ptr, data: *u8, len: usize) bool {
+    val state: *MutatingEntropyState = ctx::*MutatingEntropyState;
+    if (state == nil
+        || !range_valid(state::*u8, $size_of(MutatingEntropyState))
+        || !range_valid(data, len)) { ret true; }
+    ret ranges_overlap(data, len, state::*u8,
+        $size_of(MutatingEntropyState));
+}
+
+rec MutatingGuardState {
+    inner:     Guard;
+    mutations: usize;
+}
+
+fun mutating_guard_claim(ctx: ptr, key_id: u32, token: *u8,
+    token_len: usize, expires_at: i64, now: i64) GuardStatus {
+    val state: *MutatingGuardState = ctx::*MutatingGuardState;
+    if (state == nil) { ret GUARD_INVALID; }
+    val status: GuardStatus = state.inner.claim(state.inner.ctx, key_id,
+        token, token_len, expires_at, now);
+    if (token != nil && token_len != 0) {
+        token[0] = token[0] ^ 0xff;
+        state.mutations = state.mutations + 1;
+    }
+    ret status;
+}
+
+fun mutating_guard_forget(ctx: ptr, key_id: u32, token: *u8,
+    token_len: usize) GuardStatus {
+    val state: *MutatingGuardState = ctx::*MutatingGuardState;
+    if (state == nil) { ret GUARD_INVALID; }
+    val status: GuardStatus = state.inner.forget(state.inner.ctx, key_id,
+        token, token_len);
+    if (token != nil && token_len != 0) {
+        token[0] = token[0] ^ 0xff;
+        state.mutations = state.mutations + 1;
+    }
+    ret status;
+}
+
+fun mutating_guard_aliases(ctx: ptr, data: *u8, len: usize) bool {
+    val state: *MutatingGuardState = ctx::*MutatingGuardState;
+    if (state == nil || !range_valid(data, len)
+        || !range_valid(state::*u8, $size_of(MutatingGuardState))
+        || !guard_valid(state.inner)) { ret true; }
+    ret ranges_overlap(data, len, state::*u8, $size_of(MutatingGuardState))
+        || state.inner.aliases(state.inner.ctx, data, len);
+}
+
+fun mutating_guard_overlaps(ctx: ptr, other_ctx: ptr,
+    other_aliases: AliasesFun) bool {
+    val state: *MutatingGuardState = ctx::*MutatingGuardState;
+    if (state == nil || other_ctx == nil || other_aliases == nil
+        || !guard_valid(state.inner)) { ret true; }
+    ret other_aliases(other_ctx, state::*u8, $size_of(MutatingGuardState))
+        || state.inner.overlaps(state.inner.ctx, other_ctx, other_aliases);
+}
+
+fun mutating_guard(state: *MutatingGuardState) Guard {
+    if (state == nil || !guard_valid(state.inner)) {
+        ret Guard{};
+    }
+    ret Guard{ctx: state::ptr, domain: state.inner.domain,
+        aliases: mutating_guard_aliases, overlaps: mutating_guard_overlaps,
+        claim: mutating_guard_claim, forget: mutating_guard_forget};
+}
+
+rec CodecFixture {
+    keys:         [2]KeyGeneration;
+    ring:         KeyRing;
+    nonce_slots:  [8]GuardSlot;
+    nonce_guard:  MemoryGuard;
+    replay_slots: [8]GuardSlot;
+    replay_guard: MemoryGuard;
+    entropy:      TestEntropyState;
+    protected:    ProtectedCodec;
+    codec:        Codec;
+}
+
+fun init_codec_fixture(fixture: *CodecFixture, algorithm: Algorithm,
+    replay_policy: ReplayPolicy, nonce_capacity: usize,
+    replay_capacity: usize) bool {
+    if (fixture == nil || nonce_capacity == 0 || nonce_capacity > 8
+        || replay_capacity == 0 || replay_capacity > 8) { ret false; }
+    fixture.ring.initialized = false;
+    fixture.ring.active = false;
+    fixture.nonce_guard.initialized = false;
+    fixture.nonce_guard.active = false;
+    fixture.replay_guard.initialized = false;
+    fixture.replay_guard.active = false;
+    fixture.protected.active = false;
+    fixture.entropy = TestEntropyState{seed: 1, calls: 0,
+        fail: false, repeat: false};
+    fixture.keys[0] = KeyGeneration{id: 1, key_len: 32,
+        activated_at: 0, encode_until: 2000, decode_until: 3000};
+    fixture.keys[1] = KeyGeneration{id: 2, key_len: 32,
+        activated_at: 1000, encode_until: 4000, decode_until: 5000};
+    var i: usize = 0;
+    for (i < 32) {
+        fixture.keys[0].key[i] = 0x10 + i::u8;
+        fixture.keys[1].key[i] = 0x80 + i::u8;
+        i = i + 1;
+    }
+    if (!init_memory_guard(?fixture.nonce_guard,
+            ?fixture.nonce_slots[0], nonce_capacity)
+        || !init_memory_guard(?fixture.replay_guard,
+            ?fixture.replay_slots[0], replay_capacity)) { ret false; }
+    val nonce: Guard = memory_guard(?fixture.nonce_guard);
+    if (!init_key_ring(?fixture.ring, ?fixture.keys[0], 2, 1, 1,
+        algorithm, nonce.domain)) { ret false; }
+    val entropy: Entropy = Entropy{ctx: (?fixture.entropy)::ptr,
+        aliases: test_entropy_aliases, fill: test_entropy_fill};
+    if (!init_protected_codec(?fixture.protected, ?fixture.ring, entropy,
+        nonce, replay_policy,
+        memory_guard(?fixture.replay_guard), algorithm, 5, 3600,
+        MAX_CONTEXT_BYTES)) { ret false; }
+    fixture.codec = protected_codec(?fixture.protected);
+    ret fixture.codec.encode != nil && fixture.codec.decode != nil;
+}
+
+fun release_codec_fixture(fixture: *CodecFixture) bool {
+    ret release_protected_codec(?fixture.protected)
+        && release_memory_guard(?fixture.nonce_guard)
+        && release_memory_guard(?fixture.replay_guard)
+        && release_key_ring(?fixture.ring);
+}
+
+fun duplicate_generation_rejected(algorithm: Algorithm) bool {
+    var items: [2]KeyGeneration;
+    items[0] = KeyGeneration{id: 1, key_len: 32,
+        activated_at: 0, encode_until: 100, decode_until: 200};
+    items[1] = KeyGeneration{id: 2, key_len: 32,
+        activated_at: 50, encode_until: 200, decode_until: 300};
+    var seed: u8 = 0x10;
+    if (algorithm == CHACHA20_POLY1305) { seed = 0x80; }
+    var i: usize = 0;
+    for (i < 32) {
+        items[0].key[i] = seed + i::u8;
+        items[1].key[i] = seed + i::u8;
+        i = i + 1;
+    }
+    var ring: KeyRing;
+    ring.initialized = false;
+    ring.active = false;
+    ret !init_key_ring(?ring, ?items[0], 2, 1, 1, algorithm,
+        (?ring)::ptr) && !ring.active;
+}
+
+fun mutating_guard_rejected(algorithm: Algorithm) bool {
+    var fixture: CodecFixture;
+    if (!init_codec_fixture(?fixture, algorithm, REPLAY_ALLOW, 8, 8)
+        || !release_protected_codec(?fixture.protected)) { ret false; }
+    var mutation: MutatingGuardState = MutatingGuardState{
+        inner: memory_guard(?fixture.nonce_guard), mutations: 0};
+    val entropy: Entropy = Entropy{ctx: (?fixture.entropy)::ptr,
+        aliases: test_entropy_aliases, fill: test_entropy_fill};
+    if (!init_protected_codec(?fixture.protected, ?fixture.ring, entropy,
+        mutating_guard(?mutation), REPLAY_ALLOW,
+        memory_guard(?fixture.replay_guard), algorithm, 5, 3600,
+        MAX_CONTEXT_BYTES)) { ret false; }
+    fixture.codec = protected_codec(?fixture.protected);
+    fixture.entropy.seed = 1;
+    fixture.entropy.repeat = true;
+    var value: Session = sample_session();
+    var token: [4096]u8;
+    token[0] = 0xa5;
+    val encoded: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
+        ?value, view.view("binding", 7), 100, ?token[0], 4096);
+    var expected_nonce: [12]u8;
+    var i: usize = 0;
+    for (i < 12) {
+        expected_nonce[i] = 1 + i::u8;
+        i = i + 1;
+    }
+    if (encoded.status != CODEC_INVALID || token[0] != 0xa5
+        || mutation.mutations != 1
+        || mutation.inner.claim(mutation.inner.ctx, 1,
+            ?expected_nonce[0], 12, 3005, 100) != GUARD_SEEN) { ret false; }
+    ret release_codec_fixture(?fixture);
+}
+
+fun rotation_round_trip(algorithm: Algorithm) bool {
+    var fixture: CodecFixture;
+    if (!init_codec_fixture(?fixture, algorithm, REPLAY_ALLOW, 8, 8)) {
+        ret false;
+    }
+    fixture.entropy.seed = 1;
+    fixture.entropy.repeat = true;
+    var value: Session = sample_session();
+    var token: [4096]u8;
+    val first: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
+        ?value, view.view("binding", 7), 100, ?token[0], 4096);
+    if (first.status != CODEC_OK || first.key_id != 1) { ret false; }
+    var id_output: [64]u8;
+    var data_output: [2048]u8;
+    var decoded: Session;
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], first.written,
+        view.view("binding", 7), 100, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_OK
+        || !rotate_key_ring(?fixture.ring, 2, 1100)) { ret false; }
+    val second: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
+        ?value, view.view("binding", 7), 1100, ?token[0], 4096);
+    if (second.status != CODEC_OK || second.key_id != 2) { ret false; }
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], second.written,
+            view.view("binding", 7), 1100, ?id_output[0], 64,
+            ?data_output[0], 2048, ?decoded).status != CODEC_OK) { ret false; }
+    ret release_codec_fixture(?fixture);
+}
+
+fun sample_session() Session {
+    ret Session{id: view.view("session-id", 10),
+        data: view.view("authenticated state", 19),
+        issued_at_unix: 100, not_before_unix: 100,
+        expires_at_unix: 2000, version: 7, generation: 11};
+}
+
+test "laurel.session: authenticated codecs reject hostile tokens transactionally" {
+    var fixture: CodecFixture;
+    if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_REJECT, 8, 8)) {
+        ret 1;
+    }
+    var value: Session = sample_session();
+    var rejected: [4096]u8;
+    rejected[0] = 0xa5;
+    if (fixture.codec.encode(fixture.codec.ctx, ?value, view.view(nil, 0),
+        100, ?rejected[0], 4096).status != CODEC_INVALID
+        || rejected[0] != 0xa5 || fixture.entropy.calls != 0) { ret 32; }
+    if (fixture.codec.encode(fixture.codec.ctx, ?value,
+        view.view("tenant:a", 8), 100, value.id.data, 4096).status
+        != CODEC_INVALID || fixture.entropy.calls != 0) { ret 33; }
+    var tiny: [1]u8;
+    tiny[0] = 0xa5;
+    if (fixture.codec.encode(fixture.codec.ctx, ?value,
+        view.view("tenant:a", 8), 100, ?tiny[0], 1).status
+        != CODEC_OUTPUT_TOO_SMALL || tiny[0] != 0xa5
+        || fixture.entropy.calls != 0) { ret 2; }
+    var token: [4096]u8;
+    val encoded: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
+        ?value, view.view("tenant:a", 8), 100, ?token[0], 4096);
+    if (encoded.status != CODEC_OK || encoded.written == 0
+        || encoded.key_id != 1) { ret 3; }
+
+    var id_output: [64]u8;
+    var data_output: [2048]u8;
+    id_output[0] = 0xa5;
+    data_output[0] = 0x5a;
+    var decoded: Session = Session{id: view.view("unchanged", 9),
+        data: view.view("unchanged", 9), issued_at_unix: 1,
+        not_before_unix: 1, expires_at_unix: 2, version: 9,
+        generation: 9};
+    val wrong_context: CodecOperation = fixture.codec.decode(
+        fixture.codec.ctx, ?token[0], encoded.written,
+        view.view("tenant:b", 8), 100, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded);
+    if (wrong_context.status != CODEC_AUTH_FAILED || id_output[0] != 0xa5
+        || data_output[0] != 0x5a || decoded.version != 9) {
+        ret 4;
+    }
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+        view.view(nil, 0), 100, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_INVALID
+        || decoded.version != 9) { ret 30; }
+
+    var tampered: [4096]u8;
+    var i: usize = 0;
+    for (i < encoded.written) {
+        tampered[i] = token[i];
+        i = i + 1;
+    }
+    val middle: usize = encoded.written / 2;
+    if (tampered[middle] == 'A') { tampered[middle] = 'B'; }
+    or { tampered[middle] = 'A'; }
+    if (fixture.codec.decode(fixture.codec.ctx, ?tampered[0],
+        encoded.written, view.view("tenant:a", 8), 100, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_AUTH_FAILED
+        || id_output[0] != 0xa5 || data_output[0] != 0x5a
+        || decoded.version != 9) { ret 5; }
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], 20,
+        view.view("tenant:a", 8), 100, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_TRUNCATED) { ret 6; }
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+        view.view("tenant:a", 8), 100, ?id_output[0], 2,
+        ?data_output[0], 2048, ?decoded).status != CODEC_OUTPUT_TOO_SMALL
+        || id_output[0] != 0xa5 || data_output[0] != 0x5a
+        || decoded.version != 9) { ret 7; }
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+        view.view("tenant:a", 8), 100, ?id_output[0], 64,
+        ?id_output[0], 64, ?decoded).status != CODEC_INVALID
+        || decoded.version != 9) { ret 31; }
+
+    val opened: CodecOperation = fixture.codec.decode(fixture.codec.ctx,
+        ?token[0], encoded.written, view.view("tenant:a", 8), 100,
+        ?id_output[0], 64, ?data_output[0], 2048, ?decoded);
+    if (opened.status != CODEC_OK || opened.written != 29
+        || !public_equal(?id_output[0], value.id.data, value.id.len)
+        || !public_equal(?data_output[0], value.data.data, value.data.len)
+        || decoded.version != 7 || decoded.generation != 11) {
+        ret 8;
+    }
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+        view.view("tenant:a", 8), 101, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_REPLAYED) { ret 9; }
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+        view.view("tenant:a", 8), 2005, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_EXPIRED) { ret 10; }
+
+    fixture.entropy.seed = 90;
+    fixture.entropy.repeat = true;
+    var another: [4096]u8;
+    if (fixture.codec.encode(fixture.codec.ctx, ?value,
+        view.view("tenant:a", 8), 100, ?another[0], 4096).status != CODEC_OK) {
+        ret 11;
+    }
+    if (fixture.codec.encode(fixture.codec.ctx, ?value,
+        view.view("tenant:a", 8), 100, ?another[0], 4096).status
+        != CODEC_NONCE_REUSED) { ret 12; }
+    fixture.entropy.fail = true;
+    fixture.entropy.seed = 120;
+    if (fixture.codec.encode(fixture.codec.ctx, ?value,
+        view.view("tenant:a", 8), 100, ?another[0], 4096).status
+        != CODEC_ENTROPY_UNAVAILABLE) { ret 13; }
+    if (!release_codec_fixture(?fixture)) { ret 14; }
+    i = 0;
+    for (i < 32) {
+        if (fixture.keys[0].key[i] != 0 || fixture.keys[1].key[i] != 0) {
+            ret 15;
+        }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "laurel.session: clocks, rotation, algorithms, and fixation are bounded" {
+    var fixture: CodecFixture;
+    if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_ALLOW, 8, 8)) {
+        ret 1;
+    }
+    var value: Session = sample_session();
+    value.not_before_unix = 110;
+    var token: [4096]u8;
+    val encoded: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
+        ?value, view.view("binding", 7), 100, ?token[0], 4096);
+    if (encoded.status != CODEC_OK) { ret 2; }
+    var id_output: [64]u8;
+    var data_output: [2048]u8;
+    var decoded: Session;
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+        view.view("binding", 7), 104, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_NOT_YET_VALID) {
+        ret 3;
+    }
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+        view.view("binding", 7), 105, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_OK) { ret 4; }
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+        view.view("binding", 7), 2004, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_OK) { ret 5; }
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+        view.view("binding", 7), 2005, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_EXPIRED) { ret 6; }
+    if (!rotate_key_ring(?fixture.ring, 2, 1100)) { ret 7; }
+    val retired: CodecOperation = fixture.codec.decode(fixture.codec.ctx,
+        ?token[0], encoded.written, view.view("binding", 7), 1100,
+        ?id_output[0], 64, ?data_output[0], 2048, ?decoded);
+    if (retired.status != CODEC_OK || !retired.needs_rotation
+        || retired.key_id != 1) { ret 8; }
+    var current_token: [4096]u8;
+    if (fixture.codec.encode(fixture.codec.ctx, ?value,
+        view.view("binding", 7), 1100, ?current_token[0], 4096).key_id != 2) {
+        ret 9;
+    }
+
+    var raw: [3072]u8;
+    val raw_len: usize = base64.decode(?token[0], encoded.written,
+        ?raw[0], 3072);
+    write_u32_public(?raw[0], 4, 99);
+    var unknown: [4097]u8;
+    val unknown_len: usize = base64.encode_url(?raw[0], raw_len,
+        ?unknown[0], 4097);
+    if (fixture.codec.decode(fixture.codec.ctx, ?unknown[0], unknown_len,
+        view.view("binding", 7), 1100, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_UNKNOWN_KEY) {
+        ret 10;
+    }
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+        view.view("binding", 7), 3005, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_KEY_INACTIVE) {
+        ret 11;
+    }
+
+    fixture.entropy.seed = 33;
+    fixture.entropy.repeat = true;
+    var regenerated_id: [64]u8;
+    var regenerated: Session;
+    if (regenerate_id(?fixture.protected, ?value, ?regenerated_id[0], 64,
+        ?regenerated) != CODEC_OK || regenerated.id.len != 43
+        || regenerated.version != 0 || regenerated.generation != 0
+        || public_equal(regenerated.id.data, value.id.data, value.id.len)) {
+        ret 12;
+    }
+    var fixed_source: Session = regenerated;
+    fixture.entropy.seed = 33;
+    var untouched_id: [64]u8;
+    untouched_id[0] = 0xa5;
+    var untouched_session: Session = value;
+    if (regenerate_id(?fixture.protected, ?fixed_source, ?untouched_id[0],
+        64, ?untouched_session) != CODEC_FIXATION_FAILED
+        || untouched_id[0] != 0xa5 || untouched_session.version != 7) {
+        ret 13;
+    }
+    if (!release_codec_fixture(?fixture)) { ret 14; }
+
+    var chacha: CodecFixture;
+    if (!init_codec_fixture(?chacha, CHACHA20_POLY1305, REPLAY_ALLOW, 8, 8)) {
+        ret 15;
+    }
+    value.not_before_unix = 100;
+    val chacha_encoded: CodecOperation = chacha.codec.encode(chacha.codec.ctx,
+        ?value, view.view("binding", 7), 100, ?token[0], 4096);
+    if (chacha_encoded.status != CODEC_OK
+        || chacha.codec.decode(chacha.codec.ctx, ?token[0],
+            chacha_encoded.written, view.view("binding", 7), 100,
+            ?id_output[0], 64, ?data_output[0], 2048,
+            ?decoded).status != CODEC_OK) { ret 16; }
+    token[chacha_encoded.written / 2] = 'A';
+    if (chacha.codec.decode(chacha.codec.ctx, ?token[0],
+        chacha_encoded.written, view.view("binding", 7), 100,
+        ?id_output[0], 64, ?data_output[0], 2048,
+        ?decoded).status != CODEC_AUTH_FAILED) { ret 17; }
+    if (!release_codec_fixture(?chacha)) { ret 18; }
+
+    var bounded: CodecFixture;
+    if (!init_codec_fixture(?bounded, AES_256_GCM, REPLAY_ALLOW, 1, 1)) {
+        ret 19;
+    }
+    if (bounded.codec.encode(bounded.codec.ctx, ?value,
+        view.view("binding", 7), 100, ?token[0], 4096).status != CODEC_OK) {
+        ret 20;
+    }
+    if (bounded.codec.encode(bounded.codec.ctx, ?value,
+        view.view("binding", 7), 100, ?token[0], 4096).status
+        != CODEC_REPLAY_CAPACITY) { ret 21; }
+    if (!release_codec_fixture(?bounded)) { ret 22; }
+    ret 0;
+}
+
+test "laurel.session: guard horizons and regeneration ownership fail closed" {
+    var fixture: CodecFixture;
+    if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_REJECT, 8, 8)) {
+        ret 1;
+    }
+    var short: Session = sample_session();
+    short.expires_at_unix = 200;
+    var token: [4096]u8;
+    val encoded: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
+        ?short, view.view("binding", 7), 100, ?token[0], 4096);
+    if (encoded.status != CODEC_OK) { ret 2; }
+    var id_output: [64]u8;
+    var data_output: [2048]u8;
+    var decoded: Session;
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+        view.view("binding", 7), 100, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_OK) { ret 3; }
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+        view.view("binding", 7), 204, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_REPLAYED) { ret 4; }
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+        view.view("binding", 7), 205, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_EXPIRED) { ret 5; }
+
+    fixture.entropy.seed = 1;
+    fixture.entropy.repeat = true;
+    var later: Session = sample_session();
+    later.issued_at_unix = 201;
+    later.not_before_unix = 201;
+    later.expires_at_unix = 400;
+    if (fixture.codec.encode(fixture.codec.ctx, ?later,
+        view.view("binding", 7), 201, ?token[0], 4096).status
+        != CODEC_NONCE_REUSED) { ret 6; }
+
+    var rejected: ProtectedCodec;
+    rejected.active = false;
+    rejected.algorithm = 77;
+    val entropy: Entropy = Entropy{ctx: (?fixture.entropy)::ptr,
+        aliases: test_entropy_aliases, fill: test_entropy_fill};
+    val shared: Guard = memory_guard(?fixture.nonce_guard);
+    if (init_protected_codec(?rejected, ?fixture.ring, entropy, shared,
+        REPLAY_REJECT, shared, AES_256_GCM, 5, 3600,
+        MAX_CONTEXT_BYTES) || rejected.active || rejected.ring != nil
+        || rejected.algorithm != 77) { ret 7; }
+
+    var source: Session = sample_session();
+    var regenerated_id: [64]u8;
+    regenerated_id[0] = 0xa5;
+    var regenerated: Session = Session{version: 91};
+    val calls: usize = fixture.entropy.calls;
+    if (regenerate_id(?fixture.protected, ?source, source.data.data, 64,
+            ?regenerated) != CODEC_INVALID
+        || regenerate_id(?fixture.protected, ?source,
+            (?regenerated)::*u8, 64, ?regenerated) != CODEC_INVALID
+        || regenerate_id(?fixture.protected, ?source, ?regenerated_id[0],
+            64, ?source) != CODEC_INVALID
+        || regenerate_id(?fixture.protected, ?source, source.id.data, 64,
+            ?regenerated) != CODEC_INVALID
+        || regenerated_id[0] != 0xa5 || regenerated.version != 91
+        || fixture.entropy.calls != calls) { ret 8; }
+
+    var forged: Session = source;
+    forged.id = view.view((~(0::usize) - 1)::*u8, 4);
+    if (regenerate_id(?fixture.protected, ?forged, ?regenerated_id[0], 64,
+        ?regenerated) != CODEC_INVALID || fixture.entropy.calls != calls) {
+        ret 9;
+    }
+
+    var mutation: MutatingEntropyState = MutatingEntropyState{
+        source: ?source, calls: 0};
+    fixture.protected.entropy = Entropy{ctx: (?mutation)::ptr,
+        aliases: mutating_entropy_aliases, fill: mutating_entropy_fill};
+    val original_data: view.View = source.data;
+    val original_issued: i64 = source.issued_at_unix;
+    if (regenerate_id(?fixture.protected, ?source, ?regenerated_id[0], 64,
+        ?regenerated) != CODEC_OK || mutation.calls != 1
+        || regenerated.data.data != original_data.data
+        || regenerated.data.len != original_data.len
+        || regenerated.issued_at_unix != original_issued
+        || regenerated.version != 0 || regenerated.generation != 0) {
+        ret 10;
+    }
+
+    fixture.protected.entropy = entropy;
+    if (!release_codec_fixture(?fixture)) { ret 11; }
+    ret 0;
+}
+
+test "laurel.session: key and guard domains survive hostile providers" {
+    if (!duplicate_generation_rejected(AES_256_GCM)
+        || !duplicate_generation_rejected(CHACHA20_POLY1305)) { ret 1; }
+    if (!mutating_guard_rejected(AES_256_GCM)
+        || !rotation_round_trip(AES_256_GCM)) { ret 2; }
+    if (!mutating_guard_rejected(CHACHA20_POLY1305)
+        || !rotation_round_trip(CHACHA20_POLY1305)) { ret 3; }
+
+    var fixture: CodecFixture;
+    if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_REJECT, 8, 8)) {
+        ret 4;
+    }
+    val entropy: Entropy = Entropy{ctx: (?fixture.entropy)::ptr,
+        aliases: test_entropy_aliases, fill: test_entropy_fill};
+    val nonce: Guard = memory_guard(?fixture.nonce_guard);
+    var candidate: ProtectedCodec;
+    candidate.active = false;
+    candidate.algorithm = 77;
+    var same_domain: Guard = memory_guard(?fixture.replay_guard);
+    same_domain.domain = nonce.domain;
+    if (init_protected_codec(?candidate, ?fixture.ring, entropy, nonce,
+        REPLAY_REJECT, same_domain, AES_256_GCM, 5, 3600,
+        MAX_CONTEXT_BYTES) || candidate.active || candidate.algorithm != 77) {
+        ret 5;
+    }
+
+    var alias: MemoryGuard;
+    alias.active = false;
+    if (!init_memory_guard(?alias, ?fixture.nonce_slots[1], 7)) { ret 6; }
+    val aliased_backend: Guard = memory_guard(?alias);
+    if (init_protected_codec(?candidate, ?fixture.ring, entropy, nonce,
+        REPLAY_REJECT, aliased_backend, AES_256_GCM, 5, 3600,
+        MAX_CONTEXT_BYTES) || candidate.active || candidate.algorithm != 77) {
+        ret 7;
+    }
+    var missing_domain: Guard = memory_guard(?fixture.replay_guard);
+    missing_domain.domain = nil;
+    if (init_protected_codec(?candidate, ?fixture.ring, entropy, nonce,
+        REPLAY_REJECT, missing_domain, AES_256_GCM, 5, 3600,
+        MAX_CONTEXT_BYTES) || candidate.active || candidate.algorithm != 77) {
+        ret 8;
+    }
+    if (!release_memory_guard(?alias)
+        || !release_codec_fixture(?fixture)) { ret 9; }
+    ret 0;
+}
+
+test "laurel.session: callbacks cannot change staged codec operations" {
+    var fixture: CodecFixture;
+    if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_ALLOW, 8, 8)) {
+        ret 1;
+    }
+    var value: Session = sample_session();
+    val original_data: view.View = value.data;
+    var mutation: MutatingEntropyState = MutatingEntropyState{
+        source: ?value, calls: 0};
+    fixture.protected.entropy = Entropy{ctx: (?mutation)::ptr,
+        aliases: mutating_entropy_aliases, fill: mutating_entropy_fill};
+    var token: [4096]u8;
+    val encoded: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
+        ?value, view.view("binding", 7), 100, ?token[0], 4096);
+    if (encoded.status != CODEC_OK || mutation.calls != 1
+        || value.data.len != ~(0::usize)) { ret 2; }
+    var id_output: [64]u8;
+    var data_output: [2048]u8;
+    var decoded: Session;
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+            view.view("binding", 7), 100, ?id_output[0], 64,
+            ?data_output[0], 2048, ?decoded).status != CODEC_OK
+        || decoded.data.len != original_data.len
+        || !public_equal(?data_output[0], original_data.data,
+            original_data.len)) { ret 3; }
+    fixture.protected.entropy = Entropy{ctx: (?fixture.entropy)::ptr,
+        aliases: test_entropy_aliases, fill: test_entropy_fill};
+    value = sample_session();
+    value.expires_at_unix = 100;
+    val calls: usize = fixture.entropy.calls;
+    token[0] = 0xa5;
+    if (fixture.codec.encode(fixture.codec.ctx, ?value,
+            view.view("binding", 7), 100, ?token[0], 4096).status
+            != CODEC_INVALID
+        || fixture.entropy.calls != calls || token[0] != 0xa5) { ret 4; }
+    ret (!release_codec_fixture(?fixture))::i32;
+}
+
+test "laurel.session: codec ownership and replay claims fail closed" {
+    var fixture: CodecFixture;
+    if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_REJECT, 8, 8)) {
+        ret 1;
+    }
+    var value: Session = sample_session();
+    val calls: usize = fixture.entropy.calls;
+    if (fixture.codec.encode(fixture.codec.ctx, ?value,
+            view.view("binding", 7), 100, (?fixture.ring)::*u8,
+            4096).status != CODEC_INVALID
+        || fixture.codec.encode(fixture.codec.ctx, ?value,
+            view.view("binding", 7), 100, (?fixture.keys[0])::*u8,
+            4096).status != CODEC_INVALID
+        || fixture.codec.encode(fixture.codec.ctx, ?value,
+            view.view("binding", 7), 100, (?fixture.nonce_guard)::*u8,
+            4096).status != CODEC_INVALID
+        || fixture.entropy.calls != calls || fixture.ring.current_id != 1) {
+        ret 2;
+    }
+    var candidate: ProtectedCodec;
+    candidate.active = false;
+    candidate.algorithm = 77;
+    val entropy: Entropy = Entropy{ctx: (?fixture.entropy)::ptr,
+        aliases: test_entropy_aliases, fill: test_entropy_fill};
+    val nonce: Guard = memory_guard(?fixture.nonce_guard);
+    if (init_protected_codec(?candidate, ?fixture.ring, entropy, nonce,
+            REPLAY_REJECT, memory_guard(?fixture.replay_guard),
+            CHACHA20_POLY1305, 5, 3600, MAX_CONTEXT_BYTES)
+        || init_protected_codec(?candidate, ?fixture.ring, entropy,
+            memory_guard(?fixture.replay_guard), REPLAY_ALLOW, Guard{},
+            AES_256_GCM, 5, 3600, MAX_CONTEXT_BYTES)
+        || candidate.active || candidate.algorithm != 77) { ret 3; }
+    if (!release_protected_codec(?fixture.protected)) { ret 4; }
+    var mutation: MutatingGuardState = MutatingGuardState{
+        inner: memory_guard(?fixture.replay_guard), mutations: 0};
+    if (!init_protected_codec(?fixture.protected, ?fixture.ring, entropy,
+            nonce, REPLAY_REJECT, mutating_guard(?mutation), AES_256_GCM,
+            5, 3600, MAX_CONTEXT_BYTES)) { ret 5; }
+    fixture.codec = protected_codec(?fixture.protected);
+    var token: [4096]u8;
+    val encoded: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
+        ?value, view.view("binding", 7), 100, ?token[0], 4096);
+    if (encoded.status != CODEC_OK) { ret 6; }
+    var id_output: [64]u8;
+    var data_output: [2048]u8;
+    var decoded: Session = Session{version: 99};
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
+            view.view("binding", 7), 100, ?id_output[0], 64,
+            ?data_output[0], 2048, ?decoded).status != CODEC_INVALID
+        || decoded.version != 99 || mutation.mutations != 1) { ret 7; }
+    var raw: [3072]u8;
+    val raw_len: usize = base64.decode(?token[0], encoded.written,
+        ?raw[0], 3072);
+    if (raw_len == 0 || mutation.inner.claim(mutation.inner.ctx, 1,
+            ?raw[8], 12, 2005, 100) != GUARD_SEEN) { ret 8; }
+    ret (!release_codec_fixture(?fixture))::i32;
+}
+
+test "laurel.session: every public range and array product is checked" {
+    val maximum: usize = ~(0::usize);
+    val near_end: *u8 = (maximum - 1)::*u8;
+
+    var invalid_store: MemoryStore;
+    invalid_store.active = false;
+    val store_overflow: usize = maximum / $size_of(MemorySlot) + 1;
+    if (init_memory_store(?invalid_store, (1::usize)::*MemorySlot,
+        store_overflow)) { ret 1; }
+    var invalid_guard: MemoryGuard;
+    invalid_guard.active = false;
+    val guard_overflow: usize = maximum / $size_of(GuardSlot) + 1;
+    if (init_memory_guard(?invalid_guard, (1::usize)::*GuardSlot,
+        guard_overflow)) { ret 2; }
+    var invalid_ring: KeyRing;
+    invalid_ring.initialized = false;
+    invalid_ring.active = false;
+    val key_overflow: usize = maximum / $size_of(KeyGeneration) + 1;
+    if (init_key_ring(?invalid_ring, (1::usize)::*KeyGeneration,
+        key_overflow, 1, maximum, AES_256_GCM, (?invalid_ring)::ptr)) {
+        ret 3;
+    }
+
+    var one_key: KeyGeneration = KeyGeneration{id: 1, key_len: 32,
+        activated_at: 0, encode_until: 100, decode_until: 200};
+    var key_index: usize = 0;
+    for (key_index < 32) {
+        one_key.key[key_index] = 0x20 + key_index::u8;
+        key_index = key_index + 1;
+    }
+    if (!init_key_ring(?invalid_ring, ?one_key, 1, 1, maximum,
+            AES_256_GCM, (?invalid_ring)::ptr)
+        || !release_key_ring(?invalid_ring)) { ret 4; }
+
+    var slots: [1]MemorySlot;
+    var memory: MemoryStore;
+    memory.active = false;
+    if (!init_memory_store(?memory, ?slots[0], 1)) { ret 5; }
+    val store: Store = memory_store(?memory);
+    if (store.start(store.ctx) != STORE_OK) { ret 5; }
+    var data_output: [2048]u8;
+    var loaded: Session = Session{version: 99};
+    val invalid_id: view.View = view.view(near_end, 4);
+    if (store.load(store.ctx, invalid_id, 1, ?data_output[0], 2048,
+            ?loaded, nil) != STORE_INVALID
+        || store.delete(store.ctx, invalid_id, 1, 1, nil) != STORE_INVALID
+        || loaded.version != 99) { ret 6; }
+
+    var guard_slots: [2]GuardSlot;
+    var guard_storage: MemoryGuard;
+    guard_storage.active = false;
+    if (!init_memory_guard(?guard_storage, ?guard_slots[0], 2)) { ret 7; }
+    val guard: Guard = memory_guard(?guard_storage);
+    if (guard.claim(guard.ctx, 1, near_end, 4, 100, 1) != GUARD_INVALID
+        || guard.forget(guard.ctx, 1, near_end, 4) != GUARD_INVALID) { ret 8; }
+
+    var fixture: CodecFixture;
+    if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_ALLOW, 8, 8)) {
+        ret 9;
+    }
+    var value: Session = sample_session();
+    var token: [4096]u8;
+    val entropy_calls: usize = fixture.entropy.calls;
+    if (fixture.codec.encode(fixture.codec.ctx, ?value,
+            view.view(near_end, 4), 100, ?token[0], 4096).status
+            != CODEC_INVALID
+        || fixture.codec.decode(fixture.codec.ctx, near_end, 4,
+            view.view("binding", 7), 100, ?data_output[0], 64,
+            ?data_output[64], 1984, ?loaded).status != CODEC_INVALID
+        || fixture.entropy.calls != entropy_calls) { ret 10; }
+    value.data = view.view(near_end, 4);
+    if (fixture.codec.encode(fixture.codec.ctx, ?value,
+        view.view("binding", 7), 100, ?token[0], 4096).status
+        != CODEC_INVALID || fixture.entropy.calls != entropy_calls) { ret 11; }
+
+    if (store.stop(store.ctx) != STORE_OK
+        || !release_memory_guard(?guard_storage)
+        || !release_codec_fixture(?fixture)) { ret 12; }
+    ret 0;
+}
+
+test "laurel.session: inclusive maximum overlap arithmetic never wraps" {
+    val maximum: usize = ~(0::usize);
+    val at_maximum: *u8 = maximum::*u8;
+    val before_maximum: *u8 = (maximum - 1)::*u8;
+    if (!range_valid(at_maximum, 1)
+        || !ranges_overlap(at_maximum, 1, at_maximum, 1)
+        || ranges_overlap(at_maximum, 1, before_maximum, 1)
+        || ranges_overlap(before_maximum, 1, at_maximum, 1)
+        || !ranges_overlap(before_maximum, 2, at_maximum, 1)) { ret 1; }
+
+    var slots: [1]MemorySlot;
+    var memory: MemoryStore;
+    memory.initialized = false;
+    memory.active = false;
+    if (!init_memory_store(?memory, ?slots[0], 1)) { ret 2; }
+    val store: Store = memory_store(?memory);
+    var scope: cancel.Scope;
+    if (store.aliases(store.ctx, at_maximum, 1)
+        || !store.aliases(store.ctx, (?memory)::*u8, 1)
+        || !memory_store_range_safe(?memory, at_maximum, 1)
+        || scope_overlaps(?scope, at_maximum, 1)
+        || !scope_overlaps(?scope, (?scope)::*u8, 1)) { ret 3; }
+    ret 0;
+}
+
+rec UpdateAttempt {
+    store:   *MemoryStore;
+    value:   Session;
+    status:  StoreStatus;
+    result:  SaveResult;
+}
+
+fun concurrent_update(arg: *u8) {
+    val attempt: *UpdateAttempt = arg::*UpdateAttempt;
+    attempt.result = SaveResult{};
+    attempt.status = memory_save(attempt.store::ptr, ?attempt.value, 1, 1,
+        ?attempt.result, nil);
+}
+
+rec DurableProbe {
+    starts:  usize;
+    stops:   usize;
+    loads:   usize;
+    saves:   usize;
+    deletes: usize;
+    replaces: usize;
+    reaps:   usize;
+    active:  bool;
+    manager: *Manager;
+    reenter: bool;
+    fail_start: bool;
+    fail_stop: bool;
+    start_reentry: StoreStatus;
+    stop_reentry: StoreStatus;
+}
+
+fun durable_aliases(ctx: ptr, data: *u8, len: usize) bool {
+    val probe: *DurableProbe = ctx::*DurableProbe;
+    if (probe == nil || !range_valid(data, len)) { ret true; }
+    ret ranges_overlap(data, len, probe::*u8, $size_of(DurableProbe));
+}
+
+fun durable_start(ctx: ptr) StoreStatus {
+    val probe: *DurableProbe = ctx::*DurableProbe;
+    if (probe == nil || probe.active) { ret STORE_INVALID; }
+    probe.starts = probe.starts + 1;
+    if (probe.reenter && probe.manager != nil) {
+        probe.start_reentry = start_manager(probe.manager);
+    }
+    if (probe.fail_start) { ret STORE_UNAVAILABLE; }
+    probe.active = true;
+    ret STORE_OK;
+}
+
+fun durable_stop(ctx: ptr) StoreStatus {
+    val probe: *DurableProbe = ctx::*DurableProbe;
+    if (probe == nil || !probe.active) { ret STORE_INVALID; }
+    probe.stops = probe.stops + 1;
+    if (probe.reenter && probe.manager != nil) {
+        probe.stop_reentry = stop_manager(probe.manager);
+    }
+    if (probe.fail_stop) { ret STORE_UNAVAILABLE; }
+    probe.active = false;
+    ret STORE_OK;
+}
+
+fun durable_load(ctx: ptr, id: view.View, now: i64, data_output: *u8,
+    data_capacity: usize, output: *Session,
+    scope: *cancel.Scope) StoreStatus {
+    val probe: *DurableProbe = ctx::*DurableProbe;
+    if (probe == nil || !probe.active) { ret STORE_UNAVAILABLE; }
+    if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
+    probe.loads = probe.loads + 1;
+    ret STORE_NOT_FOUND;
+}
+
+fun durable_save(ctx: ptr, value: *Session, expected_version: u64,
+    now: i64, result: *SaveResult, scope: *cancel.Scope) StoreStatus {
+    val probe: *DurableProbe = ctx::*DurableProbe;
+    if (probe == nil || !probe.active) { ret STORE_UNAVAILABLE; }
+    if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
+    if (now < 0 || !session_valid(value) || result == nil
+        || expected_version != 0
+        || value.version != 0 || value.generation != 0) {
+        ret STORE_CONFLICT;
+    }
+    probe.saves = probe.saves + 1;
+    @result = SaveResult{version: 1, generation: 77};
+    ret STORE_OK;
+}
+
+fun durable_replace(ctx: ptr, old_id: view.View, expected_version: u64,
+    generation: u64, replacement: *Session, now: i64,
+    result: *SaveResult, scope: *cancel.Scope) StoreStatus {
+    val probe: *DurableProbe = ctx::*DurableProbe;
+    if (probe == nil || !probe.active) { ret STORE_UNAVAILABLE; }
+    if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
+    probe.replaces = probe.replaces + 1;
+    ret STORE_NOT_FOUND;
+}
+
+fun durable_reap(ctx: ptr, now: i64, result: *usize,
+    scope: *cancel.Scope) StoreStatus {
+    val probe: *DurableProbe = ctx::*DurableProbe;
+    if (probe == nil || !probe.active || now < 0 || result == nil) {
+        ret STORE_UNAVAILABLE;
+    }
+    if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
+    probe.reaps = probe.reaps + 1;
+    @result = 0;
+    ret STORE_OK;
+}
+
+fun durable_delete(ctx: ptr, id: view.View, expected_version: u64,
+    generation: u64, scope: *cancel.Scope) StoreStatus {
+    val probe: *DurableProbe = ctx::*DurableProbe;
+    if (probe == nil || !probe.active) { ret STORE_UNAVAILABLE; }
+    if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
+    probe.deletes = probe.deletes + 1;
+    ret STORE_NOT_FOUND;
+}
+
+fun durable_store(probe: *DurableProbe) Store {
+    if (probe == nil) { ret Store{}; }
+    ret Store{ctx: probe::ptr, aliases: durable_aliases,
+        start: durable_start, stop: durable_stop, load: durable_load,
+        save: durable_save, delete: durable_delete,
+        replace: durable_replace, reap: durable_reap};
+}
+
+test "laurel.session: stores enforce versions, generations, capacity, and release" {
+    var slots: [2]MemorySlot;
+    var memory: MemoryStore;
+    memory.active = false;
+    if (!init_memory_store(?memory, ?slots[0], 2)) { ret 1; }
+    val store: Store = memory_store(?memory);
+    if (store.start(store.ctx) != STORE_OK) { ret 1; }
+    var value: Session = Session{id: view.view("alpha", 5),
+        data: view.view("one", 3), issued_at_unix: 1,
+        not_before_unix: 1, expires_at_unix: 100,
+        version: 0, generation: 0};
+    var saved: SaveResult = SaveResult{version: 99, generation: 99};
+    if (store.save(store.ctx, ?value, 0, 1, ?saved, nil) != STORE_OK
+        || saved.version != 1 || saved.generation == 0) { ret 2; }
+    var data: [2048]u8;
+    var loaded: Session;
+    if (store.load(store.ctx, value.id, 1, ?data[0], 2048, ?loaded, nil)
+        != STORE_OK || loaded.version != 1 || loaded.generation == 0
+        || !public_equal(?data[0], value.data.data, value.data.len)) { ret 3; }
+    if (store.load(store.ctx, value.id, 1, (?loaded)::*u8, 2048,
+        ?loaded, nil) != STORE_INVALID) { ret 18; }
+    val aliased_result: *SaveResult = (?value)::usize::*SaveResult;
+    if (store.save(store.ctx, ?value, 0, 1, aliased_result, nil)
+        != STORE_INVALID || value.version != 0) { ret 19; }
+    val first_generation: u64 = loaded.generation;
+    loaded.data = view.view("two", 3);
+    if (store.save(store.ctx, ?loaded, 1, 1, ?saved, nil) != STORE_OK
+        || saved.version != 2 || saved.generation != first_generation) { ret 4; }
+    if (store.save(store.ctx, ?loaded, 1, 1, ?saved, nil) != STORE_CONFLICT) {
+        ret 5;
+    }
+    loaded.version = 2;
+    loaded.generation = first_generation + 1;
+    if (store.save(store.ctx, ?loaded, 2, 1, ?saved, nil)
+        != STORE_STALE_GENERATION) { ret 6; }
+    loaded.generation = first_generation;
+
+    var cancelled: cancel.Scope;
+    if (!cancel.make_root(?cancelled, false,
+        time.Time{sec: 0, nsec: 0}) || !cancel.cancel(?cancelled)) { ret 7; }
+    var untouched: Session = value;
+    if (store.load(store.ctx, value.id, 1, ?data[0], 2048, ?untouched,
+        ?cancelled) != STORE_CANCELLED || untouched.generation != 0
+        || !cancel.destroy(?cancelled)) { ret 8; }
+
+    var second: Session = Session{id: view.view("beta", 4),
+        data: view.view("second", 6), issued_at_unix: 1,
+        not_before_unix: 1, expires_at_unix: 100,
+        version: 0, generation: 0};
+    if (store.save(store.ctx, ?second, 0, 1, ?saved, nil) != STORE_OK) {
+        ret 9;
+    }
+    var third: Session = Session{id: view.view("gamma", 5),
+        data: view.view("third", 5), issued_at_unix: 1,
+        not_before_unix: 1, expires_at_unix: 100,
+        version: 0, generation: 0};
+    if (store.save(store.ctx, ?third, 0, 1, ?saved, nil) != STORE_CAPACITY) {
+        ret 10;
+    }
+    var second_loaded: Session;
+    if (store.load(store.ctx, second.id, 1, ?data[0], 2048, ?second_loaded,
+        nil) != STORE_OK) { ret 11; }
+    if (store.delete(store.ctx, second.id, 0, second_loaded.generation,
+        nil) != STORE_CONFLICT
+        || store.delete(store.ctx, second.id, second_loaded.version,
+            second_loaded.generation + 1, nil) != STORE_STALE_GENERATION
+        || store.delete(store.ctx, second.id, second_loaded.version,
+            second_loaded.generation, nil) != STORE_OK) { ret 12; }
+
+    if (store.delete(store.ctx, value.id, 2, first_generation, nil)
+        != STORE_OK) { ret 13; }
+    value.version = 0;
+    value.generation = 0;
+    if (store.save(store.ctx, ?value, 0, 1, ?saved, nil) != STORE_OK
+        || store.load(store.ctx, value.id, 1, ?data[0], 2048, ?loaded, nil)
+            != STORE_OK || loaded.generation == first_generation) { ret 14; }
+    if (store.delete(store.ctx, value.id, 1, first_generation, nil)
+        != STORE_STALE_GENERATION) { ret 15; }
+    if (store.stop(store.ctx) != STORE_OK || memory.active || memory.len != 0) {
+        ret 16;
+    }
+    var i: usize = 0;
+    for (i < 2) {
+        if (slots[i].used || slots[i].id_len != 0 || slots[i].data_len != 0
+            || slots[i].id[0] != 0 || slots[i].data[0] != 0) { ret 17; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "laurel.session: store scopes are disjoint from every operation range" {
+    var slots: [2]MemorySlot;
+    var memory: MemoryStore;
+    memory.initialized = false;
+    memory.active = false;
+    if (!init_memory_store(?memory, ?slots[0], 2)) { ret 1; }
+    val store: Store = memory_store(?memory);
+    if (store.start(store.ctx) != STORE_OK) { ret 2; }
+    var value: Session = Session{id: view.view("scope-source", 12),
+        data: view.view("state", 5), issued_at_unix: 1,
+        not_before_unix: 1, expires_at_unix: 100,
+        version: 0, generation: 0};
+    var saved: SaveResult;
+    if (store.save(store.ctx, ?value, 0, 1, ?saved, nil) != STORE_OK) {
+        ret 3;
+    }
+    var data: [2048]u8;
+    var loaded: Session;
+    if (store.load(store.ctx, value.id, 1, ?data[0], 2048, ?loaded, nil)
+        != STORE_OK) { ret 4; }
+    var scope: cancel.Scope;
+    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) {
+        ret 5;
+    }
+    val scope_bytes: *u8 = (?scope)::*u8;
+    if (store.load(store.ctx, value.id, 1, scope_bytes,
+            $size_of(cancel.Scope), ?loaded, ?scope) != STORE_INVALID
+        || store.load(store.ctx, value.id, 1, ?data[0], 2048,
+            scope_bytes::*Session, ?scope) != STORE_INVALID
+        || store.save(store.ctx, ?loaded, loaded.version, 1,
+            scope_bytes::*SaveResult, ?scope) != STORE_INVALID) {
+        ret 6;
+    }
+    var replacement: Session = Session{id: view.view("scope-target", 12),
+        data: view.view("replacement", 11), issued_at_unix: 1,
+        not_before_unix: 1, expires_at_unix: 100,
+        version: 0, generation: 0};
+    if (store.replace(store.ctx, loaded.id, loaded.version,
+            loaded.generation, ?replacement, 1, scope_bytes::*SaveResult,
+            ?scope) != STORE_INVALID
+        || store.reap(store.ctx, 1, scope_bytes::*usize, ?scope)
+            != STORE_INVALID
+        || cancel.reason(?scope) != cancel.ACTIVE || memory.len != 1) {
+        ret 7;
+    }
+    var unchanged: Session;
+    if (store.load(store.ctx, value.id, 1, ?data[0], 2048, ?unchanged, nil)
+            != STORE_OK
+        || unchanged.version != loaded.version
+        || unchanged.generation != loaded.generation
+        || !cancel.destroy(?scope) || store.stop(store.ctx) != STORE_OK) {
+        ret 8;
+    }
+    ret 0;
+}
+
+test "laurel.session: stores reclaim and replace identities atomically" {
+    var slots: [2]MemorySlot;
+    var memory: MemoryStore;
+    memory.initialized = false;
+    memory.active = false;
+    if (!init_memory_store(?memory, ?slots[0], 2)) { ret 1; }
+    val store: Store = memory_store(?memory);
+    if (store.start(store.ctx) != STORE_OK) { ret 2; }
+    var expired_value: Session = Session{id: view.view("expired", 7),
+        data: view.view("old", 3), issued_at_unix: 1,
+        not_before_unix: 1, expires_at_unix: 10,
+        version: 0, generation: 0};
+    var live: Session = Session{id: view.view("live", 4),
+        data: view.view("state", 5), issued_at_unix: 1,
+        not_before_unix: 1, expires_at_unix: 300,
+        version: 0, generation: 0};
+    var saved: SaveResult;
+    if (store.save(store.ctx, ?expired_value, 0, 1, ?saved, nil)
+            != STORE_OK
+        || store.save(store.ctx, ?live, 0, 1, ?saved, nil) != STORE_OK) {
+        ret 3;
+    }
+    val live_generation: u64 = saved.generation;
+    var replacement: Session = Session{id: view.view("fixed", 5),
+        data: view.view("new state", 9), issued_at_unix: 10,
+        not_before_unix: 10, expires_at_unix: 400,
+        version: 0, generation: 0};
+    if (store.replace(store.ctx, live.id, 1, live_generation,
+            ?replacement, 10, ?saved, nil) != STORE_OK
+        || saved.version != 1 || saved.generation == live_generation
+        || memory.len != 1) { ret 4; }
+    var data: [2048]u8;
+    var loaded: Session;
+    if (store.load(store.ctx, expired_value.id, 10, ?data[0], 2048,
+            ?loaded, nil) != STORE_NOT_FOUND
+        || store.load(store.ctx, live.id, 10, ?data[0], 2048, ?loaded,
+            nil) != STORE_NOT_FOUND
+        || store.load(store.ctx, replacement.id, 10, ?data[0], 2048,
+            ?loaded, nil) != STORE_OK
+        || loaded.generation != saved.generation) { ret 5; }
+    if (store.replace(store.ctx, replacement.id, loaded.version,
+            loaded.generation, ?replacement, 10, ?saved, nil)
+            != STORE_INVALID
+        || store.load(store.ctx, replacement.id, 10,
+            (?memory.lock)::*u8, 16, ?loaded, nil) != STORE_INVALID
+        || store.load(store.ctx, replacement.id, 10, ?data[0], 2048,
+            (?slots[0])::*Session, nil) != STORE_INVALID
+        || store.save(store.ctx, ?loaded, loaded.version, 10,
+            (?memory.len)::*SaveResult, nil) != STORE_INVALID) { ret 6; }
+    var reaped: usize = 99;
+    if (store.reap(store.ctx, 399, ?reaped, nil) != STORE_OK || reaped != 0
+        || store.reap(store.ctx, 400, ?reaped, nil) != STORE_OK || reaped != 1
+        || memory.len != 0) { ret 7; }
+    if (store.stop(store.ctx) != STORE_OK) { ret 8; }
+    ret 0;
+}
+
+rec StoreLifecycleRace {
+    store:    *MemoryStore;
+    started:  *i64;
+    failures: *i64;
+}
+
+fun store_lifecycle_worker(arg: *u8) {
+    val race: *StoreLifecycleRace = arg::*StoreLifecycleRace;
+    atomic.store(race.started, 1);
+    var i: usize = 0;
+    for (i < 10000) {
+        var data: [2048]u8;
+        var loaded: Session;
+        val status: StoreStatus = memory_load(race.store::ptr,
+            view.view("shared", 6), 1, ?data[0], 2048, ?loaded, nil);
+        if (status == STORE_CANCELLED) { ret; }
+        if (status != STORE_OK) {
+            atomic.store(race.failures, 1);
+            ret;
+        }
+        i = i + 1;
+    }
+}
+
+test "laurel.session: store lifecycle serializes with active operations" {
+    var slots: [1]MemorySlot;
+    var memory: MemoryStore;
+    memory.initialized = false;
+    memory.active = false;
+    if (!init_memory_store(?memory, ?slots[0], 1)) { ret 1; }
+    val store: Store = memory_store(?memory);
+    if (store.start(store.ctx) != STORE_OK) { ret 2; }
+    var value: Session = Session{id: view.view("shared", 6),
+        data: view.view("state", 5), issued_at_unix: 1,
+        not_before_unix: 1, expires_at_unix: 100,
+        version: 0, generation: 0};
+    var saved: SaveResult;
+    if (store.save(store.ctx, ?value, 0, 1, ?saved, nil) != STORE_OK) {
+        ret 3;
+    }
+    var started: i64 = 0;
+    var failures: i64 = 0;
+    var race: StoreLifecycleRace = StoreLifecycleRace{store: ?memory,
+        started: ?started, failures: ?failures};
+    var worker: thread.Thread;
+    thread.spawn_with(store_lifecycle_worker, (?race)::*u8, ?worker);
+    if (worker.tid < 0) { ret 4; }
+    for (atomic.load(?started) == 0) { atomic.spin_hint(); }
+    if (store.stop(store.ctx) != STORE_OK
+        || thread.join_result(?worker) != 0 || atomic.load(?failures) != 0
+        || memory.active || memory.len != 0) { ret 5; }
+    if (store.start(store.ctx) != STORE_OK || store.stop(store.ctx) != STORE_OK) {
+        ret 6;
+    }
+    ret 0;
+}
+
+rec ManagerAttempt {
+    manager: *Manager;
+    start:   bool;
+    status:  StoreStatus;
+}
+
+fun manager_transition_worker(arg: *u8) {
+    val attempt: *ManagerAttempt = arg::*ManagerAttempt;
+    if (attempt.start) {
+        attempt.status = start_manager(attempt.manager);
+    } or {
+        attempt.status = stop_manager(attempt.manager);
+    }
+}
+
+test "laurel.session: manager ownership and lifecycle fail closed" {
+    var codec_fixture: CodecFixture;
+    if (!init_codec_fixture(?codec_fixture, AES_256_GCM, REPLAY_ALLOW, 8, 8)) {
+        ret 1;
+    }
+    var slots: [1]MemorySlot;
+    var memory: MemoryStore;
+    memory.initialized = false;
+    memory.active = false;
+    if (!init_memory_store(?memory, ?slots[0], 1)) { ret 2; }
+    slots[0].id[0] = 0x5a;
+    val aliased_manager: *Manager = (?slots[0])::*Manager;
+    if (init_manager(aliased_manager, memory_store(?memory),
+            codec_fixture.codec, secure_cookie("__Host-aliased"))
+        || slots[0].id[0] != 0x5a) { ret 3; }
+
+    var probe: DurableProbe;
+    var manager: Manager;
+    manager.state = MANAGER_EMPTY;
+    probe.manager = ?manager;
+    probe.fail_start = true;
+    if (!init_manager(?manager, durable_store(?probe), codec_fixture.codec,
+            secure_cookie("__Host-managed"))
+        || init_manager(?manager, durable_store(?probe), codec_fixture.codec,
+            secure_cookie("__Host-managed"))
+        || !manager_valid(?manager) || manager_active(?manager)
+        || start_manager(?manager) != STORE_UNAVAILABLE
+        || manager.state != MANAGER_STOPPED || manager_active(?manager)) {
+        ret 4;
+    }
+    probe.fail_start = false;
+    probe.reenter = true;
+    if (start_manager(?manager) != STORE_OK
+        || probe.start_reentry != STORE_INVALID || !manager_active(?manager)
+        || !manager_valid(?manager)) { ret 5; }
+    probe.fail_stop = true;
+    if (stop_manager(?manager) != STORE_UNAVAILABLE
+        || probe.stop_reentry != STORE_INVALID || !manager_active(?manager)
+        || manager.state != MANAGER_ACTIVE) { ret 6; }
+    probe.fail_stop = false;
+    if (stop_manager(?manager) != STORE_OK || manager_active(?manager)
+        || manager.state != MANAGER_STOPPED) { ret 7; }
+
+    probe.reenter = false;
+    var first: ManagerAttempt = ManagerAttempt{manager: ?manager,
+        start: true, status: STORE_UNAVAILABLE};
+    var second: ManagerAttempt = ManagerAttempt{manager: ?manager,
+        start: true, status: STORE_UNAVAILABLE};
+    var first_thread: thread.Thread;
+    var second_thread: thread.Thread;
+    thread.spawn_with(manager_transition_worker, (?first)::*u8,
+        ?first_thread);
+    thread.spawn_with(manager_transition_worker, (?second)::*u8,
+        ?second_thread);
+    if (first_thread.tid < 0 || second_thread.tid < 0
+        || thread.join_result(?first_thread) != 0
+        || thread.join_result(?second_thread) != 0
+        || ((first.status == STORE_OK)::usize
+            + (second.status == STORE_OK)::usize) != 1
+        || ((first.status == STORE_INVALID)::usize
+            + (second.status == STORE_INVALID)::usize) != 1
+        || !manager_active(?manager)) { ret 8; }
+
+    first.start = false;
+    first.status = STORE_UNAVAILABLE;
+    second.start = false;
+    second.status = STORE_UNAVAILABLE;
+    thread.spawn_with(manager_transition_worker, (?first)::*u8,
+        ?first_thread);
+    thread.spawn_with(manager_transition_worker, (?second)::*u8,
+        ?second_thread);
+    if (first_thread.tid < 0 || second_thread.tid < 0
+        || thread.join_result(?first_thread) != 0
+        || thread.join_result(?second_thread) != 0
+        || ((first.status == STORE_OK)::usize
+            + (second.status == STORE_OK)::usize) != 1
+        || ((first.status == STORE_INVALID)::usize
+            + (second.status == STORE_INVALID)::usize) != 1
+        || manager_active(?manager) || !manager_valid(?manager)
+        || !release_codec_fixture(?codec_fixture)) { ret 9; }
+    ret 0;
+}
+
+test "laurel.session: concurrent updates conflict and durable stores inject cleanly" {
+    var slots: [1]MemorySlot;
+    var memory: MemoryStore;
+    memory.active = false;
+    if (!init_memory_store(?memory, ?slots[0], 1)) { ret 1; }
+    val store: Store = memory_store(?memory);
+    if (store.start(store.ctx) != STORE_OK) { ret 1; }
+    var initial: Session = Session{id: view.view("shared", 6),
+        data: view.view("initial", 7), issued_at_unix: 1,
+        not_before_unix: 1, expires_at_unix: 100,
+        version: 0, generation: 0};
+    var saved: SaveResult;
+    if (store.save(store.ctx, ?initial, 0, 1, ?saved, nil) != STORE_OK
+        || saved.version != 1 || saved.generation == 0) {
+        ret 2;
+    }
+    var loaded_data: [2048]u8;
+    var loaded: Session;
+    if (store.load(store.ctx, initial.id, 1, ?loaded_data[0], 2048,
+        ?loaded, nil) != STORE_OK) { ret 3; }
+    var first: UpdateAttempt = UpdateAttempt{store: ?memory, value: loaded,
+        status: STORE_INVALID, result: SaveResult{}};
+    first.value.data = view.view("first", 5);
+    var second: UpdateAttempt = UpdateAttempt{store: ?memory, value: loaded,
+        status: STORE_INVALID, result: SaveResult{}};
+    second.value.data = view.view("second", 6);
+    var first_thread: thread.Thread;
+    var second_thread: thread.Thread;
+    thread.spawn_with(concurrent_update, (?first)::*u8, ?first_thread);
+    thread.spawn_with(concurrent_update, (?second)::*u8, ?second_thread);
+    if (first_thread.tid < 0 || second_thread.tid < 0
+        || thread.join_result(?first_thread) != 0
+        || thread.join_result(?second_thread) != 0) { ret 4; }
+    val successes: usize = (first.status == STORE_OK)::usize
+        + (second.status == STORE_OK)::usize;
+    val conflicts: usize = (first.status == STORE_CONFLICT)::usize
+        + (second.status == STORE_CONFLICT)::usize;
+    if (successes != 1 || conflicts != 1) { ret 5; }
+    if (store.stop(store.ctx) != STORE_OK) { ret 6; }
+
+    var codec_fixture: CodecFixture;
+    if (!init_codec_fixture(?codec_fixture, AES_256_GCM, REPLAY_ALLOW, 8, 8)) {
+        ret 7;
+    }
+    var probe: DurableProbe = DurableProbe{starts: 0, stops: 0,
+        loads: 0, saves: 0, deletes: 0, replaces: 0, reaps: 0,
+        active: false};
+    val durable: Store = durable_store(?probe);
+    var manager: Manager;
+    manager.state = MANAGER_EMPTY;
+    if (!init_manager(?manager, durable, codec_fixture.codec,
+        secure_cookie("__Host-laurel"))
+        || start_manager(?manager) != STORE_OK || !manager_active(?manager)) {
+        ret 8;
+    }
+    saved = SaveResult{};
+    if (manager.store.save(manager.store.ctx, ?initial, 0, 1, ?saved, nil)
+        != STORE_OK || saved.version != 1 || saved.generation != 77
+        || manager.store.load(manager.store.ctx, initial.id, 1,
+            ?loaded_data[0], 2048, ?loaded, nil) != STORE_NOT_FOUND
+        || manager.store.delete(manager.store.ctx, initial.id, 1, 1, nil)
+            != STORE_NOT_FOUND) { ret 9; }
+    if (stop_manager(?manager) != STORE_OK || manager_active(?manager)
+        || probe.starts != 1 || probe.stops != 1 || probe.loads != 1
+        || probe.saves != 1 || probe.deletes != 1) { ret 10; }
+    if (!release_codec_fixture(?codec_fixture)) { ret 11; }
     ret 0;
 }

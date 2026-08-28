@@ -1,28 +1,1376 @@
-# bounded cookie contracts
+# bounded request and response cookie processing
 
 use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
 use std.types.size.usize;
 use std.types.view;
+
+pub def Status: u8;
+
+pub val OK:                    Status = 0;
+pub val INVALID_INPUT:         Status = 1;
+pub val INVALID_LIMITS:        Status = 2;
+pub val COUNT_LIMIT:           Status = 3;
+pub val NAME_LIMIT:            Status = 4;
+pub val VALUE_LIMIT:           Status = 5;
+pub val ATTRIBUTE_COUNT_LIMIT: Status = 6;
+pub val ATTRIBUTE_NAME_LIMIT:  Status = 7;
+pub val ATTRIBUTE_VALUE_LIMIT: Status = 8;
+pub val COOKIE_LIMIT:          Status = 9;
+pub val TOTAL_LIMIT:           Status = 10;
+pub val STORAGE_LIMIT:         Status = 11;
+pub val DUPLICATE_NAME:        Status = 12;
+pub val DUPLICATE_ATTRIBUTE:   Status = 13;
+pub val PREFIX_VIOLATION:      Status = 14;
+pub val SECURITY_VIOLATION:    Status = 15;
+pub val OUTPUT_TOO_SMALL:      Status = 16;
+
+pub def DuplicatePolicy: u8;
+
+pub val DUPLICATE_REJECT:     DuplicatePolicy = 1;
+pub val DUPLICATE_FIRST_WINS: DuplicatePolicy = 2;
+pub val DUPLICATE_LAST_WINS:  DuplicatePolicy = 3;
 
 pub val SAME_SITE_DEFAULT: u8 = 0;
 pub val SAME_SITE_LAX:     u8 = 1;
 pub val SAME_SITE_STRICT:  u8 = 2;
 pub val SAME_SITE_NONE:    u8 = 3;
 
-pub rec Cookie {
+pub rec Limits {
+    max_count:                 usize;
+    max_name_bytes:            usize;
+    max_value_bytes:           usize;
+    max_attribute_count:       usize;
+    max_attribute_name_bytes:  usize;
+    max_attribute_value_bytes: usize;
+    max_cookie_bytes:          usize;
+    max_total_bytes:           usize;
+}
+
+pub rec Attribute {
     name:      view.View;
     value:     view.View;
-    path:      view.View;
-    domain:    view.View;
-    max_age_s: i64;
-    secure:    bool;
-    http_only: bool;
-    same_site: u8;
+    has_value: bool;
+}
+
+pub rec Cookie {
+    name:          view.View;
+    value:         view.View;
+    path:          view.View;
+    domain:        view.View;
+    has_max_age:   bool;
+    max_age_s:     i64;
+    has_expires:   bool;
+    expires_unix:  i64;
+    secure:        bool;
+    http_only:     bool;
+    partitioned:   bool;
+    same_site:     u8;
+    attributes:    *Attribute;
+    attribute_len: usize;
 }
 
 pub rec Jar {
-    items: *Cookie;
-    len:   usize;
-    cap:   usize;
+    items:       *Cookie;
+    len:         usize;
+    cap:         usize;
+    total_bytes: usize;
 }
 
+pub rec Operation {
+    status:  Status;
+    written: usize;
+}
+
+rec Pair {
+    name:  view.View;
+    value: view.View;
+}
+
+fun range_valid(data: *u8, len: usize) bool {
+    if (len == 0) { ret true; }
+    if (data == nil) { ret false; }
+    ret len - 1 <= ~(0::usize) - data::usize;
+}
+
+fun range_overlap(a: *u8, a_len: usize, b: *u8, b_len: usize) bool {
+    if (a_len == 0 || b_len == 0) { ret false; }
+    if (!range_valid(a, a_len) || !range_valid(b, b_len)) { ret true; }
+    val a_start: usize = a::usize;
+    val b_start: usize = b::usize;
+    val a_end: usize = a_start + (a_len - 1);
+    val b_end: usize = b_start + (b_len - 1);
+    ret a_start <= b_end && b_start <= a_end;
+}
+
+fun array_bytes(count: usize, item_size: usize, output: *usize) bool {
+    if (output == nil || (count != 0 && item_size > ~(0::usize) / count)) {
+        ret false;
+    }
+    @output = count * item_size;
+    ret true;
+}
+
+fun view_range_valid(value: view.View) bool {
+    ret range_valid(value.data, value.len);
+}
+
+pub fun limits_default() Limits {
+    ret Limits{
+        max_count: 64,
+        max_name_bytes: 128,
+        max_value_bytes: 4096,
+        max_attribute_count: 16,
+        max_attribute_name_bytes: 128,
+        max_attribute_value_bytes: 1024,
+        max_cookie_bytes: 4096,
+        max_total_bytes: 16384,
+    };
+}
+
+pub fun init(items: *Cookie, capacity: usize) Jar {
+    ret Jar{items: items, len: 0, cap: capacity, total_bytes: 0};
+}
+
+fun limits_valid(limits: Limits) bool {
+    ret limits.max_count > 0 && limits.max_name_bytes > 0
+        && limits.max_value_bytes > 0 && limits.max_attribute_count > 0
+        && limits.max_attribute_name_bytes > 0
+        && limits.max_attribute_value_bytes > 0
+        && limits.max_cookie_bytes > 0 && limits.max_total_bytes > 0;
+}
+
+fun token_char(c: u8) bool {
+    ret (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z')
+        || (c >= 'a' && c <= 'z') || c == '!' || c == '#'
+        || c == '$' || c == '%' || c == '&' || c == 39 || c == '*'
+        || c == '+' || c == '-' || c == '.' || c == '^' || c == '_'
+        || c == '`' || c == '|' || c == '~';
+}
+
+fun name_valid(name: view.View) bool {
+    if (name.len == 0 || name.data == nil) { ret false; }
+    var i: usize = 0;
+    for (i < name.len) {
+        if (!token_char(name.data[i])) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun value_char(c: u8) bool {
+    ret c == 0x21 || (c >= 0x23 && c <= 0x24)
+        || (c >= 0x26 && c <= 0x3a) || (c >= 0x3c && c <= 0x5b)
+        || (c >= 0x5d && c <= 0x7e);
+}
+
+fun value_valid(value: view.View) bool {
+    if (value.len != 0 && value.data == nil) { ret false; }
+    var i: usize = 0;
+    for (i < value.len) {
+        if (!value_char(value.data[i])) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun view_equal(a: view.View, b: view.View) bool {
+    if (a.len != b.len || (a.len != 0 && (a.data == nil || b.data == nil))) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < a.len) {
+        if (a.data[i] != b.data[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun lower(c: u8) u8 {
+    if (c >= 'A' && c <= 'Z') { ret c + 32; }
+    ret c;
+}
+
+fun view_equal_fold(a: view.View, b: view.View) bool {
+    if (a.len != b.len || (a.len != 0 && (a.data == nil || b.data == nil))) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < a.len) {
+        if (lower(a.data[i]) != lower(b.data[i])) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun starts_with(value: view.View, prefix: *u8, prefix_len: usize) bool {
+    if (value.len < prefix_len || value.data == nil || prefix == nil) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < prefix_len) {
+        if (value.data[i] != prefix[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun next_pair(input: view.View, offset: *usize, pair: *Pair) bool {
+    if (offset == nil || pair == nil || input.data == nil || @offset >= input.len) {
+        ret false;
+    }
+    var start: usize = @offset;
+    for (start < input.len && (input.data[start] == ' '
+        || input.data[start] == '\t')) { start = start + 1; }
+    if (start == input.len) { ret false; }
+    var end: usize = start;
+    for (end < input.len && input.data[end] != ';') { end = end + 1; }
+    var trimmed_end: usize = end;
+    for (trimmed_end > start && (input.data[trimmed_end - 1] == ' '
+        || input.data[trimmed_end - 1] == '\t')) {
+        trimmed_end = trimmed_end - 1;
+    }
+    if (trimmed_end == start) { ret false; }
+    var equal: usize = start;
+    for (equal < trimmed_end && input.data[equal] != '=') { equal = equal + 1; }
+    if (equal == start || equal == trimmed_end) { ret false; }
+    pair.name = view.view(?input.data[start], equal - start);
+    val value_start: usize = equal + 1;
+    val value_end: usize = trimmed_end;
+    if (value_end > value_start && input.data[value_start] == '"') {
+        if (value_end - value_start < 2 || input.data[value_end - 1] != '"') {
+            ret false;
+        }
+        pair.value = view.view(?input.data[value_start + 1],
+            value_end - value_start - 2);
+    } or {
+        pair.value = view.view(?input.data[value_start], value_end - value_start);
+    }
+    if (!name_valid(pair.name) || !value_valid(pair.value)) { ret false; }
+    if (end == input.len) { @offset = end; }
+    or {
+        @offset = end + 1;
+        if (@offset == input.len) { ret false; }
+    }
+    ret true;
+}
+
+fun request_syntax(input: view.View, limits: Limits, pair_count: *usize) Status {
+    if (input.len == 0 || input.data == nil || pair_count == nil) {
+        ret INVALID_INPUT;
+    }
+    if (input.len > limits.max_total_bytes) { ret TOTAL_LIMIT; }
+    var offset: usize = 0;
+    var count: usize = 0;
+    for (offset < input.len) {
+        var pair: Pair;
+        val before: usize = offset;
+        if (!next_pair(input, ?offset, ?pair) || offset <= before) {
+            ret INVALID_INPUT;
+        }
+        if (count >= limits.max_count) { ret COUNT_LIMIT; }
+        count = count + 1;
+        if (pair.name.len > limits.max_name_bytes) { ret NAME_LIMIT; }
+        if (pair.value.len > limits.max_value_bytes) { ret VALUE_LIMIT; }
+        var cookie_bytes: usize = 0;
+        if (!add_length(?cookie_bytes, pair.name.len,
+                limits.max_cookie_bytes)
+            || !add_length(?cookie_bytes, 1, limits.max_cookie_bytes)
+            || !add_length(?cookie_bytes, pair.value.len,
+                limits.max_cookie_bytes)) {
+            ret COOKIE_LIMIT;
+        }
+    }
+    @pair_count = count;
+    ret OK;
+}
+
+fun duplicate_before(input: view.View, stop: usize, name: view.View) bool {
+    var offset: usize = 0;
+    for (offset < stop) {
+        var pair: Pair;
+        val before: usize = offset;
+        if (!next_pair(input, ?offset, ?pair) || offset <= before) { ret false; }
+        if (view_equal(pair.name, name)) { ret true; }
+    }
+    ret false;
+}
+
+pub fun parse_request(input: view.View, jar: *Jar, limits: Limits,
+    duplicate_policy: DuplicatePolicy) Status {
+    if (!limits_valid(limits)) { ret INVALID_LIMITS; }
+    if (jar == nil || !range_valid(jar::*u8, $size_of(Jar))) {
+        ret INVALID_INPUT;
+    }
+    if (jar.len != 0 || (jar.cap != 0 && jar.items == nil)
+        || duplicate_policy < DUPLICATE_REJECT
+        || duplicate_policy > DUPLICATE_LAST_WINS) { ret INVALID_INPUT; }
+    var item_bytes: usize = 0;
+    if (!view_range_valid(input)
+        || !array_bytes(jar.cap, $size_of(Cookie), ?item_bytes)
+        || !range_valid(jar.items::*u8, item_bytes)
+        || range_overlap(input.data, input.len, jar::*u8, $size_of(Jar))
+        || range_overlap(input.data, input.len, jar.items::*u8, item_bytes)
+        || range_overlap(jar::*u8, $size_of(Jar), jar.items::*u8,
+            item_bytes)) { ret INVALID_INPUT; }
+    var pair_count: usize = 0;
+    val syntax: Status = request_syntax(input, limits, ?pair_count);
+    if (syntax != OK) { ret syntax; }
+    if (pair_count > jar.cap) { ret STORAGE_LIMIT; }
+    var offset: usize = 0;
+    for (offset < input.len) {
+        val before: usize = offset;
+        var pair: Pair;
+        if (!next_pair(input, ?offset, ?pair)) { ret INVALID_INPUT; }
+        if (duplicate_policy == DUPLICATE_REJECT
+            && duplicate_before(input, before, pair.name)) {
+            ret DUPLICATE_NAME;
+        }
+    }
+    offset = 0;
+    var written: usize = 0;
+    for (offset < input.len) {
+        var pair: Pair;
+        if (!next_pair(input, ?offset, ?pair)) { ret INVALID_INPUT; }
+        var existing: usize = written;
+        var i: usize = 0;
+        for (i < written) {
+            if (view_equal(jar.items[i].name, pair.name)) { existing = i; }
+            i = i + 1;
+        }
+        if (existing < written) {
+            if (duplicate_policy == DUPLICATE_LAST_WINS) {
+                jar.items[existing].value = pair.value;
+            }
+        } or {
+            jar.items[written] = Cookie{};
+            jar.items[written].name = pair.name;
+            jar.items[written].value = pair.value;
+            jar.items[written].same_site = SAME_SITE_DEFAULT;
+            written = written + 1;
+        }
+    }
+    jar.len = written;
+    jar.total_bytes = input.len;
+    ret OK;
+}
+
+pub fun find(jar: *Jar, name: view.View) *Cookie {
+    if (jar == nil || !range_valid(jar::*u8, $size_of(Jar))
+        || name.len == 0 || !view_range_valid(name) || jar.len > jar.cap) {
+        ret nil;
+    }
+    var item_bytes: usize = 0;
+    if (!array_bytes(jar.cap, $size_of(Cookie), ?item_bytes)
+        || !range_valid(jar.items::*u8, item_bytes)
+        || range_overlap(jar::*u8, $size_of(Jar), jar.items::*u8,
+            item_bytes)) { ret nil; }
+    var i: usize = 0;
+    for (i < jar.len) {
+        if (!cookie_ranges_valid(?jar.items[i])) { ret nil; }
+        if (view_equal(jar.items[i].name, name)) { ret ?jar.items[i]; }
+        i = i + 1;
+    }
+    ret nil;
+}
+
+fun domain_valid(domain: view.View) bool {
+    if (domain.len == 0) { ret true; }
+    if (domain.data == nil || domain.len > 253 || domain.data[0] == '.'
+        || domain.data[domain.len - 1] == '.') { ret false; }
+    var label_start: usize = 0;
+    var i: usize = 0;
+    for (i <= domain.len) {
+        if (i == domain.len || domain.data[i] == '.') {
+            if (i == label_start || domain.data[label_start] == '-'
+                || domain.data[i - 1] == '-' || i - label_start > 63) {
+                ret false;
+            }
+            label_start = i + 1;
+        } or {
+            val c: u8 = domain.data[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z')
+                || (c >= 'a' && c <= 'z') || c == '-')) { ret false; }
+        }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun path_valid(path: view.View) bool {
+    if (path.len == 0) { ret true; }
+    if (path.data == nil || path.data[0] != '/') { ret false; }
+    var i: usize = 0;
+    for (i < path.len) {
+        val c: u8 = path.data[i];
+        if (c < 0x20 || c > 0x7e || c == ';') { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun attribute_value_valid(value: view.View) bool {
+    if (value.len != 0 && value.data == nil) { ret false; }
+    var i: usize = 0;
+    for (i < value.len) {
+        val c: u8 = value.data[i];
+        if (c < 0x20 || c > 0x7e || c == ';') { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun standard_attribute(name: view.View) bool {
+    ret view_equal_fold(name, view.view("Path", 4))
+        || view_equal_fold(name, view.view("Domain", 6))
+        || view_equal_fold(name, view.view("Max-Age", 7))
+        || view_equal_fold(name, view.view("Expires", 7))
+        || view_equal_fold(name, view.view("Secure", 6))
+        || view_equal_fold(name, view.view("HttpOnly", 8))
+        || view_equal_fold(name, view.view("SameSite", 8))
+        || view_equal_fold(name, view.view("Partitioned", 11));
+}
+
+fun extension_status(cookie: *Cookie, limits: Limits,
+    standard_count: usize) Status {
+    if (cookie.attribute_len != 0 && cookie.attributes == nil) {
+        ret INVALID_INPUT;
+    }
+    if (standard_count > limits.max_attribute_count
+        || cookie.attribute_len > limits.max_attribute_count - standard_count) {
+        ret ATTRIBUTE_COUNT_LIMIT;
+    }
+    var i: usize = 0;
+    for (i < cookie.attribute_len) {
+        val attribute: *Attribute = ?cookie.attributes[i];
+        if (!name_valid(attribute.name) || standard_attribute(attribute.name)) {
+            ret DUPLICATE_ATTRIBUTE;
+        }
+        if ((attribute.has_value && !attribute_value_valid(attribute.value))
+            || (!attribute.has_value && attribute.value.len != 0)) {
+            ret INVALID_INPUT;
+        }
+        var previous: usize = 0;
+        for (previous < i) {
+            if (view_equal_fold(cookie.attributes[previous].name,
+                attribute.name)) { ret DUPLICATE_ATTRIBUTE; }
+            previous = previous + 1;
+        }
+        i = i + 1;
+    }
+    ret OK;
+}
+
+fun standard_status(cookie: *Cookie, limits: Limits) Status {
+    if ((cookie.path.len != 0 && limits.max_attribute_name_bytes < 4)
+        || (cookie.domain.len != 0 && limits.max_attribute_name_bytes < 6)
+        || (cookie.has_max_age && limits.max_attribute_name_bytes < 7)
+        || (cookie.has_expires && limits.max_attribute_name_bytes < 7)
+        || (cookie.secure && limits.max_attribute_name_bytes < 6)
+        || (cookie.http_only && limits.max_attribute_name_bytes < 8)
+        || (cookie.same_site != SAME_SITE_DEFAULT
+            && limits.max_attribute_name_bytes < 8)
+        || (cookie.partitioned && limits.max_attribute_name_bytes < 11)) {
+        ret ATTRIBUTE_NAME_LIMIT;
+    }
+    if ((cookie.path.len != 0
+            && cookie.path.len > limits.max_attribute_value_bytes)
+        || (cookie.domain.len != 0
+            && cookie.domain.len > limits.max_attribute_value_bytes)
+        || (cookie.has_max_age && decimal_len(cookie.max_age_s)
+            > limits.max_attribute_value_bytes)
+        || (cookie.has_expires && limits.max_attribute_value_bytes < 29)) {
+        ret ATTRIBUTE_VALUE_LIMIT;
+    }
+    if (cookie.same_site == SAME_SITE_LAX
+        && limits.max_attribute_value_bytes < 3) {
+        ret ATTRIBUTE_VALUE_LIMIT;
+    }
+    if (cookie.same_site == SAME_SITE_STRICT
+        && limits.max_attribute_value_bytes < 6) {
+        ret ATTRIBUTE_VALUE_LIMIT;
+    }
+    if (cookie.same_site == SAME_SITE_NONE
+        && limits.max_attribute_value_bytes < 4) {
+        ret ATTRIBUTE_VALUE_LIMIT;
+    }
+    ret OK;
+}
+
+fun decimal_len(value: i64) usize {
+    var magnitude: u64 = value::u64;
+    var len: usize = 0;
+    if (value < 0) {
+        magnitude = (0 - (value + 1))::u64 + 1;
+        len = 1;
+    }
+    for (true) {
+        len = len + 1;
+        magnitude = magnitude / 10;
+        if (magnitude == 0) { ret len; }
+    }
+    ret len;
+}
+
+fun append(output: *u8, offset: *usize, value: view.View) {
+    var i: usize = 0;
+    for (i < value.len) {
+        output[@offset] = value.data[i];
+        @offset = @offset + 1;
+        i = i + 1;
+    }
+}
+
+fun append_decimal(output: *u8, offset: *usize, value: i64) {
+    var magnitude: u64 = value::u64;
+    if (value < 0) {
+        output[@offset] = '-';
+        @offset = @offset + 1;
+        magnitude = (0 - (value + 1))::u64 + 1;
+    }
+    var digits: [20]u8;
+    var count: usize = 0;
+    for (true) {
+        digits[count] = (magnitude % 10)::u8 + '0';
+        count = count + 1;
+        magnitude = magnitude / 10;
+        if (magnitude == 0) { brk; }
+    }
+    for (count > 0) {
+        count = count - 1;
+        output[@offset] = digits[count];
+        @offset = @offset + 1;
+    }
+}
+
+fun append_two(output: *u8, offset: *usize, value: i64) {
+    output[@offset] = '0' + (value / 10)::u8;
+    output[@offset + 1] = '0' + (value % 10)::u8;
+    @offset = @offset + 2;
+}
+
+fun append_four(output: *u8, offset: *usize, value: i64) {
+    output[@offset] = '0' + (value / 1000)::u8;
+    output[@offset + 1] = '0' + ((value / 100) % 10)::u8;
+    output[@offset + 2] = '0' + ((value / 10) % 10)::u8;
+    output[@offset + 3] = '0' + (value % 10)::u8;
+    @offset = @offset + 4;
+}
+
+fun append_weekday(output: *u8, offset: *usize, weekday: i64) {
+    if (weekday == 0) { append(output, offset, view.view("Sun", 3)); }
+    or (weekday == 1) { append(output, offset, view.view("Mon", 3)); }
+    or (weekday == 2) { append(output, offset, view.view("Tue", 3)); }
+    or (weekday == 3) { append(output, offset, view.view("Wed", 3)); }
+    or (weekday == 4) { append(output, offset, view.view("Thu", 3)); }
+    or (weekday == 5) { append(output, offset, view.view("Fri", 3)); }
+    or { append(output, offset, view.view("Sat", 3)); }
+}
+
+fun append_month(output: *u8, offset: *usize, month: i64) {
+    if (month == 1) { append(output, offset, view.view("Jan", 3)); }
+    or (month == 2) { append(output, offset, view.view("Feb", 3)); }
+    or (month == 3) { append(output, offset, view.view("Mar", 3)); }
+    or (month == 4) { append(output, offset, view.view("Apr", 3)); }
+    or (month == 5) { append(output, offset, view.view("May", 3)); }
+    or (month == 6) { append(output, offset, view.view("Jun", 3)); }
+    or (month == 7) { append(output, offset, view.view("Jul", 3)); }
+    or (month == 8) { append(output, offset, view.view("Aug", 3)); }
+    or (month == 9) { append(output, offset, view.view("Sep", 3)); }
+    or (month == 10) { append(output, offset, view.view("Oct", 3)); }
+    or (month == 11) { append(output, offset, view.view("Nov", 3)); }
+    or { append(output, offset, view.view("Dec", 3)); }
+}
+
+fun append_imf_date(output: *u8, offset: *usize, unix_seconds: i64) {
+    val days: i64 = unix_seconds / 86400;
+    val seconds: i64 = unix_seconds % 86400;
+    val z: i64 = days + 719468;
+    val era: i64 = z / 146097;
+    val day_of_era: i64 = z - era * 146097;
+    val year_of_era: i64 = (day_of_era - day_of_era / 1460
+        + day_of_era / 36524 - day_of_era / 146096) / 365;
+    var year: i64 = year_of_era + era * 400;
+    val day_of_year: i64 = day_of_era
+        - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    val month_prime: i64 = (5 * day_of_year + 2) / 153;
+    val day: i64 = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    var month: i64 = month_prime + 3;
+    if (month_prime >= 10) { month = month_prime - 9; }
+    if (month <= 2) { year = year + 1; }
+    append_weekday(output, offset, (days + 4) % 7);
+    append(output, offset, view.view(", ", 2));
+    append_two(output, offset, day);
+    output[@offset] = ' ';
+    @offset = @offset + 1;
+    append_month(output, offset, month);
+    output[@offset] = ' ';
+    @offset = @offset + 1;
+    append_four(output, offset, year);
+    output[@offset] = ' ';
+    @offset = @offset + 1;
+    append_two(output, offset, seconds / 3600);
+    output[@offset] = ':';
+    @offset = @offset + 1;
+    append_two(output, offset, (seconds / 60) % 60);
+    output[@offset] = ':';
+    @offset = @offset + 1;
+    append_two(output, offset, seconds % 60);
+    append(output, offset, view.view(" GMT", 4));
+}
+
+fun add_length(total: *usize, amount: usize, limit: usize) bool {
+    if (@total > limit || amount > limit - @total) { ret false; }
+    @total = @total + amount;
+    ret true;
+}
+
+fun cookie_ranges_valid(cookie: *Cookie) bool {
+    if (cookie == nil || !range_valid(cookie::*u8, $size_of(Cookie))
+        || !view_range_valid(cookie.name) || !view_range_valid(cookie.value)
+        || !view_range_valid(cookie.path) || !view_range_valid(cookie.domain)) {
+        ret false;
+    }
+    var attribute_bytes: usize = 0;
+    if (!array_bytes(cookie.attribute_len, $size_of(Attribute),
+        ?attribute_bytes)
+        || !range_valid(cookie.attributes::*u8, attribute_bytes)) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < cookie.attribute_len) {
+        if (!view_range_valid(cookie.attributes[i].name)
+            || !view_range_valid(cookie.attributes[i].value)) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun attribute_storage_valid(cookie: *Cookie) bool {
+    var attribute_bytes: usize = 0;
+    ret array_bytes(cookie.attribute_len, $size_of(Attribute),
+        ?attribute_bytes)
+        && range_valid(cookie.attributes::*u8, attribute_bytes);
+}
+
+fun extension_limits_status(cookie: *Cookie, limits: Limits) Status {
+    var i: usize = 0;
+    for (i < cookie.attribute_len) {
+        if (cookie.attributes[i].name.len
+            > limits.max_attribute_name_bytes) {
+            ret ATTRIBUTE_NAME_LIMIT;
+        }
+        if (cookie.attributes[i].value.len
+            > limits.max_attribute_value_bytes) {
+            ret ATTRIBUTE_VALUE_LIMIT;
+        }
+        i = i + 1;
+    }
+    ret OK;
+}
+
+fun output_aliases_cookie(output: *u8, output_len: usize,
+    cookie: *Cookie) bool {
+    if (range_overlap(output, output_len, cookie::*u8, $size_of(Cookie))
+        || range_overlap(output, output_len, cookie.name.data,
+            cookie.name.len)
+        || range_overlap(output, output_len, cookie.value.data,
+            cookie.value.len)
+        || range_overlap(output, output_len, cookie.path.data,
+            cookie.path.len)
+        || range_overlap(output, output_len, cookie.domain.data,
+            cookie.domain.len)) { ret true; }
+    var attribute_bytes: usize = 0;
+    if (!array_bytes(cookie.attribute_len, $size_of(Attribute),
+        ?attribute_bytes)
+        || range_overlap(output, output_len, cookie.attributes::*u8,
+            attribute_bytes)) { ret true; }
+    var i: usize = 0;
+    for (i < cookie.attribute_len) {
+        if (range_overlap(output, output_len, cookie.attributes[i].name.data,
+                cookie.attributes[i].name.len)
+            || range_overlap(output, output_len,
+                cookie.attributes[i].value.data,
+                cookie.attributes[i].value.len)) { ret true; }
+        i = i + 1;
+    }
+    ret false;
+}
+
+pub fun serialize_set_cookie(cookie: *Cookie, output: *u8,
+    output_capacity: usize, limits: Limits) Operation {
+    if (!limits_valid(limits)) { ret Operation{status: INVALID_LIMITS}; }
+    if (cookie == nil || !range_valid(cookie::*u8, $size_of(Cookie))) {
+        ret Operation{status: INVALID_INPUT};
+    }
+    if (cookie.same_site > SAME_SITE_NONE) {
+        ret Operation{status: INVALID_INPUT};
+    }
+    if (cookie.name.len > limits.max_name_bytes) {
+        ret Operation{status: NAME_LIMIT};
+    }
+    if (cookie.value.len > limits.max_value_bytes) {
+        ret Operation{status: VALUE_LIMIT};
+    }
+    var standard_count: usize = 0;
+    if (cookie.path.len != 0) { standard_count = standard_count + 1; }
+    if (cookie.domain.len != 0) { standard_count = standard_count + 1; }
+    if (cookie.has_max_age) { standard_count = standard_count + 1; }
+    if (cookie.has_expires) {
+        if (cookie.expires_unix < 0 || cookie.expires_unix > 253402300799) {
+            ret Operation{status: INVALID_INPUT};
+        }
+        standard_count = standard_count + 1;
+    }
+    if (cookie.secure) { standard_count = standard_count + 1; }
+    if (cookie.http_only) { standard_count = standard_count + 1; }
+    if (cookie.same_site != SAME_SITE_DEFAULT) {
+        standard_count = standard_count + 1;
+    }
+    if (cookie.partitioned) { standard_count = standard_count + 1; }
+    val standards: Status = standard_status(cookie, limits);
+    if (standards != OK) { ret Operation{status: standards}; }
+    if (standard_count > limits.max_attribute_count
+        || cookie.attribute_len
+            > limits.max_attribute_count - standard_count) {
+        ret Operation{status: ATTRIBUTE_COUNT_LIMIT};
+    }
+    if (!attribute_storage_valid(cookie)) {
+        ret Operation{status: INVALID_INPUT};
+    }
+    val extension_limits: Status = extension_limits_status(cookie, limits);
+    if (extension_limits != OK) {
+        ret Operation{status: extension_limits};
+    }
+    if (!cookie_ranges_valid(cookie)) {
+        ret Operation{status: INVALID_INPUT};
+    }
+    if (!name_valid(cookie.name) || !value_valid(cookie.value)
+        || !path_valid(cookie.path) || !domain_valid(cookie.domain)) {
+        ret Operation{status: INVALID_INPUT};
+    }
+    if (starts_with(cookie.name, "__Secure-", 9) && !cookie.secure) {
+        ret Operation{status: PREFIX_VIOLATION};
+    }
+    if (starts_with(cookie.name, "__Host-", 7)
+        && (!cookie.secure || !view_equal(cookie.path, view.view("/", 1))
+            || cookie.domain.len != 0)) {
+        ret Operation{status: PREFIX_VIOLATION};
+    }
+    if (starts_with(cookie.name, "__Http-", 7)
+        && (!cookie.secure || !cookie.http_only)) {
+        ret Operation{status: PREFIX_VIOLATION};
+    }
+    if (starts_with(cookie.name, "__Host-Http-", 12)
+        && (!cookie.secure || !cookie.http_only
+            || !view_equal(cookie.path, view.view("/", 1))
+            || cookie.domain.len != 0)) {
+        ret Operation{status: PREFIX_VIOLATION};
+    }
+    if ((cookie.same_site == SAME_SITE_NONE || cookie.partitioned)
+        && !cookie.secure) { ret Operation{status: SECURITY_VIOLATION}; }
+    val extensions: Status = extension_status(cookie, limits, standard_count);
+    if (extensions != OK) { ret Operation{status: extensions}; }
+    var total: usize = 0;
+    if (!add_length(?total, cookie.name.len, limits.max_cookie_bytes)
+        || !add_length(?total, 1, limits.max_cookie_bytes)
+        || !add_length(?total, cookie.value.len, limits.max_cookie_bytes)) {
+        ret Operation{status: COOKIE_LIMIT};
+    }
+    if (cookie.path.len != 0) {
+        if (!add_length(?total, 7, limits.max_cookie_bytes)
+            || !add_length(?total, cookie.path.len,
+                limits.max_cookie_bytes)) { ret Operation{status: COOKIE_LIMIT}; }
+    }
+    if (cookie.domain.len != 0) {
+        if (!add_length(?total, 9, limits.max_cookie_bytes)
+            || !add_length(?total, cookie.domain.len,
+                limits.max_cookie_bytes)) { ret Operation{status: COOKIE_LIMIT}; }
+    }
+    if (cookie.has_max_age) {
+        if (!add_length(?total, 10, limits.max_cookie_bytes)
+            || !add_length(?total, decimal_len(cookie.max_age_s),
+                limits.max_cookie_bytes)) { ret Operation{status: COOKIE_LIMIT}; }
+    }
+    if (cookie.has_expires
+        && !add_length(?total, 39, limits.max_cookie_bytes)) {
+        ret Operation{status: COOKIE_LIMIT};
+    }
+    if (cookie.secure && !add_length(?total, 8, limits.max_cookie_bytes)) {
+        ret Operation{status: COOKIE_LIMIT};
+    }
+    if (cookie.http_only && !add_length(?total, 10, limits.max_cookie_bytes)) {
+        ret Operation{status: COOKIE_LIMIT};
+    }
+    if (cookie.same_site != SAME_SITE_DEFAULT) {
+        var same_site_len: usize = 3;
+        if (cookie.same_site == SAME_SITE_STRICT) { same_site_len = 6; }
+        or (cookie.same_site == SAME_SITE_NONE) { same_site_len = 4; }
+        if (!add_length(?total, 11, limits.max_cookie_bytes)
+            || !add_length(?total, same_site_len,
+                limits.max_cookie_bytes)) { ret Operation{status: COOKIE_LIMIT}; }
+    }
+    if (cookie.partitioned
+        && !add_length(?total, 13, limits.max_cookie_bytes)) {
+        ret Operation{status: COOKIE_LIMIT};
+    }
+    var i: usize = 0;
+    for (i < cookie.attribute_len) {
+        if (!add_length(?total, 2, limits.max_cookie_bytes)
+            || !add_length(?total, cookie.attributes[i].name.len,
+                limits.max_cookie_bytes)) {
+            ret Operation{status: COOKIE_LIMIT};
+        }
+        if (cookie.attributes[i].has_value
+            && (!add_length(?total, 1, limits.max_cookie_bytes)
+                || !add_length(?total, cookie.attributes[i].value.len,
+                    limits.max_cookie_bytes))) {
+            ret Operation{status: COOKIE_LIMIT};
+        }
+        i = i + 1;
+    }
+    if (total > limits.max_total_bytes) { ret Operation{status: TOTAL_LIMIT}; }
+    if (total > output_capacity) { ret Operation{status: OUTPUT_TOO_SMALL}; }
+    if (!range_valid(output, total)
+        || output_aliases_cookie(output, total, cookie)) {
+        ret Operation{status: INVALID_INPUT};
+    }
+    var offset: usize = 0;
+    append(output, ?offset, cookie.name);
+    output[offset] = '=';
+    offset = offset + 1;
+    append(output, ?offset, cookie.value);
+    if (cookie.path.len != 0) {
+        append(output, ?offset, view.view("; Path=", 7));
+        append(output, ?offset, cookie.path);
+    }
+    if (cookie.domain.len != 0) {
+        append(output, ?offset, view.view("; Domain=", 9));
+        append(output, ?offset, cookie.domain);
+    }
+    if (cookie.has_max_age) {
+        append(output, ?offset, view.view("; Max-Age=", 10));
+        append_decimal(output, ?offset, cookie.max_age_s);
+    }
+    if (cookie.has_expires) {
+        append(output, ?offset, view.view("; Expires=", 10));
+        append_imf_date(output, ?offset, cookie.expires_unix);
+    }
+    if (cookie.secure) { append(output, ?offset, view.view("; Secure", 8)); }
+    if (cookie.http_only) {
+        append(output, ?offset, view.view("; HttpOnly", 10));
+    }
+    if (cookie.same_site != SAME_SITE_DEFAULT) {
+        append(output, ?offset, view.view("; SameSite=", 11));
+        if (cookie.same_site == SAME_SITE_LAX) {
+            append(output, ?offset, view.view("Lax", 3));
+        } or (cookie.same_site == SAME_SITE_STRICT) {
+            append(output, ?offset, view.view("Strict", 6));
+        } or {
+            append(output, ?offset, view.view("None", 4));
+        }
+    }
+    if (cookie.partitioned) {
+        append(output, ?offset, view.view("; Partitioned", 13));
+    }
+    i = 0;
+    for (i < cookie.attribute_len) {
+        append(output, ?offset, view.view("; ", 2));
+        append(output, ?offset, cookie.attributes[i].name);
+        if (cookie.attributes[i].has_value) {
+            output[offset] = '=';
+            offset = offset + 1;
+            append(output, ?offset, cookie.attributes[i].value);
+        }
+        i = i + 1;
+    }
+    ret Operation{status: OK, written: offset};
+}
+
+fun bytes_equal(actual: *u8, actual_len: usize, expected: *u8,
+    expected_len: usize) bool {
+    if (actual_len != expected_len || actual == nil || expected == nil) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < actual_len) {
+        if (actual[i] != expected[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+test "laurel.cookie: request parsing is bounded with explicit duplicates" {
+    val configured: Limits = limits_default();
+    var items: [4]Cookie;
+    var jar: Jar = init(?items[0], 4);
+    val parsed: Status = parse_request(view.view(
+        "sid=one; theme=\"dark\"", 21), ?jar, configured,
+        DUPLICATE_REJECT);
+    if (parsed != OK || jar.len != 2 || jar.total_bytes != 21
+        || !view_equal(jar.items[0].name, view.view("sid", 3))
+        || !view_equal(jar.items[1].value, view.view("dark", 4))) { ret 1; }
+    var duplicate_jar: Jar = init(?items[0], 4);
+    if (parse_request(view.view("sid=a; sid=b", 12), ?duplicate_jar,
+        configured, DUPLICATE_REJECT) != DUPLICATE_NAME
+        || duplicate_jar.len != 0) { ret 2; }
+    if (parse_request(view.view("sid=a; sid=b", 12), ?duplicate_jar,
+        configured, DUPLICATE_LAST_WINS) != OK
+        || duplicate_jar.len != 1
+        || duplicate_jar.items[0].value.data[0] != 'b') { ret 3; }
+    var invalid_jar: Jar = init(?items[0], 4);
+    if (parse_request(view.view("sid=bad value", 13), ?invalid_jar,
+        configured, DUPLICATE_REJECT) != INVALID_INPUT
+        || invalid_jar.len != 0) { ret 4; }
+    val tight: Limits = Limits{max_count: 1, max_name_bytes: 2,
+        max_value_bytes: 1, max_attribute_count: 1,
+        max_attribute_name_bytes: 1, max_attribute_value_bytes: 1,
+        max_cookie_bytes: 4, max_total_bytes: 5};
+    if (parse_request(view.view("sid=a", 5), ?invalid_jar, tight,
+        DUPLICATE_REJECT) != NAME_LIMIT) { ret 5; }
+    ret 0;
+}
+
+test "laurel.cookie: response serialization enforces security and attributes" {
+    val configured: Limits = limits_default();
+    var output: [256]u8;
+    var extension: Attribute = Attribute{name: view.view("Priority", 8),
+        value: view.view("High", 4), has_value: true};
+    var response_cookie: Cookie = Cookie{name: view.view("__Host-session", 14),
+        value: view.view("abc", 3), path: view.view("/", 1),
+        domain: view.view(nil, 0), has_max_age: true, max_age_s: 3600,
+        has_expires: false, expires_unix: 0,
+        secure: true, http_only: true, partitioned: true,
+        same_site: SAME_SITE_LAX, attributes: ?extension, attribute_len: 1};
+    val serialized: Operation = serialize_set_cookie(?response_cookie,
+        ?output[0], 256, configured);
+    val expected: *u8 = "__Host-session=abc; Path=/; Max-Age=3600; Secure; HttpOnly; SameSite=Lax; Partitioned; Priority=High";
+    if (serialized.status != OK || !bytes_equal(?output[0],
+        serialized.written, expected, 100)) { ret 1; }
+    response_cookie.secure = false;
+    if (serialize_set_cookie(?response_cookie, ?output[0], 256,
+        configured).status != PREFIX_VIOLATION) { ret 2; }
+    response_cookie.secure = true;
+    response_cookie.domain = view.view("example.com", 11);
+    if (serialize_set_cookie(?response_cookie, ?output[0], 256,
+        configured).status != PREFIX_VIOLATION) { ret 3; }
+    response_cookie.domain = view.view(nil, 0);
+    var duplicates: [2]Attribute;
+    duplicates[0] = Attribute{name: view.view("Priority", 8),
+        value: view.view("High", 4), has_value: true};
+    duplicates[1] = Attribute{name: view.view("priority", 8),
+        value: view.view("Low", 3), has_value: true};
+    response_cookie.attributes = ?duplicates[0];
+    response_cookie.attribute_len = 2;
+    if (serialize_set_cookie(?response_cookie, ?output[0], 256,
+        configured).status != DUPLICATE_ATTRIBUTE) { ret 4; }
+    duplicates[1].name = view.view("Secure", 6);
+    if (serialize_set_cookie(?response_cookie, ?output[0], 256,
+        configured).status != DUPLICATE_ATTRIBUTE) { ret 5; }
+    response_cookie.attributes = ?extension;
+    response_cookie.attribute_len = 1;
+    var untouched: [4]u8;
+    untouched[0] = 0xa5;
+    if (serialize_set_cookie(?response_cookie, ?untouched[0], 4,
+        configured).status != OUTPUT_TOO_SMALL || untouched[0] != 0xa5) {
+        ret 6;
+    }
+    var dated: Cookie = Cookie{name: view.view("a", 1),
+        value: view.view("b", 1), path: view.view(nil, 0),
+        domain: view.view(nil, 0), has_max_age: false, max_age_s: 0,
+        has_expires: true, expires_unix: 784111777, secure: false,
+        http_only: false, partitioned: false,
+        same_site: SAME_SITE_DEFAULT, attributes: nil, attribute_len: 0};
+    val dated_result: Operation = serialize_set_cookie(?dated,
+        ?output[0], 256, configured);
+    if (dated_result.status != OK || !bytes_equal(?output[0],
+        dated_result.written,
+        "a=b; Expires=Sun, 06 Nov 1994 08:49:37 GMT", 42)) { ret 7; }
+    dated.expires_unix = 0;
+    val epoch: Operation = serialize_set_cookie(?dated, ?output[0], 256,
+        configured);
+    if (epoch.status != OK || !bytes_equal(?output[0], epoch.written,
+        "a=b; Expires=Thu, 01 Jan 1970 00:00:00 GMT", 42)) { ret 8; }
+    dated.expires_unix = 253402300799;
+    val maximum: Operation = serialize_set_cookie(?dated, ?output[0], 256,
+        configured);
+    if (maximum.status != OK || !bytes_equal(?output[0], maximum.written,
+        "a=b; Expires=Fri, 31 Dec 9999 23:59:59 GMT", 42)) { ret 9; }
+    dated.expires_unix = -1;
+    if (serialize_set_cookie(?dated, ?output[0], 256, configured).status
+        != INVALID_INPUT) { ret 10; }
+    ret 0;
+}
+
+test "laurel.cookie: every independent limit and prefix fails closed" {
+    val configured: Limits = limits_default();
+    var items: [2]Cookie;
+    var jar: Jar = init(?items[0], 2);
+    var bounded: Limits = configured;
+    bounded.max_count = 1;
+    if (parse_request(view.view("a=1; b=2", 8), ?jar, bounded,
+        DUPLICATE_REJECT) != COUNT_LIMIT || jar.len != 0) { ret 1; }
+    bounded = configured;
+    bounded.max_name_bytes = 2;
+    if (parse_request(view.view("sid=1", 5), ?jar, bounded,
+        DUPLICATE_REJECT) != NAME_LIMIT || jar.len != 0) { ret 2; }
+    bounded = configured;
+    bounded.max_value_bytes = 1;
+    if (parse_request(view.view("a=12", 4), ?jar, bounded,
+        DUPLICATE_REJECT) != VALUE_LIMIT || jar.len != 0) { ret 3; }
+    bounded = configured;
+    bounded.max_cookie_bytes = 4;
+    if (parse_request(view.view("sid=1", 5), ?jar, bounded,
+        DUPLICATE_REJECT) != COOKIE_LIMIT || jar.len != 0) { ret 4; }
+    bounded = configured;
+    bounded.max_total_bytes = 7;
+    if (parse_request(view.view("a=1; b=2", 8), ?jar, bounded,
+        DUPLICATE_REJECT) != TOTAL_LIMIT || jar.len != 0) { ret 5; }
+    var one_item: [1]Cookie;
+    jar = init(?one_item[0], 1);
+    if (parse_request(view.view("a=1; b=2", 8), ?jar, configured,
+        DUPLICATE_REJECT) != STORAGE_LIMIT || jar.len != 0) { ret 6; }
+    jar = init(?items[0], 2);
+    if (parse_request(view.view("a=1; a=2", 8), ?jar, configured,
+        DUPLICATE_FIRST_WINS) != OK || jar.len != 1
+        || jar.items[0].value.data[0] != '1') { ret 7; }
+    jar = init(?items[0], 2);
+    if (parse_request(view.view("a=\"unterminated", 15), ?jar, configured,
+        DUPLICATE_REJECT) != INVALID_INPUT || jar.len != 0) { ret 8; }
+
+    var attributes: [2]Attribute;
+    attributes[0] = Attribute{name: view.view("Priority", 8),
+        value: view.view("High", 4), has_value: true};
+    attributes[1] = Attribute{name: view.view("Future", 6),
+        value: view.view("yes", 3), has_value: true};
+    var response: Cookie = Cookie{name: view.view("session", 7),
+        value: view.view("value", 5), path: view.view("/", 1),
+        domain: view.view(nil, 0), has_max_age: false, max_age_s: 0,
+        has_expires: false, expires_unix: 0,
+        secure: true, http_only: true, partitioned: false,
+        same_site: SAME_SITE_LAX, attributes: ?attributes[0],
+        attribute_len: 2};
+    var output: [256]u8;
+    bounded = configured;
+    bounded.max_attribute_count = 1;
+    if (serialize_set_cookie(?response, ?output[0], 256, bounded).status
+        != ATTRIBUTE_COUNT_LIMIT) {
+        ret 9;
+    }
+    bounded = configured;
+    bounded.max_attribute_name_bytes = 7;
+    if (serialize_set_cookie(?response, ?output[0], 256, bounded).status
+        != ATTRIBUTE_NAME_LIMIT) { ret 10; }
+    bounded = configured;
+    bounded.max_attribute_value_bytes = 3;
+    if (serialize_set_cookie(?response, ?output[0], 256, bounded).status
+        != ATTRIBUTE_VALUE_LIMIT) { ret 11; }
+    bounded = configured;
+    bounded.max_cookie_bytes = 10;
+    if (serialize_set_cookie(?response, ?output[0], 256, bounded).status
+        != COOKIE_LIMIT) { ret 12; }
+    bounded = configured;
+    bounded.max_total_bytes = 10;
+    if (serialize_set_cookie(?response, ?output[0], 256, bounded).status
+        != TOTAL_LIMIT) { ret 13; }
+    response.name = view.view("__Secure-session", 16);
+    response.secure = false;
+    if (serialize_set_cookie(?response, ?output[0], 256, configured).status
+        != PREFIX_VIOLATION) { ret 14; }
+    response.name = view.view("session", 7);
+    response.same_site = SAME_SITE_NONE;
+    if (serialize_set_cookie(?response, ?output[0], 256, configured).status
+        != SECURITY_VIOLATION) { ret 15; }
+    response.same_site = SAME_SITE_LAX;
+    response.partitioned = true;
+    if (serialize_set_cookie(?response, ?output[0], 256, configured).status
+        != SECURITY_VIOLATION) { ret 16; }
+    response.partitioned = false;
+    response.name = view.view("__Http-session", 14);
+    response.secure = true;
+    response.http_only = false;
+    if (serialize_set_cookie(?response, ?output[0], 256, configured).status
+        != PREFIX_VIOLATION) { ret 17; }
+    response.name = view.view("__Host-Http-session", 19);
+    response.http_only = true;
+    response.path = view.view("/sub", 4);
+    if (serialize_set_cookie(?response, ?output[0], 256, configured).status
+        != PREFIX_VIOLATION) { ret 18; }
+    ret 0;
+}
+
+test "laurel.cookie: standard attributes honor independent bounds" {
+    val configured: Limits = limits_default();
+    var output: [256]u8;
+    val base: Cookie = Cookie{name: view.view("a", 1),
+        value: view.view("b", 1), path: view.view(nil, 0),
+        domain: view.view(nil, 0), has_max_age: false, max_age_s: 0,
+        has_expires: false, expires_unix: 0, secure: false,
+        http_only: false, partitioned: false,
+        same_site: SAME_SITE_DEFAULT, attributes: nil, attribute_len: 0};
+    var standard: Cookie = base;
+    var bounded: Limits = configured;
+
+    standard.path = view.view("/x", 2);
+    bounded.max_attribute_name_bytes = 3;
+    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
+        != ATTRIBUTE_NAME_LIMIT) { ret 1; }
+    bounded = configured;
+    bounded.max_attribute_value_bytes = 1;
+    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
+        != ATTRIBUTE_VALUE_LIMIT) { ret 2; }
+
+    standard = base;
+    standard.domain = view.view("example.com", 11);
+    bounded = configured;
+    bounded.max_attribute_name_bytes = 5;
+    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
+        != ATTRIBUTE_NAME_LIMIT) { ret 3; }
+    bounded = configured;
+    bounded.max_attribute_value_bytes = 10;
+    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
+        != ATTRIBUTE_VALUE_LIMIT) { ret 4; }
+
+    standard = base;
+    standard.has_max_age = true;
+    standard.max_age_s = -123;
+    bounded = configured;
+    bounded.max_attribute_name_bytes = 6;
+    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
+        != ATTRIBUTE_NAME_LIMIT) { ret 5; }
+    bounded = configured;
+    bounded.max_attribute_value_bytes = 3;
+    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
+        != ATTRIBUTE_VALUE_LIMIT) { ret 6; }
+
+    standard = base;
+    standard.has_expires = true;
+    standard.expires_unix = 0;
+    bounded = configured;
+    bounded.max_attribute_name_bytes = 6;
+    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
+        != ATTRIBUTE_NAME_LIMIT) { ret 7; }
+    bounded = configured;
+    bounded.max_attribute_value_bytes = 28;
+    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
+        != ATTRIBUTE_VALUE_LIMIT) { ret 8; }
+
+    standard = base;
+    standard.secure = true;
+    bounded = configured;
+    bounded.max_attribute_name_bytes = 5;
+    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
+        != ATTRIBUTE_NAME_LIMIT) { ret 9; }
+    bounded = configured;
+    bounded.max_attribute_value_bytes = 1;
+    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
+        != OK) { ret 10; }
+
+    standard = base;
+    standard.http_only = true;
+    bounded = configured;
+    bounded.max_attribute_name_bytes = 7;
+    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
+        != ATTRIBUTE_NAME_LIMIT) { ret 11; }
+
+    standard = base;
+    standard.secure = true;
+    standard.same_site = SAME_SITE_STRICT;
+    bounded = configured;
+    bounded.max_attribute_name_bytes = 7;
+    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
+        != ATTRIBUTE_NAME_LIMIT) { ret 12; }
+    bounded = configured;
+    bounded.max_attribute_value_bytes = 5;
+    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
+        != ATTRIBUTE_VALUE_LIMIT) { ret 13; }
+
+    standard = base;
+    standard.secure = true;
+    standard.partitioned = true;
+    bounded = configured;
+    bounded.max_attribute_name_bytes = 10;
+    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
+        != ATTRIBUTE_NAME_LIMIT) { ret 14; }
+    ret 0;
+}
+
+test "laurel.cookie: parser and serializer reject every output alias" {
+    val configured: Limits = limits_default();
+    var items: [2]Cookie;
+    val item_bytes: *u8 = (?items[0])::*u8;
+    item_bytes[0] = 'a';
+    item_bytes[1] = '=';
+    item_bytes[2] = '1';
+    var jar: Jar = init(?items[0], 2);
+    if (parse_request(view.view(item_bytes, 3), ?jar, configured,
+        DUPLICATE_REJECT) != INVALID_INPUT || jar.len != 0
+        || item_bytes[0] != 'a') { ret 1; }
+
+    var self_jar: Jar;
+    self_jar = Jar{items: (?self_jar)::usize::*Cookie, len: 0, cap: 1,
+        total_bytes: 0};
+    if (parse_request(view.view("a=1", 3), ?self_jar, configured,
+        DUPLICATE_REJECT) != INVALID_INPUT || self_jar.len != 0) { ret 2; }
+
+    var name: [64]u8;
+    name[0] = 'a';
+    var value: [64]u8;
+    value[0] = 'b';
+    var path: [64]u8;
+    path[0] = '/';
+    var domain: [64]u8;
+    val domain_text: *u8 = "example.com";
+    var copied: usize = 0;
+    for (copied < 11) {
+        domain[copied] = domain_text[copied];
+        copied = copied + 1;
+    }
+    var attribute_name: [16]u8;
+    attribute_name[0] = 'X';
+    var attribute_value: [16]u8;
+    attribute_value[0] = 'y';
+    var attribute: Attribute = Attribute{name: view.view(?attribute_name[0], 1),
+        value: view.view(?attribute_value[0], 1), has_value: true};
+    var response: Cookie = Cookie{name: view.view(?name[0], 1),
+        value: view.view(?value[0], 1), path: view.view(nil, 0),
+        domain: view.view(nil, 0), has_max_age: false, max_age_s: 0,
+        has_expires: false, expires_unix: 0, secure: false,
+        http_only: false, partitioned: false,
+        same_site: SAME_SITE_DEFAULT, attributes: ?attribute,
+        attribute_len: 1};
+    if (serialize_set_cookie(?response, ?name[0], 64, configured).status
+            != INVALID_INPUT || name[0] != 'a'
+        || serialize_set_cookie(?response, ?value[0], 64, configured).status
+            != INVALID_INPUT || value[0] != 'b'
+        || serialize_set_cookie(?response, (?attribute)::*u8, 256,
+            configured).status != INVALID_INPUT
+        || attribute.name.data != ?attribute_name[0]
+        || serialize_set_cookie(?response, ?attribute_name[0], 64,
+            configured).status != INVALID_INPUT
+        || attribute_name[0] != 'X'
+        || serialize_set_cookie(?response, ?attribute_value[0], 64,
+            configured).status != INVALID_INPUT
+        || attribute_value[0] != 'y'
+        || serialize_set_cookie(?response, (?response)::*u8, 256,
+            configured).status != INVALID_INPUT
+        || response.name.data != ?name[0]) { ret 3; }
+
+    response.path = view.view(?path[0], 1);
+    if (serialize_set_cookie(?response, ?path[0], 64, configured).status
+        != INVALID_INPUT || path[0] != '/') { ret 4; }
+    response.path = view.view(nil, 0);
+    response.domain = view.view(?domain[0], 11);
+    if (serialize_set_cookie(?response, ?domain[0], 64, configured).status
+        != INVALID_INPUT || domain[0] != 'e') { ret 5; }
+    response.domain = view.view(nil, 0);
+
+    val near_end: *u8 = (~(0::usize) - 1)::*u8;
+    response.name = view.view(near_end, 4);
+    if (serialize_set_cookie(?response, ?name[0], 64, configured).status
+        != INVALID_INPUT) { ret 6; }
+    response.name = view.view(?name[0], 1);
+    if (serialize_set_cookie(?response, near_end, 64, configured).status
+        != INVALID_INPUT || name[0] != 'a') { ret 7; }
+    response.attributes = (~(0::usize) - 1)::*Attribute;
+    response.attribute_len = 2;
+    if (serialize_set_cookie(?response, ?name[0], 64, configured).status
+        != INVALID_INPUT || name[0] != 'a') { ret 8; }
+    ret 0;
+}
+
+test "laurel.cookie: lookup rejects forged jars and nested ranges" {
+    val maximum: usize = ~(0::usize);
+    val near_end: *u8 = (maximum - 1)::*u8;
+    if (find((maximum - 1)::*Jar, view.view("a", 1)) != nil) { ret 1; }
+    var item: Cookie = Cookie{name: view.view("a", 1),
+        value: view.view("b", 1), path: view.view(nil, 0),
+        domain: view.view(nil, 0), same_site: SAME_SITE_DEFAULT,
+        attributes: nil, attribute_len: 0};
+    var jar: Jar = Jar{items: ?item, len: 1, cap: 1, total_bytes: 3};
+    if (find(?jar, view.view(near_end, 4)) != nil) { ret 2; }
+    item.name = view.view(near_end, 4);
+    if (find(?jar, view.view("a", 1)) != nil) { ret 3; }
+    item.name = view.view("a", 1);
+    item.attributes = near_end::*Attribute;
+    item.attribute_len = 2;
+    if (find(?jar, view.view("a", 1)) != nil) { ret 4; }
+    jar.items = near_end::*Cookie;
+    jar.cap = 2;
+    if (find(?jar, view.view("a", 1)) != nil) { ret 5; }
+    jar.items = (?jar)::usize::*Cookie;
+    jar.cap = 1;
+    if (find(?jar, view.view("a", 1)) != nil) { ret 6; }
+    ret 0;
+}
+
+test "laurel.cookie: inclusive maximum overlap arithmetic never wraps" {
+    val maximum: usize = ~(0::usize);
+    val at_maximum: *u8 = maximum::*u8;
+    val before_maximum: *u8 = (maximum - 1)::*u8;
+    if (!range_valid(at_maximum, 1)
+        || !range_overlap(at_maximum, 1, at_maximum, 1)
+        || range_overlap(at_maximum, 1, before_maximum, 1)
+        || range_overlap(before_maximum, 1, at_maximum, 1)
+        || !range_overlap(before_maximum, 2, at_maximum, 1)) { ret 1; }
+
+    var value: Cookie = Cookie{name: view.view("a", 1),
+        value: view.view("b", 1), path: view.view(nil, 0),
+        domain: view.view(nil, 0), same_site: SAME_SITE_DEFAULT,
+        attributes: nil, attribute_len: 0};
+    if (output_aliases_cookie(at_maximum, 1, ?value)
+        || !output_aliases_cookie(value.name.data, 1, ?value)) { ret 2; }
+    ret 0;
+}
+
+test "laurel.cookie: scalar limits precede traversal and sums never wrap" {
+    val configured: Limits = limits_default();
+    val maximum: usize = ~(0::usize);
+    val near_end: *u8 = (maximum - 1)::*u8;
+    var output: [256]u8;
+    var response: Cookie = Cookie{name: view.view(near_end, 129),
+        value: view.view("b", 1), path: view.view(nil, 0),
+        domain: view.view(nil, 0), has_max_age: false, max_age_s: 0,
+        has_expires: false, expires_unix: 0, secure: false,
+        http_only: false, partitioned: false,
+        same_site: SAME_SITE_DEFAULT, attributes: nil, attribute_len: 0};
+    if (serialize_set_cookie(?response, ?output[0], 256, configured).status
+        != NAME_LIMIT) { ret 1; }
+
+    response.name = view.view("a", 1);
+    response.path = view.view(near_end, 1025);
+    if (serialize_set_cookie(?response, ?output[0], 256, configured).status
+        != ATTRIBUTE_VALUE_LIMIT) { ret 2; }
+    response.path = view.view(nil, 0);
+    response.attributes = near_end::usize::*Attribute;
+    response.attribute_len = maximum;
+    if (serialize_set_cookie(?response, ?output[0], 256, configured).status
+        != ATTRIBUTE_COUNT_LIMIT) { ret 3; }
+
+    var hostile: Attribute = Attribute{name: view.view(near_end, 129),
+        value: view.view(nil, 0), has_value: false};
+    response.attributes = ?hostile;
+    response.attribute_len = 1;
+    if (serialize_set_cookie(?response, ?output[0], 256, configured).status
+        != ATTRIBUTE_NAME_LIMIT) { ret 4; }
+    hostile.name = view.view("X", 1);
+    hostile.value = view.view(near_end, 1025);
+    hostile.has_value = true;
+    if (serialize_set_cookie(?response, ?output[0], 256, configured).status
+        != ATTRIBUTE_VALUE_LIMIT) { ret 5; }
+
+    var bytes: usize = 77;
+    if (array_bytes(maximum, $size_of(Attribute), ?bytes) || bytes != 77) {
+        ret 6;
+    }
+    var total: usize = maximum - 1;
+    if (!add_length(?total, 1, maximum) || total != maximum
+        || add_length(?total, 1, maximum) || total != maximum) { ret 7; }
+
+    var jar: Jar = Jar{items: (1::usize)::*Cookie, len: 0,
+        cap: maximum / $size_of(Cookie) + 1, total_bytes: 0};
+    if (parse_request(view.view("a=1", 3), ?jar, configured,
+        DUPLICATE_REJECT) != INVALID_INPUT || jar.len != 0) { ret 8; }
+    ret 0;
+}
