@@ -286,8 +286,8 @@ fun ranges_overlap(a: *u8, a_len: usize, b: *u8, b_len: usize) bool {
     if (!range_valid(a, a_len) || !range_valid(b, b_len)) { ret true; }
     val a_start: usize = a::usize;
     val b_start: usize = b::usize;
-    val a_end: usize = a_start + a_len - 1;
-    val b_end: usize = b_start + b_len - 1;
+    val a_end: usize = a_start + (a_len - 1);
+    val b_end: usize = b_start + (b_len - 1);
     ret a_start <= b_end && b_start <= a_end;
 }
 
@@ -2700,6 +2700,31 @@ test "laurel.session: every public range and array product is checked" {
     if (store.stop(store.ctx) != STORE_OK
         || !release_memory_guard(?guard_storage)
         || !release_codec_fixture(?fixture)) { ret 12; }
+    ret 0;
+}
+
+test "laurel.session: inclusive maximum overlap arithmetic never wraps" {
+    val maximum: usize = ~(0::usize);
+    val at_maximum: *u8 = maximum::*u8;
+    val before_maximum: *u8 = (maximum - 1)::*u8;
+    if (!range_valid(at_maximum, 1)
+        || !ranges_overlap(at_maximum, 1, at_maximum, 1)
+        || ranges_overlap(at_maximum, 1, before_maximum, 1)
+        || ranges_overlap(before_maximum, 1, at_maximum, 1)
+        || !ranges_overlap(before_maximum, 2, at_maximum, 1)) { ret 1; }
+
+    var slots: [1]MemorySlot;
+    var memory: MemoryStore;
+    memory.initialized = false;
+    memory.active = false;
+    if (!init_memory_store(?memory, ?slots[0], 1)) { ret 2; }
+    val store: Store = memory_store(?memory);
+    var scope: cancel.Scope;
+    if (store.aliases(store.ctx, at_maximum, 1)
+        || !store.aliases(store.ctx, (?memory)::*u8, 1)
+        || !memory_store_range_safe(?memory, at_maximum, 1)
+        || scope_overlaps(?scope, at_maximum, 1)
+        || !scope_overlaps(?scope, (?scope)::*u8, 1)) { ret 3; }
     ret 0;
 }
 
