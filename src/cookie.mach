@@ -326,14 +326,16 @@ pub fun find(jar: *Jar, name: view.View) *Cookie {
 
 fun domain_valid(domain: view.View) bool {
     if (domain.len == 0) { ret true; }
-    if (domain.data == nil || domain.data[0] == '.'
+    if (domain.data == nil || domain.len > 253 || domain.data[0] == '.'
         || domain.data[domain.len - 1] == '.') { ret false; }
     var label_start: usize = 0;
     var i: usize = 0;
     for (i <= domain.len) {
         if (i == domain.len || domain.data[i] == '.') {
             if (i == label_start || domain.data[label_start] == '-'
-                || domain.data[i - 1] == '-') { ret false; }
+                || domain.data[i - 1] == '-' || i - label_start > 63) {
+                ret false;
+            }
             label_start = i + 1;
         } or {
             val c: u8 = domain.data[i];
@@ -351,7 +353,7 @@ fun path_valid(path: view.View) bool {
     var i: usize = 0;
     for (i < path.len) {
         val c: u8 = path.data[i];
-        if (c < 0x20 || c == 0x7f || c == ';') { ret false; }
+        if (c < 0x20 || c > 0x7e || c == ';') { ret false; }
         i = i + 1;
     }
     ret true;
@@ -362,7 +364,7 @@ fun attribute_value_valid(value: view.View) bool {
     var i: usize = 0;
     for (i < value.len) {
         val c: u8 = value.data[i];
-        if (c < 0x20 || c == 0x7f || c == ';') { ret false; }
+        if (c < 0x20 || c > 0x7e || c == ';') { ret false; }
         i = i + 1;
     }
     ret true;
