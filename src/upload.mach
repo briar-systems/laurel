@@ -236,7 +236,7 @@ fun transaction_valid(value: Transaction, store: Store) bool {
 
 fun metadata_valid(value: Metadata, max_file_bytes: u64) bool {
     if (!view_valid(value.field_name, MAX_FIELD_NAME_BYTES, false) ||
-        !view_valid(value.file_name, MAX_FILE_NAME_BYTES, false) ||
+        !view_valid(value.file_name, MAX_FILE_NAME_BYTES, true) ||
         !view_valid(value.content_type, MAX_CONTENT_TYPE_BYTES, true) ||
         (value.has_length && value.declared_len > max_file_bytes)) { ret false; }
     if ((value.file_name.len == 1 && value.file_name.data[0] == '.') ||
@@ -766,7 +766,7 @@ pub fun resolve_unknown(upload: *Upload, outcome: Outcome,
 
 pub fun release(upload: *Upload) bool {
     if (upload == nil || !range_valid(upload_anchor(upload), $size_of(Upload)) ||
-        (upload.state != COMMITTED &&
+        (upload.state != READY && upload.state != COMMITTED &&
             upload.state != ABORTED)) { ret false; }
     val generation: u64 = upload.generation;
     clear(upload_anchor(upload), $size_of(Upload));
@@ -1127,5 +1127,28 @@ test "laurel.upload: physical aliases and provider mutation poison work" {
     val corrupted: Operation = write(?upload, ?input[0], 1);
     if (corrupted.status != INVALID || corrupted.outcome != OUTCOME_UNKNOWN ||
         upload.state != UNKNOWN || state.write_calls != 1) { ret 5; }
+    ret 0;
+}
+
+test "laurel.upload: idle release preserves completion generations" {
+    var state: TestStore = TestStore{pending_begin: true};
+    var upload: Upload;
+    val store: Store = test_store(?state);
+    if (!init(?upload, store, 8) || !release(?upload) ||
+        !init(?upload, store, 8)) { ret 1; }
+    var started: Operation = start(?upload,
+        test_metadata("one.txt", 0, false));
+    if (started.status != PENDING) { ret 2; }
+    val stale: u64 = started.token;
+    started = complete(?upload, started.token);
+    if (started.status != OK || abort(?upload).status != OK ||
+        !release(?upload) || !init(?upload, store, 8)) { ret 3; }
+    state.pending_begin = true;
+    started = start(?upload, test_metadata("two.txt", 0, false));
+    if (started.status != PENDING || started.token == stale ||
+        complete(?upload, stale).status != INVALID) { ret 4; }
+    started = complete(?upload, started.token);
+    if (started.status != OK || abort(?upload).status != OK ||
+        !release(?upload)) { ret 5; }
     ret 0;
 }
