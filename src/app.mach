@@ -1,10 +1,20 @@
-# assembled application contract
+# explicit application assembly and lifecycle ownership
 
+use R: std.types.result;
 use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
 use std.types.size.usize;
+use std.types.string.str;
+use std.types.view;
+use http.core.message;
+use laurel.context;
 use laurel.error;
+use laurel.handler;
+use laurel.lifecycle;
 use laurel.middleware;
 use laurel.observability;
+use laurel.provider;
 use laurel.render;
 use laurel.router;
 use laurel.security;
@@ -16,6 +26,9 @@ pub rec Limits {
     max_upload_bytes:    usize;
     max_route_params:    usize;
     handler_deadline_ns: i64;
+    max_providers:       usize;
+    max_provider_key_bytes: usize;
+    max_background_services: usize;
 }
 
 pub rec Config {
@@ -27,7 +40,10 @@ pub rec App {
     config:       Config;
     router:       *router.Router;
     middleware:   *middleware.Stack;
+    fallback:     handler.Handler;
     errors:       error.Mapper;
+    providers:    *provider.Set;
+    lifecycle:    *lifecycle.Controller;
     sessions:     *session.Manager;
     security:     *security.HeadersPolicy;
     csrf:         *security.CsrfProtector;
@@ -35,5 +51,222 @@ pub rec App {
     authenticator: *security.Authenticator;
     renderer:     *render.Renderer;
     observer:     *observability.Observer;
-    state:        ptr;
+    app_state:    ptr;
+    accepting:    bool;
+    valid:        bool;
+}
+
+pub rec Assembly {
+    config:        Config;
+    router:        *router.Router;
+    middleware:    *middleware.Stack;
+    fallback:      handler.Handler;
+    errors:        error.Mapper;
+    providers:     *provider.Set;
+    lifecycle:     *lifecycle.Controller;
+    sessions:      *session.Manager;
+    security:      *security.HeadersPolicy;
+    csrf:          *security.CsrfProtector;
+    origins:       *security.OriginPolicy;
+    authenticator: *security.Authenticator;
+    renderer:      *render.Renderer;
+    observer:      *observability.Observer;
+    app_state:     ptr;
+}
+
+pub fun validate_limits(limits: Limits) bool {
+    ret limits.max_body_bytes > 0 && limits.max_form_fields > 0 && limits.max_upload_bytes > 0
+        && limits.max_route_params > 0 && limits.handler_deadline_ns >= lifecycle.NO_DEADLINE
+        && limits.max_provider_key_bytes > 0 && limits.max_background_services > 0;
+}
+
+fun valid_stack(stack: *middleware.Stack) bool {
+    if (stack == nil || (stack.len > 0 && stack.items == nil)) { ret false; }
+    var i: usize = 0;
+    for (i < stack.len) {
+        if (stack.items[i].call == nil) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun valid_observer(observer: *observability.Observer) bool {
+    ret observer != nil && observer.start != nil && observer.finish != nil && observer.error != nil;
+}
+
+fun valid_optional_components(assembly: Assembly) bool {
+    if (assembly.sessions != nil && (assembly.sessions.store.load == nil || assembly.sessions.store.save == nil
+        || assembly.sessions.store.delete == nil || assembly.sessions.codec.encode == nil
+        || assembly.sessions.codec.decode == nil)) { ret false; }
+    if (assembly.csrf != nil && (assembly.csrf.issue == nil || assembly.csrf.verify == nil)) { ret false; }
+    if (assembly.origins != nil && assembly.origins.check == nil) { ret false; }
+    if (assembly.authenticator != nil && (assembly.authenticator.authenticate == nil
+        || assembly.authenticator.release == nil)) { ret false; }
+    if (assembly.renderer != nil && assembly.renderer.render == nil) { ret false; }
+    ret true;
+}
+
+pub fun validate_assembly(assembly: Assembly) bool {
+    if (!validate_limits(assembly.config.limits) || assembly.router == nil || !valid_stack(assembly.middleware)
+        || assembly.fallback.call == nil || assembly.errors.render == nil || assembly.security == nil
+        || !provider.validate(assembly.providers) || !lifecycle.validate(assembly.lifecycle)
+        || assembly.lifecycle.state != lifecycle.ASSEMBLED || !valid_observer(assembly.observer)
+        || !valid_optional_components(assembly)) { ret false; }
+    if (assembly.providers.len > assembly.config.limits.max_providers
+        || assembly.providers.max_key_bytes > assembly.config.limits.max_provider_key_bytes
+        || assembly.lifecycle.len > assembly.config.limits.max_background_services) { ret false; }
+    ret true;
+}
+
+pub fun assemble(app: *App, assembly: Assembly) bool {
+    if (app == nil || app.valid || !validate_assembly(assembly)) { ret false; }
+    app.config = assembly.config;
+    app.router = assembly.router;
+    app.middleware = assembly.middleware;
+    app.fallback = assembly.fallback;
+    app.errors = assembly.errors;
+    app.providers = assembly.providers;
+    app.lifecycle = assembly.lifecycle;
+    app.sessions = assembly.sessions;
+    app.security = assembly.security;
+    app.csrf = assembly.csrf;
+    app.origins = assembly.origins;
+    app.authenticator = assembly.authenticator;
+    app.renderer = assembly.renderer;
+    app.observer = assembly.observer;
+    app.app_state = assembly.app_state;
+    app.accepting = false;
+    app.valid = true;
+    ret true;
+}
+
+pub fun start(app: *App) lifecycle.Transition {
+    if (app == nil || !app.valid) {
+        ret lifecycle.Transition{status: lifecycle.TRANSITION_INVALID, state: lifecycle.FAILED,
+            component: lifecycle.NO_COMPONENT, error: view.view("invalid application", 19)};
+    }
+    app.accepting = false;
+    ret lifecycle.start(app.lifecycle);
+}
+
+pub fun poll_ready(app: *App) lifecycle.Transition {
+    if (app == nil || !app.valid) {
+        ret lifecycle.Transition{status: lifecycle.TRANSITION_INVALID, state: lifecycle.FAILED,
+            component: lifecycle.NO_COMPONENT, error: view.view("invalid application", 19)};
+    }
+    val result: lifecycle.Transition = lifecycle.poll_ready(app.lifecycle);
+    app.accepting = result.status == lifecycle.TRANSITION_OK && lifecycle.accepting(app.lifecycle);
+    ret result;
+}
+
+pub fun drain(app: *App, deadline_ns: i64) lifecycle.Transition {
+    if (app == nil || !app.valid) {
+        ret lifecycle.Transition{status: lifecycle.TRANSITION_INVALID, state: lifecycle.FAILED,
+            component: lifecycle.NO_COMPONENT, error: view.view("invalid application", 19)};
+    }
+    app.accepting = false;
+    ret lifecycle.drain(app.lifecycle, deadline_ns);
+}
+
+pub fun stop(app: *App) lifecycle.Transition {
+    if (app == nil || !app.valid) {
+        ret lifecycle.Transition{status: lifecycle.TRANSITION_INVALID, state: lifecycle.FAILED,
+            component: lifecycle.NO_COMPONENT, error: view.view("invalid application", 19)};
+    }
+    app.accepting = false;
+    ret lifecycle.stop(app.lifecycle);
+}
+
+pub fun can_accept(app: *App) bool {
+    ret app != nil && app.valid && app.accepting && lifecycle.accepting(app.lifecycle);
+}
+
+pub fun release(app: *App) bool {
+    if (app == nil || !app.valid || !lifecycle.terminal(app.lifecycle)) { ret false; }
+    app.router = nil;
+    app.middleware = nil;
+    app.providers = nil;
+    app.lifecycle = nil;
+    app.sessions = nil;
+    app.security = nil;
+    app.csrf = nil;
+    app.origins = nil;
+    app.authenticator = nil;
+    app.renderer = nil;
+    app.observer = nil;
+    app.app_state = nil;
+    app.accepting = false;
+    app.valid = false;
+    ret true;
+}
+
+fun test_lifecycle_start(context: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
+    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+}
+
+fun test_lifecycle_ready(context: ptr) lifecycle.Readiness {
+    ret lifecycle.READY_NOW;
+}
+
+fun test_lifecycle_drain(context: ptr, deadline_ns: i64) R.Result[lifecycle.CallbackStatus, view.View] {
+    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+}
+
+fun test_lifecycle_stop(context: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
+    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+}
+
+fun test_handler(context_ptr: ptr, request_context: *context.Context,
+    response: *message.Response) R.Result[u8, error.AppError] {
+    ret R.ok[u8, error.AppError](handler.RESPOND);
+}
+
+fun test_error(context_ptr: ptr, app_error: error.AppError,
+    response: *message.Response) R.Result[u8, str] {
+    ret R.ok[u8, str](1);
+}
+
+fun test_observer_start(context_ptr: ptr, event: *observability.RequestEvent) {}
+fun test_observer_finish(context_ptr: ptr, event: *observability.RequestEvent) {}
+fun test_observer_error(context_ptr: ptr, event: *observability.RequestEvent, app_error: error.AppError) {}
+
+test "laurel.app: assembly and lifecycle retain caller ownership" {
+    var providers: provider.Set;
+    if (!provider.init(?providers, nil, 0, 0, 32)) { ret 1; }
+    var lifecycle_item: lifecycle.Lifecycle = lifecycle.Lifecycle{ctx: nil, start: test_lifecycle_start,
+        ready: test_lifecycle_ready, drain: test_lifecycle_drain, stop: test_lifecycle_stop};
+    var controller: lifecycle.Controller;
+    if (!lifecycle.init(?controller, ?lifecycle_item, 1, 1)) { ret 2; }
+    var routes: router.Router;
+    var middlewares: middleware.Stack = middleware.Stack{items: nil, len: 0};
+    var headers: security.HeadersPolicy;
+    var observer: observability.Observer = observability.Observer{ctx: nil, start: test_observer_start,
+        finish: test_observer_finish, error: test_observer_error};
+    var app: App;
+    val assembly: Assembly = Assembly{
+        config: Config{limits: Limits{max_body_bytes: 1024, max_form_fields: 16, max_upload_bytes: 4096,
+            max_route_params: 8, handler_deadline_ns: lifecycle.NO_DEADLINE, max_providers: 0,
+            max_provider_key_bytes: 32, max_background_services: 1}, trust_proxy: false},
+        router: ?routes,
+        middleware: ?middlewares,
+        fallback: handler.Handler{ctx: nil, call: test_handler},
+        errors: error.Mapper{ctx: nil, render: test_error},
+        providers: ?providers,
+        lifecycle: ?controller,
+        sessions: nil,
+        security: ?headers,
+        csrf: nil,
+        origins: nil,
+        authenticator: nil,
+        renderer: nil,
+        observer: ?observer,
+        app_state: nil,
+    };
+    if (!assemble(?app, assembly) || can_accept(?app)) { ret 3; }
+    if (start(?app).status != lifecycle.TRANSITION_OK || can_accept(?app)) { ret 4; }
+    if (poll_ready(?app).status != lifecycle.TRANSITION_OK || !can_accept(?app)) { ret 5; }
+    if (drain(?app, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_OK || can_accept(?app)) { ret 6; }
+    if (stop(?app).status != lifecycle.TRANSITION_OK || !lifecycle.terminal(?controller)) { ret 7; }
+    if (!release(?app) || app.valid || app.app_state != nil) { ret 8; }
+    ret 0;
 }
