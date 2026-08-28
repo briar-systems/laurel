@@ -636,8 +636,21 @@ pub fun authenticator_valid(value: *Authenticator) bool {
         range_valid(snapshot.ctx::*u8, snapshot.context_size) &&
         snapshot.aliases_state::usize != 0 &&
         snapshot.authenticate::usize != 0 && snapshot.release::usize != 0 &&
+        !ranges_overlap(snapshot.ctx::*u8, snapshot.context_size,
+            value::*u8, $size_of(Authenticator)) &&
         !snapshot.aliases_state(snapshot.ctx, value::*u8,
             $size_of(Authenticator)) && authenticator_equal(snapshot, @value);
+}
+
+fun authentication_input_valid(authenticator: *Authenticator,
+    snapshot: Authenticator, data: *u8, len: usize) bool {
+    ret range_valid(data, len) &&
+        !ranges_overlap(data, len, authenticator::*u8,
+            $size_of(Authenticator)) &&
+        !ranges_overlap(data, len, snapshot.ctx::*u8,
+            snapshot.context_size) &&
+        !snapshot.aliases_state(snapshot.ctx, data, len) &&
+        authenticator_equal(snapshot, @authenticator);
 }
 
 fun authentication_error(kind: error.Kind, public_text: *u8,
@@ -658,11 +671,10 @@ pub fun authenticate(authenticator: *Authenticator,
     }
     val request: *message.Request = context.request(request_context);
     val snapshot: Authenticator = @authenticator;
-    if (request == nil || snapshot.aliases_state(snapshot.ctx,
+    if (request == nil || !authentication_input_valid(authenticator, snapshot,
             request::*u8, $size_of(message.Request)) ||
-        snapshot.aliases_state(snapshot.ctx, request_context::*u8,
-            $size_of(context.Context)) ||
-        !authenticator_equal(snapshot, @authenticator)) {
+        !authentication_input_valid(authenticator, snapshot,
+            request_context::*u8, $size_of(context.Context))) {
         ret R.err[ptr, error.AppError](authentication_error(error.INTERNAL,
             "internal server error"::*u8, 21,
             "authentication state overlaps request"::*u8, 37));
@@ -676,7 +688,13 @@ pub fun authenticate(authenticator: *Authenticator,
         request_context.principal != nil) {
         if (!R.is_err[ptr, error.AppError](result)) {
             val leaked: ptr = R.unwrap_ok[ptr, error.AppError](result);
-            if (leaked != nil) { snapshot.release(snapshot.ctx, leaked); }
+            if (leaked != nil && !snapshot.release(snapshot.ctx, leaked) &&
+                request_context.principal_state ==
+                    context.PRINCIPAL_AUTHENTICATING &&
+                request_context.principal == nil) {
+                request_context.principal = leaked;
+                request_context.principal_state = context.PRINCIPAL_OWNED;
+            }
         }
         if (request_context.principal_state == context.PRINCIPAL_AUTHENTICATING) {
             request_context.principal_state = context.PRINCIPAL_NONE;
@@ -707,13 +725,27 @@ pub fun release_principal(authenticator: *Authenticator,
         request_context.principal_state != context.PRINCIPAL_OWNED ||
         request_context.principal == nil) { ret false; }
     val snapshot: Authenticator = @authenticator;
+    if (!authentication_input_valid(authenticator, snapshot,
+            request_context::*u8, $size_of(context.Context))) { ret false; }
     val principal: ptr = request_context.principal;
     request_context.principal = nil;
     request_context.principal_state = context.PRINCIPAL_RELEASING;
     val released: bool = snapshot.release(snapshot.ctx, principal);
     if (!authenticator_equal(snapshot, @authenticator) ||
         request_context.principal_state != context.PRINCIPAL_RELEASING ||
-        request_context.principal != nil) { ret false; }
+        request_context.principal != nil) {
+        if (request_context.principal_state == context.PRINCIPAL_RELEASING &&
+            request_context.principal == nil) {
+            if (released) {
+                request_context.principal_state = context.PRINCIPAL_RELEASED;
+            }
+            or {
+                request_context.principal = principal;
+                request_context.principal_state = context.PRINCIPAL_OWNED;
+            }
+        }
+        ret false;
+    }
     if (!released) {
         request_context.principal = principal;
         request_context.principal_state = context.PRINCIPAL_OWNED;
