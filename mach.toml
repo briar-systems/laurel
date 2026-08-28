@@ -46,7 +46,7 @@ simd = "scalarize"
 
 [artifact.laurel]
 kind = "static"
-entry = "lib.mach"
+entry = "lib/laurel.mach"
 out = "lib/laurel"
 targets = ["*"]
 link = []
