@@ -99,8 +99,8 @@ fun range_overlap(a: *u8, a_len: usize, b: *u8, b_len: usize) bool {
     if (!range_valid(a, a_len) || !range_valid(b, b_len)) { ret true; }
     val a_start: usize = a::usize;
     val b_start: usize = b::usize;
-    val a_end: usize = a_start + a_len - 1;
-    val b_end: usize = b_start + b_len - 1;
+    val a_end: usize = a_start + (a_len - 1);
+    val b_end: usize = b_start + (b_len - 1);
     ret a_start <= b_end && b_start <= a_end;
 }
 
@@ -1302,6 +1302,25 @@ test "laurel.cookie: lookup rejects forged jars and nested ranges" {
     jar.items = (?jar)::usize::*Cookie;
     jar.cap = 1;
     if (find(?jar, view.view("a", 1)) != nil) { ret 6; }
+    ret 0;
+}
+
+test "laurel.cookie: inclusive maximum overlap arithmetic never wraps" {
+    val maximum: usize = ~(0::usize);
+    val at_maximum: *u8 = maximum::*u8;
+    val before_maximum: *u8 = (maximum - 1)::*u8;
+    if (!range_valid(at_maximum, 1)
+        || !range_overlap(at_maximum, 1, at_maximum, 1)
+        || range_overlap(at_maximum, 1, before_maximum, 1)
+        || range_overlap(before_maximum, 1, at_maximum, 1)
+        || !range_overlap(before_maximum, 2, at_maximum, 1)) { ret 1; }
+
+    var value: Cookie = Cookie{name: view.view("a", 1),
+        value: view.view("b", 1), path: view.view(nil, 0),
+        domain: view.view(nil, 0), same_site: SAME_SITE_DEFAULT,
+        attributes: nil, attribute_len: 0};
+    if (output_aliases_cookie(at_maximum, 1, ?value)
+        || !output_aliases_cookie(value.name.data, 1, ?value)) { ret 2; }
     ret 0;
 }
 
