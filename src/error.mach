@@ -1,10 +1,27 @@
-# application error classification and response mapping
+# application errors and fail-closed response mapping
 
+use A: std.allocator;
+use O: std.types.option;
 use R: std.types.result;
+use std.allocator.fixed;
+use std.chrono.time;
+use std.sync.cancel;
 use std.types.bool.bool;
 use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
 use std.types.string.str;
+use std.types.string.str_len;
+use std.types.view;
+use std.text.utf8;
+use http.core.body;
+use http.core.exchange;
+use http.core.field;
 use http.core.message;
+use http.core.method;
+use http.core.status;
+use http.core.target;
+use laurel.context;
 
 pub def Kind: u8;
 
@@ -16,34 +33,792 @@ pub val CONFLICT:     Kind = 5;
 pub val TOO_LARGE:    Kind = 6;
 pub val UNAVAILABLE:  Kind = 7;
 pub val INTERNAL:     Kind = 8;
+pub val CANCELLED:    Kind = 9;
+
+pub val MAX_PUBLIC_BYTES: usize = 512;
+pub val MAX_DETAIL_BYTES: usize = 2048;
+pub val MAX_RENDER_ERROR_BYTES: usize = 512;
 
 pub rec AppError {
-    kind:       Kind;
-    status:     u16;
-    public_msg: str;
-    detail:     str;
-    retryable:  bool;
+    kind:         Kind;
+    status:       u16;
+    public_bytes: [512]u8;
+    public_len:   usize;
+    detail_bytes: [2048]u8;
+    detail_len:   usize;
+    retryable:    bool;
 }
 
-pub fun make(kind: Kind, status: u16, public_msg: str, detail: str, retryable: bool) AppError {
-    ret AppError{
-        kind: kind,
-        status: status,
-        public_msg: public_msg,
-        detail: detail,
-        retryable: retryable,
-    };
+pub rec RenderFailure {
+    bytes: [512]u8;
+    len:   usize;
 }
 
-pub def RenderFun: fun(ptr, AppError, *message.Response) R.Result[u8, str];
+fun copy_view(input: view.View, output: *u8, capacity: usize) usize {
+    if (input.len == 0 || input.len > capacity || input.data == nil || output == nil) {
+        ret 0;
+    }
+    var i: usize = 0;
+    for (i < input.len) {
+        output[i] = input.data[i];
+        i = i + 1;
+    }
+    ret input.len;
+}
+
+fun clear_bytes(output: *u8, capacity: usize) {
+    if (output == nil) { ret; }
+    var i: usize = 0;
+    for (i < capacity) {
+        output[i] = 0;
+        i = i + 1;
+    }
+}
+
+pub fun make_view(kind: Kind, status_code: u16, public_msg: view.View,
+    detail: view.View, retryable: bool) AppError {
+    var result: AppError;
+    result.kind = kind;
+    result.status = status_code;
+    clear_bytes(?result.public_bytes[0], MAX_PUBLIC_BYTES);
+    clear_bytes(?result.detail_bytes[0], MAX_DETAIL_BYTES);
+    result.public_len = copy_view(public_msg, ?result.public_bytes[0],
+        MAX_PUBLIC_BYTES);
+    result.detail_len = copy_view(detail, ?result.detail_bytes[0],
+        MAX_DETAIL_BYTES);
+    result.retryable = retryable;
+    ret result;
+}
+
+pub fun make(kind: Kind, status_code: u16, public_msg: str,
+    detail: str, retryable: bool) AppError {
+    var public_value: view.View = view.view(nil, 0);
+    var detail_value: view.View = view.view(nil, 0);
+    if (public_msg != nil) {
+        public_value = view.view(public_msg, str_len(public_msg));
+    }
+    if (detail != nil) { detail_value = view.view(detail, str_len(detail)); }
+    ret make_view(kind, status_code, public_value, detail_value, retryable);
+}
+
+pub fun public_text(app_error: *AppError) view.View {
+    if (app_error == nil || app_error.public_len == 0
+        || app_error.public_len > MAX_PUBLIC_BYTES) { ret view.view(nil, 0); }
+    ret view.view(?app_error.public_bytes[0], app_error.public_len);
+}
+
+pub fun private_detail(app_error: *AppError) view.View {
+    if (app_error == nil || app_error.detail_len == 0
+        || app_error.detail_len > MAX_DETAIL_BYTES) { ret view.view(nil, 0); }
+    ret view.view(?app_error.detail_bytes[0], app_error.detail_len);
+}
+
+pub fun render_failure_from_view(detail: view.View) RenderFailure {
+    var result: RenderFailure;
+    clear_bytes(?result.bytes[0], MAX_RENDER_ERROR_BYTES);
+    result.len = 0;
+    result.len = copy_view(detail, ?result.bytes[0],
+        MAX_RENDER_ERROR_BYTES);
+    ret result;
+}
+
+pub fun render_failure(detail: str) RenderFailure {
+    if (detail == nil) {
+        ret render_failure_from_view(view.view(nil, 0));
+    }
+    ret render_failure_from_view(view.view(detail, str_len(detail)));
+}
+
+pub fun render_failure_view(failure: *RenderFailure) view.View {
+    if (failure == nil || failure.len == 0
+        || failure.len > MAX_RENDER_ERROR_BYTES) { ret view.view(nil, 0); }
+    ret view.view(?failure.bytes[0], failure.len);
+}
+
+pub def RenderFun: fun(ptr, AppError, *context.Context)
+    R.Result[u8, RenderFailure];
 
 pub rec Mapper {
     ctx:    ptr;
     render: RenderFun;
 }
 
-test "laurel.error: make preserves classification" {
-    val e: AppError = make(NOT_FOUND, 404, "not found", "route missing", false);
-    if (e.kind != NOT_FOUND || e.status != 404 || e.retryable) { ret 1; }
+pub rec Default {
+    limits:           message.Limits;
+    max_public_bytes: usize;
+    initialized:      bool;
+}
+
+rec DefaultBody {
+    message: view.View;
+    offset:  usize;
+    reader:  body.Reader;
+}
+
+rec ResponseSnapshot {
+    response:   *message.Response;
+    allocator:  *A.Allocator;
+    scope:      *cancel.Scope;
+    generation: u64;
+    status:     status.Status;
+    fields:     field.Fields;
+    trailers:   field.Fields;
+}
+
+fun default_status(kind: Kind) status.Status {
+    if (kind == BAD_REQUEST) { ret status.BAD_REQUEST; }
+    if (kind == UNAUTHORIZED) { ret status.UNAUTHORIZED; }
+    if (kind == FORBIDDEN) { ret status.FORBIDDEN; }
+    if (kind == NOT_FOUND) { ret status.NOT_FOUND; }
+    if (kind == CONFLICT) { ret status.CONFLICT; }
+    if (kind == TOO_LARGE) { ret status.CONTENT_TOO_LARGE; }
+    if (kind == UNAVAILABLE) { ret status.SERVICE_UNAVAILABLE; }
+    if (kind == CANCELLED) { ret status.REQUEST_TIMEOUT; }
+    ret status.INTERNAL_SERVER_ERROR;
+}
+
+fun fallback_message(kind: Kind) view.View {
+    if (kind == BAD_REQUEST) { ret view.view("bad request", 11); }
+    if (kind == UNAUTHORIZED) { ret view.view("unauthorized", 12); }
+    if (kind == FORBIDDEN) { ret view.view("forbidden", 9); }
+    if (kind == NOT_FOUND) { ret view.view("not found", 9); }
+    if (kind == CONFLICT) { ret view.view("conflict", 8); }
+    if (kind == TOO_LARGE) { ret view.view("request too large", 17); }
+    if (kind == UNAVAILABLE) { ret view.view("service unavailable", 19); }
+    if (kind == CANCELLED) { ret view.view("request cancelled", 17); }
+    ret view.view("internal server error", 21);
+}
+
+fun public_message_valid(value: view.View, limit: usize) bool {
+    if (value.len == 0 || value.len > limit || value.data == nil
+        || !utf8.validate(value.data, value.len)) { ret false; }
+    var i: usize = 0;
+    for (i < value.len) {
+        var codepoint: utf8.Codepoint;
+        val consumed: usize = utf8.decode(?value.data[i], value.len - i,
+            ?codepoint);
+        if (consumed == 0 || codepoint <= 0x1f
+            || (codepoint >= 0x7f && codepoint <= 0x9f)) { ret false; }
+        i = i + consumed;
+    }
+    ret true;
+}
+
+fun public_message(app_error: *AppError, limit: usize) view.View {
+    val supplied: view.View = public_text(app_error);
+    if (app_error.kind != INTERNAL && app_error.kind >= BAD_REQUEST
+        && app_error.kind <= CANCELLED
+        && public_message_valid(supplied, limit)) {
+        ret supplied;
+    }
+    ret fallback_message(app_error.kind);
+}
+
+fun body_read(ctx: ptr, output: *u8, capacity: usize,
+    trailers: *field.Fields) body.Progress {
+    val state: *DefaultBody = ctx::*DefaultBody;
+    if (state == nil || state.offset > state.message.len
+        || (capacity != 0 && output == nil)) {
+        ret body.failed("invalid default error body", body.REUSE_FORBIDDEN);
+    }
+    if (state.offset == state.message.len) { ret body.complete(body.REUSE_ALLOWED); }
+    var count: usize = state.message.len - state.offset;
+    if (count > capacity) { count = capacity; }
+    if (count == 0) { ret body.failed("empty default error read", body.REUSE_FORBIDDEN); }
+    var i: usize = 0;
+    for (i < count) {
+        output[i] = state.message.data[state.offset + i];
+        i = i + 1;
+    }
+    state.offset = state.offset + count;
+    ret body.data(count);
+}
+
+fun body_finish(ctx: ptr, mode: body.Mode,
+    trailers: *field.Fields) body.Progress {
+    val state: *DefaultBody = ctx::*DefaultBody;
+    if (state == nil) { ret body.failed("invalid default error body", body.REUSE_FORBIDDEN); }
+    if (mode == body.DRAIN) {
+        state.offset = state.message.len;
+        ret body.complete(body.REUSE_ALLOWED);
+    }
+    if (mode == body.REJECT) { ret body.rejected(body.REUSE_ALLOWED); }
+    if (mode == body.CANCEL) { ret body.cancelled(body.REUSE_FORBIDDEN); }
+    if (mode == body.TIMEOUT) { ret body.timed_out(body.REUSE_FORBIDDEN); }
+    ret body.failed("invalid default error finish", body.REUSE_FORBIDDEN);
+}
+
+fun body_complete(ctx: ptr, token: u64,
+    trailers: *field.Fields) body.Progress {
+    ret body.failed("default error body has no pending operation",
+        body.REUSE_FORBIDDEN);
+}
+
+fun body_release(ctx: ptr) {}
+
+fun default_valid(renderer: *Default) bool {
+    if (renderer == nil || !renderer.initialized || renderer.max_public_bytes < 21
+        || renderer.limits.response_fields.max_count < 2
+        || renderer.limits.response_fields.max_bytes < 58
+        || renderer.limits.response_fields.max_name_bytes < 13
+        || renderer.limits.response_fields.max_value_bytes < 25
+        || renderer.limits.response_body.max_chunk_bytes == 0
+        || renderer.limits.response_body.max_chunks == 0
+        || renderer.max_public_bytes > MAX_PUBLIC_BYTES
+        || renderer.max_public_bytes::u64 > renderer.limits.response_body.max_bytes) {
+        ret false;
+    }
+    val chunks: usize = renderer.max_public_bytes
+        / renderer.limits.response_body.max_chunk_bytes;
+    val remainder: usize = renderer.max_public_bytes
+        % renderer.limits.response_body.max_chunk_bytes;
+    ret chunks < renderer.limits.response_body.max_chunks
+        || (chunks == renderer.limits.response_body.max_chunks && remainder == 0);
+}
+
+fun field_limits_same(a: field.Limits, b: field.Limits) bool {
+    ret a.max_count == b.max_count && a.max_bytes == b.max_bytes
+        && a.max_name_bytes == b.max_name_bytes
+        && a.max_value_bytes == b.max_value_bytes;
+}
+
+fun fields_same(actual: *field.Fields, expected: field.Fields,
+    trailers: bool) bool {
+    if (actual == nil || actual.items != expected.items
+        || actual.len != expected.len || actual.capacity != expected.capacity
+        || actual.bytes != expected.bytes || actual.valid != expected.valid
+        || !field_limits_same(actual.limits, expected.limits)) { ret false; }
+    ret field.validate(actual, expected.limits, trailers);
+}
+
+fun response_available(request_context: *context.Context,
+    snapshot: *ResponseSnapshot) bool {
+    if (snapshot == nil || snapshot.response == nil || snapshot.allocator == nil
+        || snapshot.scope == nil || snapshot.generation == 0
+        || !context.active(request_context)
+        || request_context.alloc != snapshot.allocator
+        || request_context.scope != snapshot.scope
+        || !context.allocator_valid(snapshot.allocator)
+        || context.response(request_context) != snapshot.response) { ret false; }
+    val response: *message.Response = snapshot.response;
+    if (response.generation != snapshot.generation
+        || request_context.generation != snapshot.generation
+        || response.status != snapshot.status || response.committed
+        || response.body_kind != message.BODY_NONE
+        || response.body_reader != nil || response.body_writer != nil
+        || response.fields.capacity < 2
+        || !fields_same(?response.fields, snapshot.fields, false)
+        || !fields_same(?response.trailers, snapshot.trailers, true)) {
+        ret false;
+    }
+    ret true;
+}
+
+pub fun initialize_default(renderer: *Default, limits: message.Limits,
+    max_public_bytes: usize) bool {
+    if (renderer == nil || renderer.initialized) { ret false; }
+    renderer.limits = limits;
+    renderer.max_public_bytes = max_public_bytes;
+    renderer.initialized = true;
+    if (!default_valid(renderer)) {
+        renderer.initialized = false;
+        ret false;
+    }
+    ret true;
+}
+
+fun render_default(ctx: ptr, app_error: AppError,
+    request_context: *context.Context) R.Result[u8, RenderFailure] {
+    val renderer: *Default = ctx::*Default;
+    if (!default_valid(renderer) || !context.active(request_context)
+        || !context.allocator_valid(request_context.alloc)) {
+        ret R.err[u8, RenderFailure](render_failure(
+            "invalid default error renderer"));
+    }
+    val response: *message.Response = context.response(request_context);
+    if (response == nil || response.committed
+        || response.body_kind != message.BODY_NONE
+        || response.body_reader != nil || response.body_writer != nil
+        || response.fields.capacity < 2) {
+        ret R.err[u8, RenderFailure](render_failure(
+            "error response is unavailable"));
+    }
+    val configured: message.Limits = renderer.limits;
+    val max_public_bytes: usize = renderer.max_public_bytes;
+    var snapshot: ResponseSnapshot = ResponseSnapshot{
+        response: response, allocator: request_context.alloc,
+        scope: request_context.scope, generation: response.generation,
+        status: response.status, fields: response.fields,
+        trailers: response.trailers};
+    if (!response_available(request_context, ?snapshot)) {
+        ret R.err[u8, RenderFailure](render_failure(
+            "error response changed before allocation"));
+    }
+    val selected_message: view.View = public_message(?app_error,
+        max_public_bytes);
+    if (!response_available(request_context, ?snapshot)) {
+        ret R.err[u8, RenderFailure](render_failure(
+            "error response changed before body allocation"));
+    }
+    val body_allocation: R.Result[*DefaultBody, *u8] =
+        A.allocate[DefaultBody](snapshot.allocator, 1);
+    if (!response_available(request_context, ?snapshot)) {
+        ret R.err[u8, RenderFailure](render_failure(
+            "error response changed during body allocation"));
+    }
+    if (R.is_err[*DefaultBody, *u8](body_allocation)) {
+        ret R.err[u8, RenderFailure](render_failure(
+            "default error body allocation failed"));
+    }
+    val message_allocation: R.Result[*u8, *u8] =
+        A.allocate[u8](snapshot.allocator, selected_message.len);
+    if (!response_available(request_context, ?snapshot)) {
+        ret R.err[u8, RenderFailure](render_failure(
+            "error response changed during message allocation"));
+    }
+    if (R.is_err[*u8, *u8](message_allocation)) {
+        ret R.err[u8, RenderFailure](render_failure(
+            "default error message allocation failed"));
+    }
+    val message_bytes: *u8 = R.unwrap_ok[*u8, *u8](message_allocation);
+    var i: usize = 0;
+    for (i < selected_message.len) {
+        message_bytes[i] = selected_message.data[i];
+        i = i + 1;
+    }
+    val state: *DefaultBody = R.unwrap_ok[*DefaultBody, *u8](body_allocation);
+    state.message = view.view(message_bytes, selected_message.len);
+    state.offset = 0;
+    state.reader = body.init_reader(state::ptr, body_read, body_finish,
+        body_complete, body_release, body.OWNER_APPLICATION,
+        snapshot.generation, true, selected_message.len::u64,
+        configured.response_body, ?response.trailers,
+        snapshot.scope);
+    if (!state.reader.valid) {
+        ret R.err[u8, RenderFailure](render_failure(
+            "default error body is invalid"));
+    }
+    if (!response_available(request_context, ?snapshot)) {
+        ret R.err[u8, RenderFailure](render_failure(
+            "error response changed before initialization"));
+    }
+    if (!message.init_response(response, snapshot.fields.items,
+        snapshot.fields.capacity, snapshot.trailers.items,
+        snapshot.trailers.capacity, snapshot.generation, configured)
+        || message.set_status(response, default_status(app_error.kind))
+            != message.RESPONSE_OK
+        || message.add_field(response, field.Field{
+            name: view.view("content-type", 12),
+            value: view.view("text/plain; charset=utf-8", 25),
+            sensitive: false}) != field.ADD_OK
+        || message.add_field(response, field.Field{
+            name: view.view("cache-control", 13),
+            value: view.view("no-store", 8), sensitive: false}) != field.ADD_OK
+        || message.set_body_reader(response, ?state.reader, configured)
+            != message.RESPONSE_OK) {
+        ret R.err[u8, RenderFailure](render_failure(
+            "default error response initialization failed"));
+    }
+    ret R.ok[u8, RenderFailure](1);
+}
+
+pub fun default_mapper(renderer: *Default) Mapper {
+    if (!default_valid(renderer)) { ret Mapper{ctx: nil, render: nil}; }
+    ret Mapper{ctx: renderer::ptr, render: render_default};
+}
+
+def HostileMode: u8;
+val HOSTILE_INVALIDATE:  HostileMode = 1;
+val HOSTILE_COMMIT:      HostileMode = 2;
+val HOSTILE_BODY:        HostileMode = 3;
+val HOSTILE_CANCEL:      HostileMode = 4;
+val HOSTILE_FIELDS:      HostileMode = 5;
+val HOSTILE_IDENTITY:    HostileMode = 6;
+val HOSTILE_GENERATION:  HostileMode = 7;
+val HOSTILE_CANCEL_FAIL: HostileMode = 8;
+
+rec HostileAllocator {
+    backing:            A.Allocator;
+    exposed:            *A.Allocator;
+    response:           *message.Response;
+    exchange:           *exchange.Exchange;
+    scope:              *cancel.Scope;
+    live_body:          *body.Reader;
+    alternate_response: *message.Response;
+    replacement_fields: *field.Field;
+    limits:             message.Limits;
+    calls:              usize;
+    mutate_call:        usize;
+    mode:               HostileMode;
+}
+
+fun hostile_allocate(ctx: ptr, size: usize, align: usize) O.Option[ptr] {
+    val state: *HostileAllocator = ctx::*HostileAllocator;
+    if (state == nil) { ret O.none[ptr](); }
+    val allocated: O.Option[ptr] = state.backing.fn_allocate(
+        state.backing.ctx, size, align);
+    state.calls = state.calls + 1;
+    if (state.calls != state.mutate_call) { ret allocated; }
+    if (state.mode == HOSTILE_INVALIDATE) {
+        state.exposed.fn_allocate = nil;
+    } or (state.mode == HOSTILE_COMMIT) {
+        message.commit_response(state.response, method.GET, state.limits);
+    } or (state.mode == HOSTILE_BODY) {
+        message.set_body_reader(state.response, state.live_body, state.limits);
+    } or (state.mode == HOSTILE_CANCEL) {
+        cancel.cancel(state.scope);
+    } or (state.mode == HOSTILE_FIELDS) {
+        state.response.fields.items = state.replacement_fields;
+    } or (state.mode == HOSTILE_IDENTITY) {
+        state.exchange.response = state.alternate_response;
+    } or (state.mode == HOSTILE_GENERATION) {
+        state.response.generation = state.response.generation + 1;
+    } or (state.mode == HOSTILE_CANCEL_FAIL) {
+        cancel.cancel(state.scope);
+        ret O.none[ptr]();
+    }
+    ret allocated;
+}
+
+fun hostile_reallocate(ctx: ptr, allocation: ptr, old_size: usize,
+    new_size: usize, align: usize) O.Option[ptr] {
+    val state: *HostileAllocator = ctx::*HostileAllocator;
+    if (state == nil) { ret O.none[ptr](); }
+    ret state.backing.fn_reallocate(state.backing.ctx, allocation,
+        old_size, new_size, align);
+}
+
+fun hostile_deallocate(ctx: ptr, allocation: ptr, size: usize,
+    align: usize) i64 {
+    val state: *HostileAllocator = ctx::*HostileAllocator;
+    if (state == nil) { ret -1; }
+    ret state.backing.fn_deallocate(state.backing.ctx, allocation, size, align);
+}
+
+fun hostile_body_read(ctx: ptr, output: *u8, capacity: usize,
+    trailers: *field.Fields) body.Progress {
+    ret body.pending(1);
+}
+
+fun hostile_body_finish(ctx: ptr, mode: body.Mode,
+    trailers: *field.Fields) body.Progress {
+    ret body.pending(1);
+}
+
+fun hostile_body_complete(ctx: ptr, token: u64,
+    trailers: *field.Fields) body.Progress {
+    ret body.pending(token);
+}
+
+fun hostile_body_release(ctx: ptr) {}
+
+rec HostileFixture {
+    limits:                    message.Limits;
+    scope:                     cancel.Scope;
+    request_body:              body.Reader;
+    request_fields:            [1]field.Field;
+    request_trailers:          [1]field.Field;
+    request:                   message.Request;
+    response_fields:           [8]field.Field;
+    response_trailers:         [4]field.Field;
+    response:                  message.Response;
+    alternate_response_fields: [8]field.Field;
+    alternate_trailers:        [4]field.Field;
+    alternate_response:        message.Response;
+    replacement_fields:        [8]field.Field;
+    informationals:            [4]message.Informational;
+    exchange:                  exchange.Exchange;
+    live_body:                 body.Reader;
+    allocation_bytes:          [4096]u8;
+    allocation_state:          fixed.FixedState;
+    backing_allocator:         A.Allocator;
+    hostile:                   HostileAllocator;
+    allocator:                 A.Allocator;
+    request_context:           context.Context;
+}
+
+fun hostile_fixture_init(fixture: *HostileFixture, generation: u64,
+    mode: HostileMode, mutate_call: usize) bool {
+    if (fixture == nil || generation == 0 || mutate_call == 0) { ret false; }
+    fixture.limits = message.limits_default();
+    if (!cancel.make_root(?fixture.scope, false,
+        time.Time{sec: 0, nsec: 0})) { ret false; }
+    fixture.request_body = body.empty_reader(generation);
+    val request_fields: field.Fields = field.init(?fixture.request_fields[0],
+        1, fixture.limits.request_fields);
+    val request_trailers: field.Fields = field.init(
+        ?fixture.request_trailers[0], 1, fixture.limits.request_trailers);
+    val metadata: message.Metadata = message.Metadata{
+        version: message.version_h1(1, 1), secure: true, early_data: false,
+        peer: message.unspecified_endpoint(),
+        local: message.unspecified_endpoint(),
+        received_at: time.Time{sec: 1, nsec: 0}, has_deadline: false,
+        deadline: time.Time{sec: 0, nsec: 0}, request_index: generation};
+    if (!message.init_request(?fixture.request, method.from_kind(method.GET),
+        target.origin(view.view("/", 1), view.view("/", 1),
+            view.view(nil, 0)), metadata, request_fields, request_trailers,
+        ?fixture.request_body, generation, fixture.limits)
+        || !message.init_response(?fixture.response,
+            ?fixture.response_fields[0], 8, ?fixture.response_trailers[0], 4,
+            generation, fixture.limits)
+        || message.add_field(?fixture.response, field.Field{
+            name: view.view("x-existing", 10), value: view.view("kept", 4),
+            sensitive: false}) != field.ADD_OK
+        || !message.init_response(?fixture.alternate_response,
+            ?fixture.alternate_response_fields[0], 8,
+            ?fixture.alternate_trailers[0], 4, generation, fixture.limits)
+        || !exchange.init(?fixture.exchange, ?fixture.request,
+            ?fixture.response, ?fixture.informationals[0], 4, ?fixture.scope,
+            generation, fixture.limits)
+        || !exchange.begin(?fixture.exchange)
+        || O.is_some[*u8](fixed.make(?fixture.backing_allocator,
+            ?fixture.allocation_state, ?fixture.allocation_bytes[0], 4096))) {
+        ret false;
+    }
+    fixture.live_body = body.init_reader(nil, hostile_body_read,
+        hostile_body_finish, hostile_body_complete, hostile_body_release,
+        body.OWNER_APPLICATION, generation, true, 0,
+        fixture.limits.response_body, ?fixture.response.trailers,
+        ?fixture.scope);
+    if (!fixture.live_body.valid) { ret false; }
+    fixture.hostile = HostileAllocator{
+        backing: fixture.backing_allocator, exposed: ?fixture.allocator,
+        response: ?fixture.response, exchange: ?fixture.exchange,
+        scope: ?fixture.scope, live_body: ?fixture.live_body,
+        alternate_response: ?fixture.alternate_response,
+        replacement_fields: ?fixture.replacement_fields[0], calls: 0,
+        limits: fixture.limits, mutate_call: mutate_call, mode: mode};
+    fixture.allocator.ctx = (?fixture.hostile)::ptr;
+    fixture.allocator.fn_allocate = hostile_allocate;
+    fixture.allocator.fn_reallocate = hostile_reallocate;
+    fixture.allocator.fn_deallocate = hostile_deallocate;
+    if (!context.bind(?fixture.request_context, ?fixture.exchange,
+        context.Params{items: nil, len: 0, generation: generation}, 8,
+        ?fixture.allocator, fixture::ptr, 1, nil,
+        view.view("request", 7), 64)) { ret false; }
+    ret true;
+}
+
+fun hostile_fixture_end(fixture: *HostileFixture) bool {
+    if (fixture == nil
+        || (fixture.request_context.bound
+            && !context.unbind(?fixture.request_context, fixture::ptr, 1))) {
+        ret false;
+    }
+    if (cancel.reason(?fixture.scope) == cancel.ACTIVE
+        && !cancel.cancel(?fixture.scope)) { ret false; }
+    ret cancel.destroy(?fixture.scope);
+}
+
+fun hostile_render(fixture: *HostileFixture,
+    renderer: *Default) R.Result[u8, RenderFailure] {
+    if (fixture == nil || renderer == nil
+        || !initialize_default(renderer, fixture.limits, 128)) {
+        ret R.err[u8, RenderFailure](render_failure("invalid hostile fixture"));
+    }
+    val mapper: Mapper = default_mapper(renderer);
+    ret mapper.render(mapper.ctx, make(CONFLICT, 409,
+        "conflict", "private detail", false), ?fixture.request_context);
+}
+
+test "laurel.error: make preserves public and private classification" {
+    var app_error: AppError = make(NOT_FOUND, 404,
+        "not found", "private route name", false);
+    val public_value: view.View = public_text(?app_error);
+    val detail_value: view.View = private_detail(?app_error);
+    if (app_error.kind != NOT_FOUND || app_error.status != 404
+        || app_error.retryable || public_value.len != 9
+        || detail_value.len != 18 || public_value.data[0] != 'n'
+        || detail_value.data[0] != 'p') { ret 1; }
+    var source: [5]u8;
+    source[0] = 'h';
+    source[1] = 'e';
+    source[2] = 'l';
+    source[3] = 'l';
+    source[4] = 'o';
+    app_error = make_view(CONFLICT, 409, view.view(?source[0], 5),
+        view.view(?source[0], 5), true);
+    source[0] = 'x';
+    if (public_text(?app_error).data[0] != 'h'
+        || private_detail(?app_error).data[0] != 'h') { ret 2; }
+    ret 0;
+}
+
+test "laurel.error: public text requires RFC 3629 UTF-8 without controls" {
+    var valid: [7]u8;
+    valid[0] = 'o';
+    valid[1] = 'k';
+    valid[2] = 0xe2;
+    valid[3] = 0x82;
+    valid[4] = 0xac;
+    valid[5] = '!';
+    valid[6] = '?';
+    if (!public_message_valid(view.view(?valid[0], 7), 7)) { ret 1; }
+    var overlong: [2]u8;
+    overlong[0] = 0xc0;
+    overlong[1] = 0xaf;
+    var surrogate: [3]u8;
+    surrogate[0] = 0xed;
+    surrogate[1] = 0xa0;
+    surrogate[2] = 0x80;
+    var truncated: [2]u8;
+    truncated[0] = 0xe2;
+    truncated[1] = 0x82;
+    var continuation: [1]u8;
+    continuation[0] = 0x80;
+    var newline: [3]u8;
+    newline[0] = 'a';
+    newline[1] = 0x0a;
+    newline[2] = 'b';
+    var delete: [1]u8;
+    delete[0] = 0x7f;
+    var c1: [2]u8;
+    c1[0] = 0xc2;
+    c1[1] = 0x85;
+    if (public_message_valid(view.view(?overlong[0], 2), 8)
+        || public_message_valid(view.view(?surrogate[0], 3), 8)
+        || public_message_valid(view.view(?truncated[0], 2), 8)
+        || public_message_valid(view.view(?continuation[0], 1), 8)
+        || public_message_valid(view.view(?newline[0], 3), 8)
+        || public_message_valid(view.view(?delete[0], 1), 8)
+        || public_message_valid(view.view(?c1[0], 2), 8)) { ret 2; }
+    var invalid: AppError = make_view(CONFLICT, 409,
+        view.view(?newline[0], 3), view.view(nil, 0), false);
+    val fallback: view.View = public_message(?invalid, 8);
+    if (fallback.len != 8 || fallback.data[0] != 'c') { ret 3; }
+    var public_oversize: [513]u8;
+    var detail_oversize: [2049]u8;
+    invalid = make_view(CONFLICT, 409, view.view(?public_oversize[0], 513),
+        view.view(?detail_oversize[0], 2049), false);
+    if (public_text(?invalid).len != 0
+        || private_detail(?invalid).len != 0) { ret 4; }
+    ret 0;
+}
+
+fun hostile_sentinel_preserved(fixture: *HostileFixture) bool {
+    if (fixture == nil || fixture.response.fields.items
+        != ?fixture.response_fields[0] || fixture.response.fields.len != 1
+        || fixture.response.fields.bytes != 14) { ret false; }
+    val item: *field.Field = ?fixture.response.fields.items[0];
+    ret field.name_equal(item.name, view.view("x-existing", 10))
+        && item.value.len == 4 && item.value.data != nil
+        && item.value.data[0] == 'k';
+}
+
+test "laurel.error: allocator callbacks cannot invalidate response mapping" {
+    var invalid_fixture: HostileFixture;
+    if (!hostile_fixture_init(?invalid_fixture, 101,
+        HOSTILE_INVALIDATE, 1)) { ret 1; }
+    var invalid_renderer: Default;
+    val invalidated: R.Result[u8, RenderFailure] = hostile_render(
+        ?invalid_fixture, ?invalid_renderer);
+    if (!R.is_err[u8, RenderFailure](invalidated)
+        || invalid_fixture.hostile.calls != 1
+        || invalid_fixture.allocator.fn_allocate != nil
+        || invalid_fixture.response.committed
+        || invalid_fixture.response.body_kind != message.BODY_NONE
+        || !hostile_sentinel_preserved(?invalid_fixture)
+        || !hostile_fixture_end(?invalid_fixture)) { ret 2; }
+
+    var committed_fixture: HostileFixture;
+    if (!hostile_fixture_init(?committed_fixture, 102,
+        HOSTILE_COMMIT, 2)) { ret 3; }
+    var committed_renderer: Default;
+    val committed: R.Result[u8, RenderFailure] = hostile_render(
+        ?committed_fixture, ?committed_renderer);
+    if (!R.is_err[u8, RenderFailure](committed)
+        || committed_fixture.hostile.calls != 2
+        || !committed_fixture.response.committed
+        || committed_fixture.response.body_kind != message.BODY_NONE
+        || !hostile_sentinel_preserved(?committed_fixture)
+        || !hostile_fixture_end(?committed_fixture)) { ret 4; }
+
+    var body_fixture: HostileFixture;
+    if (!hostile_fixture_init(?body_fixture, 103,
+        HOSTILE_BODY, 2)) { ret 5; }
+    var body_renderer: Default;
+    val owned_body: R.Result[u8, RenderFailure] = hostile_render(
+        ?body_fixture, ?body_renderer);
+    if (!R.is_err[u8, RenderFailure](owned_body)
+        || body_fixture.hostile.calls != 2
+        || body_fixture.response.committed
+        || body_fixture.response.body_kind != message.BODY_READER
+        || body_fixture.response.body_reader != ?body_fixture.live_body
+        || !body.validate_reader(body_fixture.response.body_reader,
+            body_fixture.limits.response_body, 103)
+        || !hostile_sentinel_preserved(?body_fixture)
+        || !hostile_fixture_end(?body_fixture)) { ret 6; }
+
+    var cancelled_fixture: HostileFixture;
+    if (!hostile_fixture_init(?cancelled_fixture, 104,
+        HOSTILE_CANCEL, 2)) { ret 7; }
+    var cancelled_renderer: Default;
+    val cancelled: R.Result[u8, RenderFailure] = hostile_render(
+        ?cancelled_fixture, ?cancelled_renderer);
+    if (!R.is_err[u8, RenderFailure](cancelled)
+        || cancelled_fixture.hostile.calls != 2
+        || cancel.reason(?cancelled_fixture.scope) != cancel.CANCELLED
+        || cancelled_fixture.response.committed
+        || cancelled_fixture.response.body_kind != message.BODY_NONE
+        || !hostile_sentinel_preserved(?cancelled_fixture)
+        || !hostile_fixture_end(?cancelled_fixture)) { ret 8; }
+
+    var failed_fixture: HostileFixture;
+    if (!hostile_fixture_init(?failed_fixture, 108,
+        HOSTILE_CANCEL_FAIL, 2)) { ret 15; }
+    var failed_renderer: Default;
+    val failed: R.Result[u8, RenderFailure] = hostile_render(
+        ?failed_fixture, ?failed_renderer);
+    if (!R.is_err[u8, RenderFailure](failed)) { ret 16; }
+    var failed_detail: RenderFailure = R.unwrap_err[u8, RenderFailure](failed);
+    if (!view.view_eq_str(render_failure_view(?failed_detail),
+            "error response changed during message allocation")
+        || failed_fixture.hostile.calls != 2
+        || cancel.reason(?failed_fixture.scope) != cancel.CANCELLED
+        || failed_fixture.response.committed
+        || failed_fixture.response.body_kind != message.BODY_NONE
+        || !hostile_sentinel_preserved(?failed_fixture)
+        || !hostile_fixture_end(?failed_fixture)) { ret 17; }
+
+    var fields_fixture: HostileFixture;
+    if (!hostile_fixture_init(?fields_fixture, 105,
+        HOSTILE_FIELDS, 2)) { ret 9; }
+    var fields_renderer: Default;
+    val changed_fields: R.Result[u8, RenderFailure] = hostile_render(
+        ?fields_fixture, ?fields_renderer);
+    if (!R.is_err[u8, RenderFailure](changed_fields)
+        || fields_fixture.hostile.calls != 2
+        || fields_fixture.response.fields.items
+            != ?fields_fixture.replacement_fields[0]
+        || fields_fixture.response.fields.len != 1
+        || fields_fixture.response.body_kind != message.BODY_NONE
+        || !hostile_fixture_end(?fields_fixture)) { ret 10; }
+
+    var identity_fixture: HostileFixture;
+    if (!hostile_fixture_init(?identity_fixture, 106,
+        HOSTILE_IDENTITY, 2)) { ret 11; }
+    var identity_renderer: Default;
+    val changed_identity: R.Result[u8, RenderFailure] = hostile_render(
+        ?identity_fixture, ?identity_renderer);
+    if (!R.is_err[u8, RenderFailure](changed_identity)
+        || identity_fixture.hostile.calls != 2
+        || identity_fixture.exchange.response
+            != ?identity_fixture.alternate_response
+        || identity_fixture.alternate_response.body_kind != message.BODY_NONE
+        || !hostile_sentinel_preserved(?identity_fixture)
+        || !hostile_fixture_end(?identity_fixture)) { ret 12; }
+
+    var generation_fixture: HostileFixture;
+    if (!hostile_fixture_init(?generation_fixture, 107,
+        HOSTILE_GENERATION, 2)) { ret 13; }
+    var generation_renderer: Default;
+    val changed_generation: R.Result[u8, RenderFailure] = hostile_render(
+        ?generation_fixture, ?generation_renderer);
+    if (!R.is_err[u8, RenderFailure](changed_generation)
+        || generation_fixture.hostile.calls != 2
+        || generation_fixture.response.generation != 108
+        || generation_fixture.response.body_kind != message.BODY_NONE
+        || !hostile_sentinel_preserved(?generation_fixture)
+        || !hostile_fixture_end(?generation_fixture)) { ret 14; }
     ret 0;
 }

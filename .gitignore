@@ -2,6 +2,7 @@ out/
 dep/
 .DS_Store
 .claude/
+doc/api/
 *.swp
 *.swo
 *~

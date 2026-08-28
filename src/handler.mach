@@ -1,14 +1,13 @@
 # application handler contract
 
 use R: std.types.result;
-use http.core.message;
 use laurel.context;
 use laurel.error;
 
 pub val RESPOND: u8 = 1;
 pub val NEXT:    u8 = 2;
 
-pub def HandlerFun: fun(ptr, *context.Context, *message.Response) R.Result[u8, error.AppError];
+pub def HandlerFun: fun(ptr, *context.Context) R.Result[u8, error.AppError];
 
 pub rec Handler {
     ctx:  ptr;
