@@ -116,8 +116,10 @@ fun valid_observer(observer: *observability.Observer) bool {
 }
 
 fun valid_optional_components(assembly: Assembly) bool {
-    if (assembly.sessions != nil && (assembly.sessions.store.load == nil || assembly.sessions.store.save == nil
-        || assembly.sessions.store.delete == nil || assembly.sessions.codec.encode == nil
+    if (assembly.sessions != nil && (assembly.sessions.store.aliases == nil
+        || assembly.sessions.store.load == nil || assembly.sessions.store.save == nil
+        || assembly.sessions.store.delete == nil || assembly.sessions.store.replace == nil
+        || assembly.sessions.store.reap == nil || assembly.sessions.codec.encode == nil
         || assembly.sessions.codec.decode == nil)) { ret false; }
     if (assembly.csrf != nil && (assembly.csrf.issue == nil || assembly.csrf.verify == nil)) { ret false; }
     if (assembly.origins != nil && assembly.origins.check == nil) { ret false; }
