@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-28
+
+### Added
+
+- Reusable render body and media storage through explicit release.
+- Structured request events covering start, finish, errors, cancellation, route,
+  status, bytes, and duration, with exactly one start and one terminal event.
+- A closed label vocabulary with per-name value domains, fixed label cardinality,
+  and explicit reject or elide policies for bounded request fields.
+- Middleware outcome and exchange completion mapping onto measured terminal
+  events.
+- An in-process harness that drives requests, fragmented and suspending request
+  bodies, streamed responses, middleware, providers, sessions, admission, and
+  lifecycle without a socket, runtime, or HTTP client.
+- Caller-owned, overlap-checked harness storage for response fields, trailers,
+  informationals, the request arena, and the response capture buffer.
+- Case and suite execution against every wire version the HTTP dependency
+  exposes, with a first-failure report.
+
 ## [0.3.0] - 2026-08-28
 
 ### Added
@@ -62,20 +81,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and comments, with caller-clocked heartbeats.
 - WebSocket channels over the `mach-http` codecs with no transport ownership and
   an explicit close code and reason policy.
-- Reusable render body and media storage through explicit release.
-- Structured request events covering start, finish, errors, cancellation, route,
-  status, bytes, and duration, with exactly one start and one terminal event.
-- A closed label vocabulary with per-name value domains, fixed label cardinality,
-  and explicit reject or elide policies for bounded request fields.
-- Middleware outcome and exchange completion mapping onto measured terminal
-  events.
-- An in-process harness that drives requests, fragmented and suspending request
-  bodies, streamed responses, middleware, providers, sessions, admission, and
-  lifecycle without a socket, runtime, or HTTP client.
-- Caller-owned, overlap-checked harness storage for response fields, trailers,
-  informationals, the request arena, and the response capture buffer.
-- Case and suite execution against every wire version the HTTP dependency
-  exposes, with a first-failure report.
 
 ### Changed
 
