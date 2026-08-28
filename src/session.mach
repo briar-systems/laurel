@@ -1102,7 +1102,12 @@ fun encode_protected(ctx: ptr, value: *Session, context_value: view.View,
     }
     val claimed: GuardStatus = codec.nonce_guard.claim(codec.nonce_guard.ctx,
         key_id, ?claim_token[0], 12, nonce_deadline, now);
+    val claim_unchanged: bool = public_equal(?claim_token[0], ?staged[8], 12);
     clear_public(?claim_token[0], 12);
+    if (!claim_unchanged) {
+        ct.zeroize(?secret_key[0], 32);
+        ret codec_result(CODEC_INVALID);
+    }
     if (claimed != GUARD_OK) {
         ct.zeroize(?secret_key[0], 32);
         ret codec_result(map_guard(claimed, true));
@@ -1615,7 +1620,7 @@ fun duplicate_generation_rejected(algorithm: Algorithm) bool {
     ret !init_key_ring(?ring, ?items[0], 2, 1, 1) && !ring.active;
 }
 
-fun mutating_guard_round_trip(algorithm: Algorithm) bool {
+fun mutating_guard_rejected(algorithm: Algorithm) bool {
     var fixture: CodecFixture;
     if (!init_codec_fixture(?fixture, algorithm, REPLAY_ALLOW, 8, 8)
         || !release_protected_codec(?fixture.protected)) { ret false; }
@@ -1632,15 +1637,34 @@ fun mutating_guard_round_trip(algorithm: Algorithm) bool {
     fixture.entropy.repeat = true;
     var value: Session = sample_session();
     var token: [4096]u8;
+    token[0] = 0xa5;
+    val encoded: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
+        ?value, view.view("binding", 7), 100, ?token[0], 4096);
+    var expected_nonce: [12]u8;
+    var i: usize = 0;
+    for (i < 12) {
+        expected_nonce[i] = 1 + i::u8;
+        i = i + 1;
+    }
+    if (encoded.status != CODEC_INVALID || token[0] != 0xa5
+        || mutation.mutations != 1
+        || mutation.inner.claim(mutation.inner.ctx, 1,
+            ?expected_nonce[0], 12, 3005, 100) != GUARD_SEEN) { ret false; }
+    ret release_codec_fixture(?fixture);
+}
+
+fun rotation_round_trip(algorithm: Algorithm) bool {
+    var fixture: CodecFixture;
+    if (!init_codec_fixture(?fixture, algorithm, REPLAY_ALLOW, 8, 8)) {
+        ret false;
+    }
+    fixture.entropy.seed = 1;
+    fixture.entropy.repeat = true;
+    var value: Session = sample_session();
+    var token: [4096]u8;
     val first: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
         ?value, view.view("binding", 7), 100, ?token[0], 4096);
-    if (first.status != CODEC_OK) { ret false; }
-    var raw: [3072]u8;
-    val first_raw_len: usize = base64.decode(?token[0], first.written,
-        ?raw[0], 3072);
-    if (first_raw_len == 0
-        || mutation.inner.claim(mutation.inner.ctx, 1, ?raw[8], 12,
-            3005, 100) != GUARD_SEEN) { ret false; }
+    if (first.status != CODEC_OK || first.key_id != 1) { ret false; }
     var id_output: [64]u8;
     var data_output: [2048]u8;
     var decoded: Session;
@@ -1651,15 +1675,9 @@ fun mutating_guard_round_trip(algorithm: Algorithm) bool {
     val second: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
         ?value, view.view("binding", 7), 1100, ?token[0], 4096);
     if (second.status != CODEC_OK || second.key_id != 2) { ret false; }
-    val second_raw_len: usize = base64.decode(?token[0], second.written,
-        ?raw[0], 3072);
-    if (second_raw_len == 0
-        || mutation.inner.claim(mutation.inner.ctx, 2, ?raw[8], 12,
-            5005, 1100) != GUARD_SEEN
-        || fixture.codec.decode(fixture.codec.ctx, ?token[0], second.written,
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], second.written,
             view.view("binding", 7), 1100, ?id_output[0], 64,
-            ?data_output[0], 2048, ?decoded).status != CODEC_OK
-        || mutation.mutations != 2) { ret false; }
+            ?data_output[0], 2048, ?decoded).status != CODEC_OK) { ret false; }
     ret release_codec_fixture(?fixture);
 }
 
@@ -1991,8 +2009,10 @@ test "laurel.session: guard horizons and regeneration ownership fail closed" {
 test "laurel.session: key and guard domains survive hostile providers" {
     if (!duplicate_generation_rejected(AES_256_GCM)
         || !duplicate_generation_rejected(CHACHA20_POLY1305)) { ret 1; }
-    if (!mutating_guard_round_trip(AES_256_GCM)) { ret 2; }
-    if (!mutating_guard_round_trip(CHACHA20_POLY1305)) { ret 3; }
+    if (!mutating_guard_rejected(AES_256_GCM)
+        || !rotation_round_trip(AES_256_GCM)) { ret 2; }
+    if (!mutating_guard_rejected(CHACHA20_POLY1305)
+        || !rotation_round_trip(CHACHA20_POLY1305)) { ret 3; }
 
     var fixture: CodecFixture;
     if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_REJECT, 8, 8)) {
