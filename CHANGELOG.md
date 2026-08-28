@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Caller-owned application composition and deterministic service lifecycle.
+- Atomic bounded request admission with graceful drain ownership.
+- Generation-bound request contexts over exact `mach-http` exchanges and cancellation scopes.
+
+### Changed
+
+- Pinned `mach-std` to v0.29.0 and `mach-http` to v0.2.1.
+- Routed handler response ownership through the bound request context.
+
 ## [0.2.0] - 2026-08-27
 
 ### Changed
