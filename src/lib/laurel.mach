@@ -11,6 +11,7 @@ fwd laurel.error;
 fwd laurel.session;
 fwd laurel.security;
 fwd laurel.form;
+fwd laurel.multipart;
 fwd laurel.upload;
 fwd laurel.render;
 fwd laurel.observability;
