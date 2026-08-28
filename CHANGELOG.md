@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Kept CSRF key material off the public application surface. `Protector` now
+  names its ring with an opaque `csrf.Handle` instead of a `*KeyRing`, so
+  `*app.App` and `*csrf.Protector` erase to the untyped `ptr` and a server
+  integration can carry an application as handler state again.
+- Bounded module-private ring registration with generation-checked handles, so
+  a handle retained across release never resolves and a reissued slot cannot
+  revive it.
+
+### Added
+
+- A compile-time probe asserting every public type erases to `ptr`, and that
+  key-owning types keep refusing to.
+
 ## [0.4.0] - 2026-08-28
 
 ### Added
