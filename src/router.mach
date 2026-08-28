@@ -225,6 +225,40 @@ fun same(a: view.View, b: view.View) bool {
     ret true;
 }
 
+fun typed_method_valid(route_method: Method, max_bytes: usize) bool {
+    if (route_method.any) {
+        ret route_method.value.kind == 0 && route_method.value.token.len == 0;
+    }
+    ret method.valid(route_method.value, max_bytes);
+}
+
+fun typed_host_valid(host: Host) bool {
+    if (host.kind == HOST_ANY) { ret host.pattern.len == 0; }
+    ret (host.kind == HOST_EXACT || host.kind == HOST_SUFFIX)
+        && host.pattern.len != 0 && host.pattern.data != nil;
+}
+
+fun typed_path_valid(route_path: Path) bool {
+    if (route_path.kind == PATH_PATTERN) {
+        ret route_path.pattern.len != 0 && route_path.pattern.data != nil
+            && !same(route_path.pattern, view.view("*", 1));
+    }
+    ret route_path.kind == PATH_NON_PATH
+        && same(route_path.pattern, view.view("*", 1));
+}
+
+fun typed_parameters_valid(route: *Route) bool {
+    if (route.parameter_len != 0 && route.parameters == nil) { ret false; }
+    var i: usize = 0;
+    for (i < route.parameter_len) {
+        val parameter: *Parameter = ?route.parameters[i];
+        if (parameter.decoder.call == nil || parameter.decoder.kind < VALUE_TEXT
+            || parameter.decoder.kind > VALUE_CUSTOM) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
 fun bridge_handler(ctx: ptr, request: *message.Request,
     response: *message.Response, params: *http_router.Params) R.Result[u8, str] {
     ret R.ok[u8, str](http_router.HANDLER_NEXT);
@@ -352,6 +386,27 @@ pub fun compile(router: *Router, routes: *Route, route_len: usize,
             ret compile_result(COMPILE_HANDLER, i, http_router.NO_INDEX, 0, 0, 0,
                 route_error(error.INTERNAL, 500, "route configuration failed",
                     "route handler is missing", false));
+        }
+        if (!typed_method_valid(route.method,
+            configured.matcher.max_method_bytes)) {
+            ret compile_result(COMPILE_METHOD, i, http_router.NO_INDEX, 0, 0, 0,
+                route_error(error.BAD_REQUEST, 400, "invalid route method",
+                    "typed method has contradictory or invalid state", false));
+        }
+        if (!typed_host_valid(route.host)) {
+            ret compile_result(COMPILE_HOST, i, http_router.NO_INDEX, 0, 0, 0,
+                route_error(error.BAD_REQUEST, 400, "invalid route host",
+                    "typed host has contradictory or invalid state", false));
+        }
+        if (!typed_path_valid(route.path)) {
+            ret compile_result(COMPILE_PATH, i, http_router.NO_INDEX, 0, 0, 0,
+                route_error(error.BAD_REQUEST, 400, "invalid route path",
+                    "typed path has contradictory or invalid state", false));
+        }
+        if (!typed_parameters_valid(route)) {
+            ret compile_result(COMPILE_PARAMETER, i, http_router.NO_INDEX, 0, 0, 0,
+                route_error(error.BAD_REQUEST, 400, "invalid route parameter",
+                    "typed parameter declaration is invalid", false));
         }
         var route_method: view.View = view.view("*", 1);
         if (!route.method.any) { route_method = route.method.value.token; }
