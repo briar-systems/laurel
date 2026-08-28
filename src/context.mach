@@ -89,6 +89,23 @@ fun exchange_matches(context: *Context) bool {
     ret true;
 }
 
+fun clear(context: *Context) {
+    context.exchange = nil;
+    context.generation = 0;
+    context.scope = nil;
+    context.params = Params{items: nil, len: 0, generation: 0};
+    context.param_limit = 0;
+    context.alloc = nil;
+    context.app_owner = nil;
+    context.app_generation = 0;
+    context.app_state = nil;
+    context.principal = nil;
+    context.session = nil;
+    context.request_id = view.view(nil, 0);
+    context.request_id_limit = 0;
+    context.bound = false;
+}
+
 pub fun bind(context: *Context, exchange_ptr: *exchange.Exchange, params: Params,
     param_limit: usize, allocator: *A.Allocator, app_owner: ptr, app_generation: u64,
     app_state: ptr, request_id: view.View, request_id_limit: usize) bool {
@@ -115,7 +132,11 @@ pub fun bind(context: *Context, exchange_ptr: *exchange.Exchange, params: Params
     context.request_id = request_id;
     context.request_id_limit = request_id_limit;
     context.bound = true;
-    ret exchange_matches(context) && cancel.reason(context.scope) == cancel.ACTIVE;
+    if (!exchange_matches(context) || cancel.reason(context.scope) != cancel.ACTIVE) {
+        clear(context);
+        ret false;
+    }
+    ret true;
 }
 
 pub fun owned_by(context: *Context, app_owner: ptr, app_generation: u64) bool {
@@ -170,20 +191,7 @@ pub fun find_param(context: *Context, name: view.View) *Param {
 
 pub fun unbind(context: *Context, app_owner: ptr, app_generation: u64) bool {
     if (!owned_by(context, app_owner, app_generation)) { ret false; }
-    context.exchange = nil;
-    context.generation = 0;
-    context.scope = nil;
-    context.params = Params{items: nil, len: 0, generation: 0};
-    context.param_limit = 0;
-    context.alloc = nil;
-    context.app_owner = nil;
-    context.app_generation = 0;
-    context.app_state = nil;
-    context.principal = nil;
-    context.session = nil;
-    context.request_id = view.view(nil, 0);
-    context.request_id_limit = 0;
-    context.bound = false;
+    clear(context);
     ret true;
 }
 
