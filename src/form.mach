@@ -161,6 +161,15 @@ fun clear_bytes(storage: Storage, count: usize) {
     }
 }
 
+fun clear(data: *u8, len: usize) {
+    if (data == nil) { ret; }
+    var i: usize = 0;
+    for (i < len) {
+        data[i] = 0;
+        i = i + 1;
+    }
+}
+
 fun app_error(kind: error.Kind, status: u16, public_text: str,
     detail: str) error.AppError {
     ret error.make(kind, status, public_text, detail, false);
@@ -168,7 +177,7 @@ fun app_error(kind: error.Kind, status: u16, public_text: str,
 
 fun operation(decoder: *UrlEncoded, status: Status,
     app_error_value: error.AppError) Operation {
-    var form: Form;
+    var form: Form = Form{fields: nil, len: 0, bytes: 0};
     if (decoder != nil && status == COMPLETE) {
         form = Form{fields: decoder.storage.fields, len: decoder.field_count,
             bytes: decoder.stored_bytes};
@@ -178,7 +187,14 @@ fun operation(decoder: *UrlEncoded, status: Status,
 }
 
 fun pending(token: u64) Operation {
-    ret Operation{status: PENDING, token: token};
+    ret Operation{status: PENDING, token: token,
+        form: Form{fields: nil, len: 0, bytes: 0},
+        app_error: error.AppError{}};
+}
+
+fun invalid_operation(detail: str) Operation {
+    ret operation(nil, INVALID, app_error(error.INTERNAL, 500,
+        "internal server error", detail));
 }
 
 fun failed(decoder: *UrlEncoded, status: Status, kind: error.Kind,
@@ -214,6 +230,7 @@ pub fun init_urlencoded(decoder: *UrlEncoded, storage: Storage,
         decoder.state == ACTIVE) { ret false; }
     clear_fields(storage, storage.field_capacity);
     clear_bytes(storage, storage.byte_capacity);
+    clear(decoder::*u8, $size_of(UrlEncoded));
     decoder.storage = storage;
     decoder.limits = limits;
     decoder.state = ACTIVE;
@@ -229,6 +246,68 @@ pub fun init_urlencoded(decoder: *UrlEncoded, storage: Storage,
     decoder.percent_phase = 0;
     decoder.percent_high = 0;
     ret true;
+}
+
+fun stored_fields_valid(decoder: *UrlEncoded) bool {
+    var cursor: usize = 0;
+    var i: usize = 0;
+    for (i < decoder.field_count) {
+        val current: Field = decoder.storage.fields[i];
+        if (current.name.len == 0 ||
+            current.name.data::usize !=
+                decoder.storage.bytes::usize + cursor ||
+            current.name.len > decoder.stored_bytes - cursor) { ret false; }
+        cursor = cursor + current.name.len;
+        if (current.value.len == 0) {
+            if (current.value.data != nil) { ret false; }
+        } or {
+            if (current.value.data::usize !=
+                    decoder.storage.bytes::usize + cursor ||
+                current.value.len > decoder.stored_bytes - cursor) {
+                ret false;
+            }
+            cursor = cursor + current.value.len;
+        }
+        i = i + 1;
+    }
+    ret cursor == decoder.field_start;
+}
+
+fun decoder_valid(decoder: *UrlEncoded) bool {
+    if (decoder == nil ||
+        !range_valid(decoder::*u8, $size_of(UrlEncoded)) ||
+        !limits_valid(decoder.limits) ||
+        !storage_valid(decoder, decoder.storage, decoder.limits) ||
+        decoder.state < ACTIVE || decoder.state > FAILED_STATE ||
+        decoder.total_bytes > decoder.limits.max_bytes ||
+        decoder.stored_bytes > decoder.limits.max_temporary_bytes ||
+        decoder.stored_bytes > decoder.storage.byte_capacity ||
+        decoder.field_count > decoder.limits.max_fields ||
+        decoder.field_count > decoder.storage.field_capacity ||
+        decoder.field_start > decoder.stored_bytes ||
+        decoder.name_len > decoder.limits.max_name_bytes ||
+        decoder.value_len > decoder.limits.max_value_bytes ||
+        decoder.name_len > decoder.stored_bytes - decoder.field_start ||
+        decoder.value_len > decoder.stored_bytes - decoder.field_start -
+            decoder.name_len ||
+        decoder.field_start + decoder.name_len + decoder.value_len !=
+            decoder.stored_bytes || decoder.percent_phase > 2 ||
+        decoder.percent_phase == 1 && decoder.percent_high != 0 ||
+        decoder.percent_phase == 2 && decoder.percent_high & 0x0f != 0 ||
+        !stored_fields_valid(decoder)) { ret false; }
+    if (decoder.state == COMPLETE_STATE || decoder.state == FAILED_STATE) {
+        ret !decoder.field_active && !decoder.in_value &&
+            !decoder.after_separator && decoder.percent_phase == 0 &&
+            decoder.percent_high == 0 && decoder.name_len == 0 &&
+            decoder.value_len == 0;
+    }
+    if (!decoder.field_active) {
+        ret !decoder.in_value && decoder.name_len == 0 &&
+            decoder.value_len == 0 && decoder.percent_phase == 0 &&
+            decoder.percent_high == 0;
+    }
+    ret (!decoder.in_value || decoder.name_len != 0) &&
+        !decoder.after_separator;
 }
 
 fun input_disjoint(decoder: *UrlEncoded, input: *u8, len: usize) bool {
@@ -281,9 +360,12 @@ fun finish_field(decoder: *UrlEncoded) Status {
         decoder.field_count >= decoder.storage.field_capacity) { ret LIMIT; }
     val name: view.View = view.view(
         ?decoder.storage.bytes[decoder.field_start], decoder.name_len);
-    val value: view.View = view.view(
-        ?decoder.storage.bytes[decoder.field_start + decoder.name_len],
-        decoder.value_len);
+    var value: view.View = view.view(nil, 0);
+    if (decoder.value_len != 0) {
+        value = view.view(
+            ?decoder.storage.bytes[decoder.field_start + decoder.name_len],
+            decoder.value_len);
+    }
     if (!utf8.validate(name.data, name.len) ||
         !utf8.validate(value.data, value.len)) { ret MALFORMED; }
     decoder.storage.fields[decoder.field_count] = Field{
@@ -299,9 +381,10 @@ fun finish_field(decoder: *UrlEncoded) Status {
 
 pub fun feed_urlencoded(decoder: *UrlEncoded, input: *u8,
     len: usize) Operation {
-    if (decoder == nil || decoder.state != ACTIVE ||
-        !storage_valid(decoder, decoder.storage, decoder.limits) ||
-        !input_disjoint(decoder, input, len)) {
+    if (!decoder_valid(decoder) || decoder.state != ACTIVE) {
+        ret invalid_operation("invalid form decoder state");
+    }
+    if (!input_disjoint(decoder, input, len)) {
         ret failed(decoder, INVALID, error.INTERNAL, 500,
             "internal server error", "invalid form decoder ownership");
     }
@@ -377,10 +460,8 @@ pub fun feed_urlencoded(decoder: *UrlEncoded, input: *u8,
 }
 
 pub fun finish_urlencoded(decoder: *UrlEncoded) Operation {
-    if (decoder == nil || decoder.state != ACTIVE ||
-        !storage_valid(decoder, decoder.storage, decoder.limits)) {
-        ret failed(decoder, INVALID, error.INTERNAL, 500,
-            "internal server error", "invalid form decoder state");
+    if (!decoder_valid(decoder) || decoder.state != ACTIVE) {
+        ret invalid_operation("invalid form decoder state");
     }
     if (decoder.percent_phase != 0 || decoder.after_separator) {
         ret failed(decoder, MALFORMED, error.BAD_REQUEST, 400,
@@ -402,10 +483,8 @@ pub fun finish_urlencoded(decoder: *UrlEncoded) Operation {
 }
 
 pub fun result(decoder: *UrlEncoded) Operation {
-    if (decoder == nil || decoder.state != COMPLETE_STATE ||
-        !storage_valid(decoder, decoder.storage, decoder.limits)) {
-        ret operation(decoder, INVALID, app_error(error.INTERNAL, 500,
-            "internal server error", "form result is not complete"));
+    if (!decoder_valid(decoder) || decoder.state != COMPLETE_STATE) {
+        ret invalid_operation("form result is not complete");
     }
     ret operation(decoder, COMPLETE, error.AppError{});
 }
@@ -415,7 +494,7 @@ fun parser_components_valid(owner: *u8, decoder: *UrlEncoded,
     if (!range_valid(owner, $size_of(BodyParser)) || decoder == nil ||
         reader == nil || !range_valid(reader::*u8, $size_of(body.Reader)) ||
         !range_valid(read_buffer, read_capacity) || read_capacity == 0 ||
-        !storage_valid(decoder, decoder.storage, decoder.limits) ||
+        !decoder_valid(decoder) ||
         !body.validate_reader(reader, reader.limits, reader.generation)) {
         ret false;
     }
@@ -424,6 +503,10 @@ fun parser_components_valid(owner: *u8, decoder: *UrlEncoded,
             ?field_bytes)) { ret false; }
     ret !overlap(owner, $size_of(BodyParser), decoder::*u8,
             $size_of(UrlEncoded)) &&
+        !overlap(owner, $size_of(BodyParser),
+            decoder.storage.fields::*u8, field_bytes) &&
+        !overlap(owner, $size_of(BodyParser), decoder.storage.bytes,
+            decoder.storage.byte_capacity) &&
         !overlap(owner, $size_of(BodyParser), reader::*u8,
             $size_of(body.Reader)) &&
         !overlap(owner, $size_of(BodyParser), read_buffer, read_capacity) &&
@@ -444,14 +527,18 @@ fun parser_components_valid(owner: *u8, decoder: *UrlEncoded,
 }
 
 fun parser_storage_valid(parser: *BodyParser) bool {
-    ret parser != nil && parser.decoder != nil && parser.reader != nil &&
+    ret parser != nil && range_valid(parser::*u8, $size_of(BodyParser)) &&
+        parser.decoder != nil && parser.reader != nil &&
+        (!parser.pending_settle || parser.pending_token != 0) &&
+        (!parser.pending_settle || parser.failure_status != 0) &&
         parser_components_valid(parser::*u8, parser.decoder, parser.reader,
             parser.read_buffer, parser.read_capacity);
 }
 
 pub fun init_body(parser: *BodyParser, decoder: *UrlEncoded,
     reader: *body.Reader, read_buffer: *u8, read_capacity: usize) bool {
-    if (parser == nil || parser.active ||
+    if (parser == nil || !range_valid(parser::*u8, $size_of(BodyParser)) ||
+        parser.active ||
         !parser_components_valid(parser::*u8, decoder, reader, read_buffer,
             read_capacity) || decoder.state != ACTIVE ||
         (reader.has_length &&
@@ -662,6 +749,43 @@ test "laurel.form: limits and physical ownership fail before publication" {
     ret 0;
 }
 
+test "laurel.form: empty values at the arena edge use an empty view" {
+    var fields: [1]Field;
+    var bytes: [8]u8;
+    var decoder: UrlEncoded;
+    val limits: Limits = Limits{max_bytes: 9, max_fields: 1,
+        max_name_bytes: 8, max_value_bytes: 1, max_temporary_bytes: 8};
+    if (!init_urlencoded(?decoder, Storage{fields: ?fields[0],
+            field_capacity: 1, bytes: ?bytes[0], byte_capacity: 8}, limits) ||
+        feed_urlencoded(?decoder, "abcdefgh="::*u8, 9).status != MORE) {
+        ret 1;
+    }
+    val done: Operation = finish_urlencoded(?decoder);
+    if (done.status != COMPLETE || done.form.len != 1 ||
+        !view_equal(done.form.fields[0].name, "abcdefgh") ||
+        done.form.fields[0].value.data != nil ||
+        done.form.fields[0].value.len != 0) { ret 2; }
+    ret 0;
+}
+
+test "laurel.form: corrupted counters fail without unsafe cleanup" {
+    var fields: [1]Field;
+    var bytes: [8]u8;
+    var decoder: UrlEncoded;
+    val limits: Limits = Limits{max_bytes: 8, max_fields: 1,
+        max_name_bytes: 4, max_value_bytes: 4, max_temporary_bytes: 8};
+    if (!init_urlencoded(?decoder, Storage{fields: ?fields[0],
+            field_capacity: 1, bytes: ?bytes[0], byte_capacity: 8}, limits) ||
+        feed_urlencoded(?decoder, "a=b"::*u8, 3).status != MORE) { ret 1; }
+    decoder.total_bytes = 9;
+    val rejected: Operation = feed_urlencoded(?decoder, nil, 0);
+    if (rejected.status != INVALID || rejected.token != 0 ||
+        rejected.form.fields != nil || rejected.form.len != 0 ||
+        rejected.form.bytes != 0 || bytes[0] != 'a' || bytes[1] != 'b' ||
+        decoder.state != ACTIVE) { ret 2; }
+    ret 0;
+}
+
 rec TestBody {
     input: view.View;
     offset: usize;
@@ -753,6 +877,29 @@ fun make_reader(state: *TestBody, scope: *cancel.Scope,
         false, 0, body.limits(max_bytes, 2, 64), trailers, scope);
 }
 
+test "laurel.form: body state cannot overlap result storage" {
+    var bytes: [32]u8;
+    var decoder: UrlEncoded;
+    var parser: BodyParser;
+    val limits: Limits = Limits{max_bytes: 8, max_fields: 1,
+        max_name_bytes: 4, max_value_bytes: 4, max_temporary_bytes: 32};
+    if (!init_urlencoded(?decoder, Storage{
+            fields: (?parser)::*Field, field_capacity: 1,
+            bytes: ?bytes[0], byte_capacity: 32}, limits)) { ret 1; }
+    var scope: cancel.Scope;
+    if (!cancel.make_root(?scope, false, time.Time{})) { ret 2; }
+    var trailers: field.Fields = field.init(nil, 0,
+        field.limits(0, 0, 0, 0));
+    var state: TestBody = TestBody{input: view.view("a=b", 3)};
+    var reader: body.Reader = make_reader(?state, ?scope, ?trailers, 8);
+    var read_buffer: [2]u8;
+    val accepted: bool = init_body(?parser, ?decoder, ?reader,
+        ?read_buffer[0], 2);
+    val destroyed: bool = cancel.destroy(?scope);
+    if (accepted || !destroyed) { ret 3; }
+    ret 0;
+}
+
 test "laurel.form: body polling retains pending buffers across fragmentation" {
     var fields: [4]Field;
     var bytes: [128]u8;
@@ -775,6 +922,9 @@ test "laurel.form: body polling retains pending buffers across fragmentation" {
     var parser: BodyParser;
     if (!init_body(?parser, ?decoder, ?reader, ?read_buffer[0], 3)) { ret 3; }
     var current: Operation = poll_body(?parser);
+    if (current.status == PENDING &&
+        (current.form.fields != nil || current.form.len != 0 ||
+            current.form.bytes != 0)) { ret 4; }
     var turns: usize = 0;
     for (current.status == MORE || current.status == PENDING) {
         if (current.status == PENDING) {
@@ -782,13 +932,13 @@ test "laurel.form: body polling retains pending buffers across fragmentation" {
         }
         or { current = poll_body(?parser); }
         turns = turns + 1;
-        if (turns > 64) { ret 4; }
+        if (turns > 64) { ret 5; }
     }
     if (current.status != COMPLETE || current.form.len != 2 ||
         !view_equal(current.form.fields[0].value, "alice") ||
         !view_equal(current.form.fields[1].value, "a/b") ||
         state.release_calls != 1 || !body.reader_terminal_state(?reader) ||
-        !cancel.destroy(?scope)) { ret 5; }
+        !cancel.destroy(?scope)) { ret 6; }
     ret 0;
 }
 
