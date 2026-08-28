@@ -45,6 +45,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Explicit durable reconciliation for unknown upload commit and abort outcomes.
 - HTTP body adapters that span pending body and storage operations without
   losing token ownership.
+- Bounded fixed and pull-streamed response bodies with suspend, resume, and
+  cancellation, and no mandatory template engine.
+- Explicit media types and charsets serialized once into caller storage.
+- Measured HTML and JSON output escaping that rejects invalid UTF-8 and control
+  code points and never emits a partial escape.
+- Transactional response installation of one status, one content type, and one
+  body.
+- Generic streaming, server-sent event, and WebSocket channels over one bounded
+  compacting queue with a shared send and close vtable.
+- Prefix-accepting stream writes and whole-message event and frame writes that
+  report a full consumer as backpressure.
+- Suspended body reads that resume on the exact producer token, with disconnect
+  and cancellation closing a channel fail-closed.
+- Strict event stream framing for names, identifiers, retries, multi-line data,
+  and comments, with caller-clocked heartbeats.
+- WebSocket channels over the `mach-http` codecs with no transport ownership and
+  an explicit close code and reason policy.
 
 ### Changed
 

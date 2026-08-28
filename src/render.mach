@@ -1,14 +1,108 @@
 # response rendering boundary
 
+use A: std.allocator;
+use O: std.types.option;
 use R: std.types.result;
+use fixed_allocator: std.allocator.fixed;
+use std.chrono.time;
+use std.sync.cancel;
+use std.text.utf8;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
 use std.types.view;
 use http.core.body;
+use http.core.exchange;
+use http.core.field;
+use http.core.message;
+use http.core.method;
+use http.core.status;
+use http.core.target;
+use laurel.context;
 use laurel.error;
 
+pub val MAX_MEDIA_TYPE_BYTES: usize = 96;
+pub val MAX_CHARSET_BYTES:    usize = 32;
+pub val MAX_CONTENT_TYPE_BYTES: usize = 138;
+
+val CHARSET_PREFIX_BYTES: usize = 10;
+
+pub def EscapeStatus: u8;
+
+pub val ESCAPE_OK:       EscapeStatus = 1;
+pub val ESCAPE_INVALID:  EscapeStatus = 2;
+pub val ESCAPE_CAPACITY: EscapeStatus = 3;
+
+pub def SourceStatus: u8;
+
+pub val SOURCE_DATA:    SourceStatus = 1;
+pub val SOURCE_END:     SourceStatus = 2;
+pub val SOURCE_PENDING: SourceStatus = 3;
+pub val SOURCE_FAILED:  SourceStatus = 4;
+
+pub def RespondStatus: u8;
+
+pub val RESPOND_OK:        RespondStatus = 1;
+pub val RESPOND_INVALID:   RespondStatus = 2;
+pub val RESPOND_COMMITTED: RespondStatus = 3;
+pub val RESPOND_LIMIT:     RespondStatus = 4;
+pub val RESPOND_CANCELLED: RespondStatus = 5;
+
+# one explicit media type and charset serialized once into caller storage
+pub rec Media {
+    header:      [138]u8;
+    header_len:  usize;
+    type_len:    usize;
+    charset_len: usize;
+    initialized: bool;
+}
+
+# a bounded pull source that fills caller output without owning a body
+pub rec Chunk {
+    status: SourceStatus;
+    count:  usize;
+    token:  u64;
+}
+
+pub def ProduceFun: fun(ptr, *u8, usize) Chunk;
+pub def ResumeFun:  fun(ptr, u64, *u8, usize) Chunk;
+pub def SettleFun:  fun(ptr, body.Mode) bool;
+
+pub rec Source {
+    ctx:     ptr;
+    produce: ProduceFun;
+    resume:  ResumeFun;
+    settle:  SettleFun;
+}
+
+# a complete declared-length body over caller-owned immutable bytes
+pub rec Fixed {
+    content:     view.View;
+    offset:      usize;
+    reader:      body.Reader;
+    generation:  u64;
+    initialized: bool;
+}
+
+# an incrementally produced body bounded by max_bytes with no declared length
+pub rec Stream {
+    source:           Source;
+    max_bytes:        u64;
+    produced:         u64;
+    pending_output:   *u8;
+    pending_capacity: usize;
+    ended:            bool;
+    reader:           body.Reader;
+    generation:       u64;
+    initialized:      bool;
+}
+
 pub rec Rendered {
-    content_type: view.View;
-    body:         *body.Reader;
-    generation:   u64;
+    status:     status.Status;
+    media:      *Media;
+    body:       *body.Reader;
+    generation: u64;
 }
 
 pub def RenderFun: fun(ptr, view.View, ptr) R.Result[Rendered, error.AppError];
@@ -16,4 +110,869 @@ pub def RenderFun: fun(ptr, view.View, ptr) R.Result[Rendered, error.AppError];
 pub rec Renderer {
     ctx:    ptr;
     render: RenderFun;
+}
+
+fun view_valid(value: view.View) bool {
+    ret value.len == 0 || value.data != nil;
+}
+
+fun token_byte(byte: u8) bool {
+    if (byte >= 'a' && byte <= 'z') { ret true; }
+    if (byte >= 'A' && byte <= 'Z') { ret true; }
+    if (byte >= '0' && byte <= '9') { ret true; }
+    ret byte == '!' || byte == '#' || byte == '$' || byte == '%' || byte == '&'
+        || byte == 39 || byte == '*' || byte == '+' || byte == '-' || byte == '.'
+        || byte == '^' || byte == '_' || byte == '`' || byte == '|' || byte == '~';
+}
+
+fun token_valid(value: view.View, limit: usize) bool {
+    if (value.len == 0 || value.len > limit || value.data == nil) { ret false; }
+    var i: usize = 0;
+    for (i < value.len) {
+        if (!token_byte(value.data[i])) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun media_type_valid(value: view.View) bool {
+    if (value.len == 0 || value.len > MAX_MEDIA_TYPE_BYTES || value.data == nil) { ret false; }
+    var slash: usize = 0;
+    for (slash < value.len && value.data[slash] != '/') { slash = slash + 1; }
+    if (slash == 0 || slash + 1 >= value.len) { ret false; }
+    ret token_valid(view.view(value.data, slash), MAX_MEDIA_TYPE_BYTES)
+        && token_valid(view.view(?value.data[slash + 1], value.len - slash - 1),
+            MAX_MEDIA_TYPE_BYTES);
+}
+
+pub fun init_media(media: *Media, media_type: view.View, charset: view.View) bool {
+    if (media == nil || media.initialized || !media_type_valid(media_type)
+        || !view_valid(charset) || charset.len > MAX_CHARSET_BYTES
+        || (charset.len != 0 && !token_valid(charset, MAX_CHARSET_BYTES))) { ret false; }
+    var length: usize = media_type.len;
+    if (charset.len != 0) { length = length + CHARSET_PREFIX_BYTES + charset.len; }
+    if (length > MAX_CONTENT_TYPE_BYTES) { ret false; }
+    var i: usize = 0;
+    for (i < media_type.len) {
+        media.header[i] = media_type.data[i];
+        i = i + 1;
+    }
+    if (charset.len != 0) {
+        val prefix: view.View = view.view("; charset=", CHARSET_PREFIX_BYTES);
+        var j: usize = 0;
+        for (j < CHARSET_PREFIX_BYTES) {
+            media.header[media_type.len + j] = prefix.data[j];
+            j = j + 1;
+        }
+        j = 0;
+        for (j < charset.len) {
+            media.header[media_type.len + CHARSET_PREFIX_BYTES + j] = charset.data[j];
+            j = j + 1;
+        }
+    }
+    media.header_len = length;
+    media.type_len = media_type.len;
+    media.charset_len = charset.len;
+    media.initialized = true;
+    ret true;
+}
+
+pub fun media_valid(media: *Media) bool {
+    if (media == nil || !media.initialized || media.type_len == 0
+        || media.header_len > MAX_CONTENT_TYPE_BYTES
+        || media.charset_len > MAX_CHARSET_BYTES) { ret false; }
+    var expected: usize = media.type_len;
+    if (media.charset_len != 0) {
+        expected = expected + CHARSET_PREFIX_BYTES + media.charset_len;
+    }
+    if (expected != media.header_len) { ret false; }
+    ret media_type_valid(view.view(?media.header[0], media.type_len))
+        && field.valid_value(view.view(?media.header[0], media.header_len));
+}
+
+pub fun media_header(media: *Media) view.View {
+    if (!media_valid(media)) { ret view.view(nil, 0); }
+    ret view.view(?media.header[0], media.header_len);
+}
+
+pub fun media_type(media: *Media) view.View {
+    if (!media_valid(media)) { ret view.view(nil, 0); }
+    ret view.view(?media.header[0], media.type_len);
+}
+
+pub fun media_charset(media: *Media) view.View {
+    if (!media_valid(media) || media.charset_len == 0) { ret view.view(nil, 0); }
+    ret view.view(?media.header[media.type_len + CHARSET_PREFIX_BYTES], media.charset_len);
+}
+
+pub fun text_plain(media: *Media) bool {
+    ret init_media(media, view.view("text/plain", 10), view.view("utf-8", 5));
+}
+
+pub fun text_html(media: *Media) bool {
+    ret init_media(media, view.view("text/html", 9), view.view("utf-8", 5));
+}
+
+pub fun application_json(media: *Media) bool {
+    ret init_media(media, view.view("application/json", 16), view.view("utf-8", 5));
+}
+
+fun html_replacement(codepoint: utf8.Codepoint) view.View {
+    if (codepoint == '&') { ret view.view("&amp;", 5); }
+    if (codepoint == '<') { ret view.view("&lt;", 4); }
+    if (codepoint == '>') { ret view.view("&gt;", 4); }
+    if (codepoint == '"') { ret view.view("&quot;", 6); }
+    if (codepoint == 39) { ret view.view("&#x27;", 6); }
+    ret view.view(nil, 0);
+}
+
+fun hex_digit(value: u8) u8 {
+    if (value < 10) { ret '0' + value; }
+    ret 'a' + (value - 10);
+}
+
+fun escape_unicode(codepoint: utf8.Codepoint, output: *u8) {
+    output[0] = 92;
+    output[1] = 'u';
+    output[2] = hex_digit(((codepoint >> 12) & 0xf)::u8);
+    output[3] = hex_digit(((codepoint >> 8) & 0xf)::u8);
+    output[4] = hex_digit(((codepoint >> 4) & 0xf)::u8);
+    output[5] = hex_digit((codepoint & 0xf)::u8);
+}
+
+fun json_short(codepoint: utf8.Codepoint) u8 {
+    if (codepoint == '"') { ret '"'; }
+    if (codepoint == 92) { ret 92; }
+    if (codepoint == 8) { ret 'b'; }
+    if (codepoint == 12) { ret 'f'; }
+    if (codepoint == 10) { ret 'n'; }
+    if (codepoint == 13) { ret 'r'; }
+    if (codepoint == 9) { ret 't'; }
+    ret 0;
+}
+
+fun json_unicode(codepoint: utf8.Codepoint) bool {
+    ret codepoint < 0x20 || codepoint == 0x7f || codepoint == '<' || codepoint == '>'
+        || codepoint == '&' || codepoint == 0x2028 || codepoint == 0x2029;
+}
+
+# html: reject every control code point except tab, newline, and carriage return
+fun html_size(codepoint: utf8.Codepoint, consumed: usize, size: *usize) bool {
+    if (codepoint < 0x20 && codepoint != 9 && codepoint != 10 && codepoint != 13) { ret false; }
+    if (codepoint == 0x7f || (codepoint >= 0x80 && codepoint <= 0x9f)) { ret false; }
+    val replacement: view.View = html_replacement(codepoint);
+    if (replacement.len != 0) { @size = replacement.len; } or { @size = consumed; }
+    ret true;
+}
+
+fun json_size(codepoint: utf8.Codepoint, consumed: usize, size: *usize) bool {
+    if (json_short(codepoint) != 0) { @size = 2; ret true; }
+    if (json_unicode(codepoint)) { @size = 6; ret true; }
+    @size = consumed;
+    ret true;
+}
+
+fun escaped_length(input: view.View, json: bool, needed: *usize) EscapeStatus {
+    var total: usize = 0;
+    var i: usize = 0;
+    for (i < input.len) {
+        var codepoint: utf8.Codepoint;
+        val consumed: usize = utf8.decode(?input.data[i], input.len - i, ?codepoint);
+        if (consumed == 0) { ret ESCAPE_INVALID; }
+        var size: usize = 0;
+        if (json) {
+            if (!json_size(codepoint, consumed, ?size)) { ret ESCAPE_INVALID; }
+        } or {
+            if (!html_size(codepoint, consumed, ?size)) { ret ESCAPE_INVALID; }
+        }
+        if (size > ~(0::usize) - total) { ret ESCAPE_CAPACITY; }
+        total = total + size;
+        i = i + consumed;
+    }
+    @needed = total;
+    ret ESCAPE_OK;
+}
+
+fun escape_into(input: view.View, json: bool, output: *u8) usize {
+    var cursor: usize = 0;
+    var i: usize = 0;
+    for (i < input.len) {
+        var codepoint: utf8.Codepoint;
+        val consumed: usize = utf8.decode(?input.data[i], input.len - i, ?codepoint);
+        var handled: bool = false;
+        if (json) {
+            val short: u8 = json_short(codepoint);
+            if (short != 0) {
+                output[cursor] = 92;
+                output[cursor + 1] = short;
+                cursor = cursor + 2;
+                handled = true;
+            } or (json_unicode(codepoint)) {
+                escape_unicode(codepoint, ?output[cursor]);
+                cursor = cursor + 6;
+                handled = true;
+            }
+        } or {
+            val replacement: view.View = html_replacement(codepoint);
+            if (replacement.len != 0) {
+                var j: usize = 0;
+                for (j < replacement.len) {
+                    output[cursor + j] = replacement.data[j];
+                    j = j + 1;
+                }
+                cursor = cursor + replacement.len;
+                handled = true;
+            }
+        }
+        if (!handled) {
+            var j: usize = 0;
+            for (j < consumed) {
+                output[cursor + j] = input.data[i + j];
+                j = j + 1;
+            }
+            cursor = cursor + consumed;
+        }
+        i = i + consumed;
+    }
+    ret cursor;
+}
+
+fun escape(input: view.View, json: bool, output: *u8, capacity: usize,
+    written: *usize) EscapeStatus {
+    if (written == nil) { ret ESCAPE_INVALID; }
+    @written = 0;
+    if (!view_valid(input) || (capacity != 0 && output == nil)) { ret ESCAPE_INVALID; }
+    var needed: usize = 0;
+    val measured: EscapeStatus = escaped_length(input, json, ?needed);
+    if (measured != ESCAPE_OK) { ret measured; }
+    if (needed > capacity) { ret ESCAPE_CAPACITY; }
+    if (needed == 0) { ret ESCAPE_OK; }
+    if (escape_into(input, json, output) != needed) { ret ESCAPE_INVALID; }
+    @written = needed;
+    ret ESCAPE_OK;
+}
+
+# escape text for html element and quoted attribute content
+pub fun escape_html(input: view.View, output: *u8, capacity: usize,
+    written: *usize) EscapeStatus {
+    ret escape(input, false, output, capacity, written);
+}
+
+# escape the interior of a json string, including bytes unsafe inside html
+pub fun escape_json(input: view.View, output: *u8, capacity: usize,
+    written: *usize) EscapeStatus {
+    ret escape(input, true, output, capacity, written);
+}
+
+pub fun escaped_html_bytes(input: view.View, needed: *usize) EscapeStatus {
+    if (needed == nil) { ret ESCAPE_INVALID; }
+    @needed = 0;
+    if (!view_valid(input)) { ret ESCAPE_INVALID; }
+    ret escaped_length(input, false, needed);
+}
+
+pub fun escaped_json_bytes(input: view.View, needed: *usize) EscapeStatus {
+    if (needed == nil) { ret ESCAPE_INVALID; }
+    @needed = 0;
+    if (!view_valid(input)) { ret ESCAPE_INVALID; }
+    ret escaped_length(input, true, needed);
+}
+
+pub fun chunk_data(count: usize) Chunk {
+    ret Chunk{status: SOURCE_DATA, count: count, token: 0};
+}
+
+pub fun chunk_end() Chunk {
+    ret Chunk{status: SOURCE_END, count: 0, token: 0};
+}
+
+pub fun chunk_pending(token: u64) Chunk {
+    ret Chunk{status: SOURCE_PENDING, count: 0, token: token};
+}
+
+pub fun chunk_failed() Chunk {
+    ret Chunk{status: SOURCE_FAILED, count: 0, token: 0};
+}
+
+fun body_limits_fit(length: u64, configured: body.Limits) bool {
+    if (configured.max_chunk_bytes == 0 || configured.max_chunks == 0
+        || length > configured.max_bytes) { ret false; }
+    val chunks: u64 = length / configured.max_chunk_bytes::u64;
+    val remainder: u64 = length % configured.max_chunk_bytes::u64;
+    ret chunks < configured.max_chunks::u64
+        || (chunks == configured.max_chunks::u64 && remainder == 0);
+}
+
+fun fixed_read(ctx: ptr, output: *u8, capacity: usize,
+    trailers: *field.Fields) body.Progress {
+    val state: *Fixed = ctx::*Fixed;
+    if (state == nil || !state.initialized || state.offset > state.content.len
+        || (capacity != 0 && output == nil)) {
+        ret body.failed("invalid fixed render body", body.REUSE_FORBIDDEN);
+    }
+    if (state.offset == state.content.len) { ret body.complete(body.REUSE_ALLOWED); }
+    var count: usize = state.content.len - state.offset;
+    if (count > capacity) { count = capacity; }
+    if (count == 0) { ret body.failed("empty fixed render read", body.REUSE_FORBIDDEN); }
+    var i: usize = 0;
+    for (i < count) {
+        output[i] = state.content.data[state.offset + i];
+        i = i + 1;
+    }
+    state.offset = state.offset + count;
+    ret body.data(count);
+}
+
+fun fixed_finish(ctx: ptr, mode: body.Mode, trailers: *field.Fields) body.Progress {
+    val state: *Fixed = ctx::*Fixed;
+    if (state == nil || !state.initialized) {
+        ret body.failed("invalid fixed render body", body.REUSE_FORBIDDEN);
+    }
+    if (mode == body.DRAIN) {
+        state.offset = state.content.len;
+        ret body.complete(body.REUSE_ALLOWED);
+    }
+    if (mode == body.REJECT) { ret body.rejected(body.REUSE_ALLOWED); }
+    if (mode == body.CANCEL) { ret body.cancelled(body.REUSE_FORBIDDEN); }
+    if (mode == body.TIMEOUT) { ret body.timed_out(body.REUSE_FORBIDDEN); }
+    ret body.failed("invalid fixed render finish", body.REUSE_FORBIDDEN);
+}
+
+fun fixed_complete(ctx: ptr, token: u64, trailers: *field.Fields) body.Progress {
+    ret body.failed("fixed render body has no pending operation", body.REUSE_FORBIDDEN);
+}
+
+fun fixed_release(ctx: ptr) {}
+
+pub fun init_fixed(state: *Fixed, content: view.View, generation: u64,
+    configured: message.Limits, trailers: *field.Fields, scope: *cancel.Scope) bool {
+    if (state == nil || state.initialized || generation == 0 || !view_valid(content)
+        || trailers == nil || scope == nil
+        || !body_limits_fit(content.len::u64, configured.response_body)) { ret false; }
+    state.content = content;
+    state.offset = 0;
+    state.generation = generation;
+    state.initialized = true;
+    state.reader = body.init_reader(state::ptr, fixed_read, fixed_finish, fixed_complete,
+        fixed_release, body.OWNER_APPLICATION, generation, true, content.len::u64,
+        configured.response_body, trailers, scope);
+    if (!state.reader.valid) {
+        state.initialized = false;
+        ret false;
+    }
+    ret true;
+}
+
+pub fun fixed_body(state: *Fixed) *body.Reader {
+    if (state == nil || !state.initialized) { ret nil; }
+    ret ?state.reader;
+}
+
+fun source_valid(source: Source) bool {
+    ret source.produce::usize != 0 && source.resume::usize != 0 && source.settle::usize != 0;
+}
+
+fun stream_chunk(state: *Stream, chunk: Chunk, output: *u8, allowed: usize) body.Progress {
+    if (chunk.status == SOURCE_PENDING) {
+        if (chunk.token == 0 || output == nil || allowed == 0) {
+            ret body.failed("invalid pending render chunk", body.REUSE_FORBIDDEN);
+        }
+        state.pending_output = output;
+        state.pending_capacity = allowed;
+        ret body.pending(chunk.token);
+    }
+    state.pending_output = nil;
+    state.pending_capacity = 0;
+    if (chunk.status == SOURCE_END) {
+        state.ended = true;
+        ret body.complete(body.REUSE_ALLOWED);
+    }
+    if (chunk.status == SOURCE_DATA) {
+        if (chunk.count == 0 || chunk.count > allowed
+            || chunk.count::u64 > state.max_bytes - state.produced) {
+            ret body.failed("invalid render chunk count", body.REUSE_FORBIDDEN);
+        }
+        state.produced = state.produced + chunk.count::u64;
+        ret body.data(chunk.count);
+    }
+    ret body.failed("render stream source failed", body.REUSE_FORBIDDEN);
+}
+
+fun stream_read(ctx: ptr, output: *u8, capacity: usize,
+    trailers: *field.Fields) body.Progress {
+    val state: *Stream = ctx::*Stream;
+    if (state == nil || !state.initialized || !source_valid(state.source)
+        || state.pending_output != nil || state.produced > state.max_bytes
+        || (capacity != 0 && output == nil)) {
+        ret body.failed("invalid render stream body", body.REUSE_FORBIDDEN);
+    }
+    if (state.ended) { ret body.complete(body.REUSE_ALLOWED); }
+    var allowed: usize = capacity;
+    val remaining: u64 = state.max_bytes - state.produced;
+    if (allowed::u64 > remaining) { allowed = remaining::usize; }
+    if (allowed == 0) {
+        state.ended = true;
+        ret body.complete(body.REUSE_ALLOWED);
+    }
+    ret stream_chunk(state, state.source.produce(state.source.ctx, output, allowed),
+        output, allowed);
+}
+
+fun stream_finish(ctx: ptr, mode: body.Mode, trailers: *field.Fields) body.Progress {
+    val state: *Stream = ctx::*Stream;
+    if (state == nil || !state.initialized || !source_valid(state.source)) {
+        ret body.failed("invalid render stream body", body.REUSE_FORBIDDEN);
+    }
+    val settled: bool = state.source.settle(state.source.ctx, mode);
+    state.pending_output = nil;
+    state.pending_capacity = 0;
+    state.ended = true;
+    if (!settled) { ret body.failed("render stream source rejected finish", body.REUSE_FORBIDDEN); }
+    if (mode == body.DRAIN) { ret body.complete(body.REUSE_ALLOWED); }
+    if (mode == body.REJECT) { ret body.rejected(body.REUSE_ALLOWED); }
+    if (mode == body.CANCEL) { ret body.cancelled(body.REUSE_FORBIDDEN); }
+    if (mode == body.TIMEOUT) { ret body.timed_out(body.REUSE_FORBIDDEN); }
+    ret body.failed("invalid render stream finish", body.REUSE_FORBIDDEN);
+}
+
+fun stream_complete(ctx: ptr, token: u64, trailers: *field.Fields) body.Progress {
+    val state: *Stream = ctx::*Stream;
+    if (state == nil || !state.initialized || !source_valid(state.source)
+        || state.pending_output == nil || state.pending_capacity == 0 || token == 0) {
+        ret body.failed("render stream has no pending operation", body.REUSE_FORBIDDEN);
+    }
+    val output: *u8 = state.pending_output;
+    val allowed: usize = state.pending_capacity;
+    ret stream_chunk(state, state.source.resume(state.source.ctx, token, output, allowed),
+        output, allowed);
+}
+
+fun stream_release(ctx: ptr) {}
+
+pub fun init_stream(state: *Stream, source: Source, max_bytes: u64, generation: u64,
+    configured: message.Limits, trailers: *field.Fields, scope: *cancel.Scope) bool {
+    if (state == nil || state.initialized || generation == 0 || max_bytes == 0
+        || !source_valid(source) || trailers == nil || scope == nil
+        || max_bytes > configured.response_body.max_bytes
+        || configured.response_body.max_chunk_bytes == 0
+        || configured.response_body.max_chunks == 0) { ret false; }
+    state.source = source;
+    state.max_bytes = max_bytes;
+    state.produced = 0;
+    state.pending_output = nil;
+    state.pending_capacity = 0;
+    state.ended = false;
+    state.generation = generation;
+    state.initialized = true;
+    state.reader = body.init_reader(state::ptr, stream_read, stream_finish, stream_complete,
+        stream_release, body.OWNER_APPLICATION, generation, false, 0,
+        configured.response_body, trailers, scope);
+    if (!state.reader.valid) {
+        state.initialized = false;
+        ret false;
+    }
+    ret true;
+}
+
+pub fun stream_body(state: *Stream) *body.Reader {
+    if (state == nil || !state.initialized) { ret nil; }
+    ret ?state.reader;
+}
+
+pub fun stream_produced(state: *Stream) u64 {
+    if (state == nil || !state.initialized) { ret 0; }
+    ret state.produced;
+}
+
+fun content_type_present(response: *message.Response) bool {
+    ret field.find_first(?response.fields, view.view("content-type", 12)) != nil;
+}
+
+# install one status, one content type, and one body without committing
+pub fun respond(request_context: *context.Context, code: status.Status, media: *Media,
+    reader: *body.Reader, configured: message.Limits) RespondStatus {
+    if (!context.active(request_context)) { ret RESPOND_CANCELLED; }
+    val response: *message.Response = context.response(request_context);
+    if (response == nil || !media_valid(media) || reader == nil
+        || !status.is_final(code)
+        || reader.generation != response.generation
+        || response.generation != request_context.generation) { ret RESPOND_INVALID; }
+    if (response.committed) { ret RESPOND_COMMITTED; }
+    if (response.body_kind != message.BODY_NONE || content_type_present(response)) {
+        ret RESPOND_INVALID;
+    }
+    val original_status: status.Status = response.status;
+    val original_len: usize = response.fields.len;
+    val original_bytes: usize = response.fields.bytes;
+    if (message.set_status(response, code) != message.RESPONSE_OK) { ret RESPOND_INVALID; }
+    val added: field.AddStatus = message.add_field(response, field.Field{
+        name: view.view("content-type", 12), value: media_header(media), sensitive: false});
+    if (added != field.ADD_OK) {
+        response.status = original_status;
+        response.fields.len = original_len;
+        response.fields.bytes = original_bytes;
+        if (added == field.ADD_INVALID) { ret RESPOND_INVALID; }
+        ret RESPOND_LIMIT;
+    }
+    if (message.set_body_reader(response, reader, configured) != message.RESPONSE_OK) {
+        response.status = original_status;
+        response.fields.len = original_len;
+        response.fields.bytes = original_bytes;
+        ret RESPOND_INVALID;
+    }
+    ret RESPOND_OK;
+}
+
+pub fun renderer_valid(renderer: *Renderer) bool {
+    ret renderer != nil && renderer.render::usize != 0;
+}
+
+pub fun render(renderer: *Renderer, name: view.View,
+    model: ptr) R.Result[Rendered, error.AppError] {
+    if (!renderer_valid(renderer) || name.len == 0 || !view_valid(name)) {
+        ret R.err[Rendered, error.AppError](error.make(error.INTERNAL, 500,
+            "internal server error", "invalid renderer invocation", false));
+    }
+    ret renderer.render(renderer.ctx, name, model);
+}
+
+# render a model and install the result, without requiring any template engine
+pub fun render_into(renderer: *Renderer, name: view.View, model: ptr,
+    request_context: *context.Context,
+    configured: message.Limits) R.Result[u8, error.AppError] {
+    val rendered: R.Result[Rendered, error.AppError] = render(renderer, name, model);
+    if (R.is_err[Rendered, error.AppError](rendered)) {
+        ret R.err[u8, error.AppError](R.unwrap_err[Rendered, error.AppError](rendered));
+    }
+    val output: Rendered = R.unwrap_ok[Rendered, error.AppError](rendered);
+    if (output.body == nil || output.generation == 0
+        || output.generation != request_context.generation
+        || output.body.generation != output.generation) {
+        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
+            "internal server error", "renderer returned a foreign generation", false));
+    }
+    val installed: RespondStatus = respond(request_context, output.status, output.media,
+        output.body, configured);
+    if (installed == RESPOND_OK) { ret R.ok[u8, error.AppError](1); }
+    if (installed == RESPOND_CANCELLED) {
+        ret R.err[u8, error.AppError](error.make(error.CANCELLED, 408,
+            "request cancelled", "render cancelled before installation", false));
+    }
+    ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
+        "internal server error", "render response installation failed", false));
+}
+
+rec Fixture {
+    scope:             cancel.Scope;
+    request_body:      body.Reader;
+    request:           message.Request;
+    response_fields:   [16]field.Field;
+    response_trailers: [8]field.Field;
+    response:          message.Response;
+    informationals:    [4]message.Informational;
+    exchange:          exchange.Exchange;
+    allocation_bytes:  [1024]u8;
+    allocation_state:  fixed_allocator.FixedState;
+    allocator:         A.Allocator;
+    context:           context.Context;
+    owner:             i64;
+}
+
+fun fixture_limits() message.Limits {
+    var configured: message.Limits = message.limits_default();
+    configured.response_fields = field.limits(16, 1024, 64, 256);
+    configured.response_trailers = field.limits(8, 512, 64, 256);
+    ret configured;
+}
+
+fun init_fixture(state: *Fixture, generation: u64) bool {
+    if (state == nil || !cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0})) {
+        ret false;
+    }
+    if (O.is_some[*u8](fixed_allocator.make(?state.allocator, ?state.allocation_state,
+        ?state.allocation_bytes[0], 1024))) { ret false; }
+    val configured: message.Limits = fixture_limits();
+    val request_fields: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    val request_trailers: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    state.request_body = body.empty_reader(generation);
+    val metadata: message.Metadata = message.Metadata{
+        version: message.version_h1(1, 1), secure: true, early_data: false,
+        peer: message.unspecified_endpoint(), local: message.unspecified_endpoint(),
+        received_at: time.Time{sec: 1, nsec: 0}, has_deadline: false,
+        deadline: time.Time{sec: 0, nsec: 0}, request_index: 1};
+    if (!message.init_request(?state.request, method.from_kind(method.GET),
+        target.origin(view.view("/", 1), view.view("/", 1), view.view(nil, 0)), metadata,
+        request_fields, request_trailers, ?state.request_body, generation, configured)) {
+        ret false;
+    }
+    if (!message.init_response(?state.response, ?state.response_fields[0], 16,
+        ?state.response_trailers[0], 8, generation, configured)) { ret false; }
+    if (!exchange.init(?state.exchange, ?state.request, ?state.response,
+        ?state.informationals[0], 4, ?state.scope, generation, configured)
+        || !exchange.begin(?state.exchange)) { ret false; }
+    state.owner = 1;
+    ret context.bind(?state.context, ?state.exchange,
+        context.Params{items: nil, len: 0, generation: generation}, 4, ?state.allocator,
+        ?state.owner, 3, nil, view.view("render-request", 14), 32);
+}
+
+fun same(actual: *u8, length: usize, expected: view.View) bool {
+    if (length != expected.len) { ret false; }
+    var i: usize = 0;
+    for (i < length) {
+        if (actual[i] != expected.data[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+test "laurel.render: content type and charset are explicit and bounded" {
+    var html: Media;
+    if (!text_html(?html) || !media_valid(?html)) { ret 1; }
+    if (!same(?html.header[0], html.header_len,
+        view.view("text/html; charset=utf-8", 24))) { ret 2; }
+    if (media_type(?html).len != 9 || media_charset(?html).len != 5
+        || media_charset(?html).data[0] != 'u') { ret 3; }
+    if (init_media(?html, view.view("text/plain", 10), view.view("utf-8", 5))) { ret 4; }
+    var json: Media;
+    if (!application_json(?json)
+        || !same(?json.header[0], json.header_len,
+            view.view("application/json; charset=utf-8", 31))) { ret 5; }
+    var bare: Media;
+    if (!init_media(?bare, view.view("application/octet-stream", 24), view.view(nil, 0))
+        || bare.header_len != 24 || media_charset(?bare).len != 0) { ret 6; }
+    var rejected: Media;
+    if (init_media(?rejected, view.view("texthtml", 8), view.view("utf-8", 5))
+        || init_media(?rejected, view.view("text/", 5), view.view("utf-8", 5))
+        || init_media(?rejected, view.view("text/html", 9), view.view("utf 8", 5))
+        || init_media(?rejected, view.view("text/ht\nml", 10), view.view("utf-8", 5))
+        || rejected.initialized) { ret 7; }
+    var oversized: [200]u8;
+    var i: usize = 0;
+    for (i < 200) {
+        oversized[i] = 'a';
+        i = i + 1;
+    }
+    oversized[50] = '/';
+    if (init_media(?rejected, view.view(?oversized[0], 200), view.view(nil, 0))) { ret 8; }
+    ret 0;
+}
+
+test "laurel.render: escaping is explicit for html and json output" {
+    var output: [64]u8;
+    var written: usize = 0;
+    if (escape_html(view.view("<&>", 3), ?output[0], 64, ?written) != ESCAPE_OK
+        || !same(?output[0], written, view.view("&lt;&amp;&gt;", 13))) { ret 1; }
+    var quotes: [2]u8;
+    quotes[0] = '"';
+    quotes[1] = 39;
+    if (escape_html(view.view(?quotes[0], 2), ?output[0], 64, ?written) != ESCAPE_OK
+        || !same(?output[0], written, view.view("&quot;&#x27;", 12))) { ret 2; }
+    if (escape_html(view.view("<&>", 3), ?output[0], 12, ?written) != ESCAPE_CAPACITY
+        || written != 0) { ret 3; }
+    var needed: usize = 0;
+    if (escaped_html_bytes(view.view("<&>", 3), ?needed) != ESCAPE_OK || needed != 13) { ret 4; }
+    var control: [1]u8;
+    control[0] = 1;
+    if (escape_html(view.view(?control[0], 1), ?output[0], 64, ?written) != ESCAPE_INVALID
+        || written != 0) { ret 5; }
+    var malformed: [2]u8;
+    malformed[0] = 0xff;
+    malformed[1] = 0xff;
+    if (escape_html(view.view(?malformed[0], 2), ?output[0], 64, ?written) != ESCAPE_INVALID) {
+        ret 6;
+    }
+    var newline: [2]u8;
+    newline[0] = 10;
+    newline[1] = 9;
+    if (escape_html(view.view(?newline[0], 2), ?output[0], 64, ?written) != ESCAPE_OK
+        || written != 2 || output[0] != 10 || output[1] != 9) { ret 7; }
+    var json_input: [2]u8;
+    json_input[0] = '"';
+    json_input[1] = 92;
+    if (escape_json(view.view(?json_input[0], 2), ?output[0], 64, ?written) != ESCAPE_OK
+        || written != 4 || output[0] != 92 || output[1] != '"' || output[2] != 92
+        || output[3] != 92) { ret 8; }
+    if (escape_json(view.view(?newline[0], 2), ?output[0], 64, ?written) != ESCAPE_OK
+        || written != 4 || output[0] != 92 || output[1] != 'n' || output[2] != 92
+        || output[3] != 't') { ret 9; }
+    if (escape_json(view.view("<&>", 3), ?output[0], 64, ?written) != ESCAPE_OK
+        || written != 18 || output[0] != 92 || output[1] != 'u' || output[2] != '0'
+        || output[3] != '0' || output[4] != '3' || output[5] != 'c'
+        || output[6] != 92 || output[10] != '2' || output[11] != '6'
+        || output[12] != 92 || output[16] != '3' || output[17] != 'e') { ret 10; }
+    if (escape_json(view.view(?control[0], 1), ?output[0], 64, ?written) != ESCAPE_OK
+        || written != 6 || output[0] != 92 || output[1] != 'u' || output[2] != '0'
+        || output[3] != '0' || output[4] != '0' || output[5] != '1') { ret 11; }
+    if (escape_json(view.view(?malformed[0], 2), ?output[0], 64, ?written) != ESCAPE_INVALID) {
+        ret 12;
+    }
+    ret 0;
+}
+
+test "laurel.render: a bounded body reaches the wire without a template engine" {
+    var state: Fixture;
+    if (!init_fixture(?state, 31)) { ret 1; }
+    var media: Media;
+    var content: Fixed;
+    val text: view.View = view.view("abcdefghijklmnopqrstuvwxyz", 26);
+    if (!text_plain(?media) || !init_fixed(?content, text, 31, fixture_limits(),
+        ?state.response.trailers, ?state.scope)) { ret 2; }
+    if (respond(?state.context, status.OK, ?media, fixed_body(?content),
+        fixture_limits()) != RESPOND_OK) { ret 3; }
+    if (state.response.status != status.OK || state.response.fields.len != 1
+        || state.response.body_kind != message.BODY_READER
+        || state.response.body_reader != ?content.reader) { ret 4; }
+    val header: *field.Field = field.find_first(?state.response.fields,
+        view.view("content-type", 12));
+    if (header == nil || !same(header.value.data, header.value.len,
+        view.view("text/plain; charset=utf-8", 25))) { ret 5; }
+    if (respond(?state.context, status.OK, ?media, fixed_body(?content),
+        fixture_limits()) != RESPOND_INVALID || state.response.fields.len != 1) { ret 6; }
+    var received: [32]u8;
+    var total: usize = 0;
+    var chunks: usize = 0;
+    var progress: body.Progress = body.data(0);
+    for (progress.status == body.DATA && chunks < 16) {
+        progress = body.read(?content.reader, ?received[total], 8);
+        if (progress.status == body.DATA) {
+            total = total + progress.count;
+            chunks = chunks + 1;
+        }
+    }
+    if (progress.status != body.COMPLETE || total != 26 || chunks != 4
+        || !same(?received[0], total, text)) { ret 7; }
+    if (!body.reader_terminal_state(?content.reader)
+        || content.reader.transferred != 26) { ret 8; }
+    if (!context.unbind(?state.context, ?state.owner, 3)
+        || !cancel.destroy(?state.scope)) { ret 9; }
+    ret 0;
+}
+
+rec TestSource {
+    produces:    usize;
+    resumes:     usize;
+    settles:     usize;
+    settle_mode: body.Mode;
+    pending:     bool;
+    emitted:     u8;
+    total:       u8;
+}
+
+fun test_emit(state: *TestSource, output: *u8, capacity: usize) Chunk {
+    if (state.emitted == state.total) { ret chunk_end(); }
+    if (capacity < 4) { ret chunk_failed(); }
+    output[0] = 'c';
+    output[1] = 'h';
+    output[2] = '0' + state.emitted;
+    output[3] = '|';
+    state.emitted = state.emitted + 1;
+    ret chunk_data(4);
+}
+
+fun test_produce(ctx: ptr, output: *u8, capacity: usize) Chunk {
+    val state: *TestSource = ctx::*TestSource;
+    state.produces = state.produces + 1;
+    if (state.pending) {
+        state.pending = false;
+        ret chunk_pending(77);
+    }
+    ret test_emit(state, output, capacity);
+}
+
+fun test_resume(ctx: ptr, token: u64, output: *u8, capacity: usize) Chunk {
+    val state: *TestSource = ctx::*TestSource;
+    state.resumes = state.resumes + 1;
+    if (token != 77) { ret chunk_failed(); }
+    ret test_emit(state, output, capacity);
+}
+
+fun test_settle(ctx: ptr, mode: body.Mode) bool {
+    val state: *TestSource = ctx::*TestSource;
+    state.settles = state.settles + 1;
+    state.settle_mode = mode;
+    ret true;
+}
+
+test "laurel.render: streamed bodies suspend, resume, and cancel" {
+    var state: Fixture;
+    if (!init_fixture(?state, 41)) { ret 1; }
+    var source_state: TestSource = TestSource{pending: true, total: 3};
+    val source: Source = Source{ctx: ?source_state, produce: test_produce,
+        resume: test_resume, settle: test_settle};
+    var stream: Stream;
+    if (!init_stream(?stream, source, 4096, 41, fixture_limits(),
+        ?state.response.trailers, ?state.scope)) { ret 2; }
+    var media: Media;
+    if (!text_plain(?media) || respond(?state.context, status.OK, ?media,
+        stream_body(?stream), fixture_limits()) != RESPOND_OK) { ret 3; }
+    var received: [64]u8;
+    var suspended: body.Progress = body.read(?stream.reader, ?received[0], 16);
+    if (suspended.status != body.PENDING || suspended.token != 77
+        || source_state.produces != 1 || stream.pending_output != ?received[0]) { ret 4; }
+    val resumed: body.Progress = body.complete_reader(?stream.reader, 77);
+    if (resumed.status != body.DATA || resumed.count != 4 || source_state.resumes != 1
+        || !same(?received[0], 4, view.view("ch0|", 4))
+        || stream_produced(?stream) != 4) { ret 5; }
+    val second: body.Progress = body.read(?stream.reader, ?received[4], 16);
+    if (second.status != body.DATA || second.count != 4
+        || !same(?received[4], 4, view.view("ch1|", 4))) { ret 6; }
+    if (!cancel.cancel(?state.scope)) { ret 7; }
+    val cancelled: body.Progress = body.read(?stream.reader, ?received[8], 16);
+    if (cancelled.status != body.CANCELLED || source_state.settles != 1
+        || source_state.settle_mode != body.CANCEL || source_state.produces != 2
+        || !stream.ended) { ret 8; }
+    if (!body.reader_terminal_state(?stream.reader)) { ret 9; }
+    if (context.active(?state.context)
+        || !context.unbind(?state.context, ?state.owner, 3)
+        || !cancel.destroy(?state.scope)) { ret 10; }
+    ret 0;
+}
+
+test "laurel.render: a renderer installs its own body with no engine coupling" {
+    var state: Fixture;
+    if (!init_fixture(?state, 51)) { ret 1; }
+    var media: Media;
+    var content: Fixed;
+    if (!text_html(?media) || !init_fixed(?content, view.view("<p>ok</p>", 9), 51,
+        fixture_limits(), ?state.response.trailers, ?state.scope)) { ret 2; }
+    var provider: TemplateFree = TemplateFree{media: ?media, content: ?content,
+        generation: 51};
+    val renderer: Renderer = Renderer{ctx: ?provider, render: test_render};
+    if (!renderer_valid(?renderer)) { ret 3; }
+    val installed: R.Result[u8, error.AppError] = render_into(?renderer,
+        view.view("page", 4), nil, ?state.context, fixture_limits());
+    if (R.is_err[u8, error.AppError](installed) || provider.calls != 1
+        || state.response.status != status.OK
+        || state.response.body_reader != ?content.reader) { ret 4; }
+    provider.fail = true;
+    var second: Fixture;
+    if (!init_fixture(?second, 52)) { ret 5; }
+    val refused: R.Result[u8, error.AppError] = render_into(?renderer,
+        view.view("page", 4), nil, ?second.context, fixture_limits());
+    if (!R.is_err[u8, error.AppError](refused)
+        || second.response.fields.len != 0) { ret 6; }
+    if (!context.unbind(?state.context, ?state.owner, 3)
+        || !context.unbind(?second.context, ?second.owner, 3)
+        || !cancel.destroy(?state.scope) || !cancel.destroy(?second.scope)) { ret 7; }
+    ret 0;
+}
+
+rec TemplateFree {
+    media:      *Media;
+    content:    *Fixed;
+    generation: u64;
+    calls:      usize;
+    fail:       bool;
+}
+
+fun test_render(ctx: ptr, name: view.View, model: ptr) R.Result[Rendered, error.AppError] {
+    val state: *TemplateFree = ctx::*TemplateFree;
+    state.calls = state.calls + 1;
+    if (state.fail) {
+        ret R.err[Rendered, error.AppError](error.make(error.NOT_FOUND, 404,
+            "not found", "no view is registered for that name", false));
+    }
+    ret R.ok[Rendered, error.AppError](Rendered{status: status.OK, media: state.media,
+        body: ?state.content.reader, generation: state.generation});
 }

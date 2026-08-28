@@ -21,13 +21,15 @@ The framework has no global application registry, hidden allocator, mandatory te
   HMAC-protected CSRF tokens, authentication ownership, and redirect policy.
 - `form`, `multipart`, and `upload` keep bounded parsing, request-wide upload
   transactions, and streamed file storage separate.
-- `render` converts a model into a response body without coupling the framework to a template engine.
+- `render` converts a model into a bounded response body, with explicit media
+  type, charset, and escaping, and no coupling to a template engine.
 - `observability` reports request events through application-owned logging and metrics callbacks.
 - `testing` defines an in-process request harness boundary.
 - `cookie` defines bounded request and response cookie storage.
 - `provider` injects application services without a global container.
 - `lifecycle` owns application startup, readiness, drain, and shutdown.
-- `realtime` covers streaming responses, server-sent events, and WebSockets.
+- `realtime` covers streaming responses, server-sent events, and WebSockets over
+  one bounded queue with explicit backpressure, heartbeat, and close policy.
 
 ## Local dependencies
 
@@ -45,9 +47,12 @@ store boundary, secure response defaults, origin enforcement, HMAC-protected
 session or request-bound CSRF tokens, authentication ownership, and safe
 redirects are implemented. Bounded URL-encoded forms, fragmented and nested
 multipart decoding, streamed files, atomic request-wide upload batches,
-cancellation, and durable outcome reconciliation are implemented. Rendering,
-realtime responses, and the in-process harness remain tracked work.
+cancellation, and durable outcome reconciliation are implemented. Bounded fixed
+and streamed response bodies, explicit media types and output escaping, generic
+streams, server-sent events, and WebSocket channels are implemented. The
+in-process harness remains tracked work.
 Security-sensitive operations have no fallback implementation. See
 [`doc/routing.md`](doc/routing.md), [`doc/middleware.md`](doc/middleware.md),
-[`doc/sessions.md`](doc/sessions.md), [`doc/security.md`](doc/security.md), and
-[`doc/input.md`](doc/input.md) for the ownership contracts.
+[`doc/sessions.md`](doc/sessions.md), [`doc/security.md`](doc/security.md),
+[`doc/input.md`](doc/input.md), and [`doc/output.md`](doc/output.md) for the
+ownership contracts.
