@@ -235,7 +235,23 @@ fun map_error(app_error: error.AppError, mapper: error.Mapper,
 }
 
 fun execute_claimed(source_items: *Middleware, source_len: usize,
-    execution: *Execution, mapper: error.Mapper) Outcome {
+    stack_supplied: bool, execution: *Execution, mapper: error.Mapper,
+    policy: Policy) Outcome {
+    if (!stack_supplied || (source_len != 0 && source_items == nil)
+        || execution.terminal.call == nil || policy.max_depth == 0
+        || source_len > policy.max_depth || policy.panic_policy != PANIC_ABORT
+        || mapper.render == nil) {
+        ret map_error(internal("invalid middleware policy or input"), mapper,
+            execution.context);
+    }
+    var i: usize = 0;
+    for (i < source_len) {
+        if (source_items[i].call == nil) {
+            ret map_error(internal("middleware callback is missing"), mapper,
+                execution.context);
+        }
+        i = i + 1;
+    }
     if (source_len != 0) {
         val allocation: R.Result[*Slot, *u8] =
             A.allocate[Slot](execution.context.alloc, source_len);
@@ -245,12 +261,8 @@ fun execute_claimed(source_items: *Middleware, source_len: usize,
         }
         execution.slots = R.unwrap_ok[*Slot, *u8](allocation);
     }
-    var i: usize = 0;
+    i = 0;
     for (i < source_len) {
-        if (source_items[i].call == nil) {
-            ret map_error(internal("middleware callback is missing"), mapper,
-                execution.context);
-        }
         execution.slots[i].middleware = source_items[i];
         execution.slots[i].execution_id = execution.execution_id;
         execution.slots[i].index = i;
@@ -283,22 +295,18 @@ pub fun execute(stack: *Stack, terminal: handler.Handler,
                 empty_render_failure());
         }
     }
-    if (stack == nil || (stack.len != 0 && stack.items == nil)
-        || terminal.call == nil || request_context == nil
-        || !context.active(request_context)
-        || !context.allocator_valid(request_context.alloc)
-        || policy.max_depth == 0 || stack.len > policy.max_depth
-        || policy.panic_policy != PANIC_ABORT || mapper.render == nil) {
+    if (request_context == nil || !context.active(request_context)
+        || !context.allocator_valid(request_context.alloc)) {
         val app_error: error.AppError = internal("invalid middleware policy or input");
-        if (request_context != nil && context.active(request_context)
-            && context.allocator_valid(request_context.alloc)
-            && mapper.render != nil) {
-            ret map_error(app_error, mapper, request_context);
-        }
         ret unmapped(app_error, "error mapper unavailable");
     }
-    val source_items: *Middleware = stack.items;
-    val source_len: usize = stack.len;
+    var source_items: *Middleware = nil;
+    var source_len: usize = 0;
+    val stack_supplied: bool = stack != nil;
+    if (stack_supplied) {
+        source_items = stack.items;
+        source_len = stack.len;
+    }
     var execution: Execution = Execution{terminal: terminal,
         context: request_context, slots: nil, len: source_len,
         generation: request_context.generation, execution_id: 0, active: true};
@@ -311,7 +319,7 @@ pub fun execute(stack: *Stack, terminal: handler.Handler,
     }
     execution.execution_id = execution_id;
     val completed: Outcome = execute_claimed(source_items, source_len,
-        ?execution, mapper);
+        stack_supplied, ?execution, mapper, policy);
     execution.active = false;
     context.release_execution(request_context, execution_id);
     ret completed;
@@ -362,6 +370,13 @@ rec Reentrant {
     stack:        *Stack;
     terminal:     handler.Handler;
     mapper:       error.Mapper;
+    calls:        usize;
+    inner_status: ExecutionStatus;
+}
+
+rec ReentrantMapper {
+    stack:        *Stack;
+    terminal:     handler.Handler;
     calls:        usize;
     inner_status: ExecutionStatus;
 }
@@ -556,6 +571,22 @@ fun failing_mapper(ctx: ptr, app_error: error.AppError,
     val failure: error.RenderFailure = error.render_failure(
         "mapper stack-local failure");
     ret R.err[u8, error.RenderFailure](failure);
+}
+
+fun reentrant_mapper(ctx: ptr, app_error: error.AppError,
+    request_context: *context.Context) R.Result[u8, error.RenderFailure] {
+    val reentrant: *ReentrantMapper = ctx::*ReentrantMapper;
+    if (reentrant == nil || reentrant.stack == nil) {
+        ret R.err[u8, error.RenderFailure](error.render_failure(
+            "invalid reentrant mapper test"));
+    }
+    val inner: Outcome = execute(reentrant.stack, reentrant.terminal,
+        error.Mapper{ctx: nil, render: failing_mapper}, request_context,
+        policy_default());
+    reentrant.calls = reentrant.calls + 1;
+    reentrant.inner_status = inner.status;
+    ret R.err[u8, error.RenderFailure](error.render_failure(
+        "mapper stack-local failure"));
 }
 
 fun response_text(fixture: *Fixture, output: *u8,
@@ -935,5 +966,19 @@ test "laurel.middleware: mapper failures are value owned" {
         || !bytes_equal(detail.data, detail.len,
             "mapper stack-local failure", 26)
         || !fixture_end(?fixture)) { ret 2; }
+
+    var reentrant_fixture: Fixture;
+    if (!fixture_init(?reentrant_fixture, 92)) { ret 3; }
+    var reentrant_stack: Stack = Stack{items: nil, len: 0};
+    var mapper_state: ReentrantMapper = ReentrantMapper{
+        stack: ?reentrant_stack,
+        terminal: handler.Handler{ctx: nil, call: private_error_terminal}};
+    val reentrant: Outcome = execute(?reentrant_stack, mapper_state.terminal,
+        error.Mapper{ctx: ?mapper_state, render: reentrant_mapper},
+        ?reentrant_fixture.request_context, policy_default());
+    if (reentrant.status != EXECUTION_ERROR_UNMAPPED
+        || mapper_state.calls != 1
+        || mapper_state.inner_status != EXECUTION_ERROR_UNMAPPED
+        || !fixture_end(?reentrant_fixture)) { ret 4; }
     ret 0;
 }
