@@ -128,6 +128,7 @@ pub rec Parser {
     current_declared_len: u64;
     current_has_length: bool;
     upload_active: bool;
+    start_after_batch: bool;
     finish_after_flush: bool;
     pending_upload_kind: upload.Kind;
     pending_token: u64;
@@ -304,9 +305,23 @@ fun storage_valid(parser: *Parser, storage: Storage,
 fun store_shape(value: upload.Store) bool {
     ret value.ctx != nil && value.context_size != 0 &&
         range_valid(value.ctx::*u8, value.context_size) &&
-        value.aliases_state::usize != 0 && value.begin::usize != 0 &&
-        value.write::usize != 0 && value.commit::usize != 0 &&
-        value.abort::usize != 0 && value.complete::usize != 0;
+        value.aliases_state::usize != 0 &&
+        value.batch_begin::usize != 0 && value.file_begin::usize != 0 &&
+        value.write::usize != 0 && value.file_seal::usize != 0 &&
+        value.batch_commit::usize != 0 && value.batch_abort::usize != 0 &&
+        value.complete::usize != 0;
+}
+
+fun stores_equal(first: upload.Store, second: upload.Store) bool {
+    ret first.ctx == second.ctx && first.context_size == second.context_size &&
+        first.aliases_state::usize == second.aliases_state::usize &&
+        first.batch_begin::usize == second.batch_begin::usize &&
+        first.file_begin::usize == second.file_begin::usize &&
+        first.write::usize == second.write::usize &&
+        first.file_seal::usize == second.file_seal::usize &&
+        first.batch_commit::usize == second.batch_commit::usize &&
+        first.batch_abort::usize == second.batch_abort::usize &&
+        first.complete::usize == second.complete::usize;
 }
 
 fun store_locally_disjoint(parser: *Parser, storage: Storage,
@@ -867,9 +882,8 @@ fun parser_valid(parser: *Parser) bool {
     if (parser.state == COMPLETE_STATE || parser.state == FAILED_STATE) {
         ret true;
     }
-    ret
-        parser.store.ctx == parser.uploader.store.ctx &&
-        parser.store.context_size == parser.uploader.store.context_size;
+    ret stores_equal(parser.store, parser.uploader.store) &&
+        upload.valid(parser.uploader);
 }
 
 fun input_valid(parser: *Parser, input: *u8, len: usize) bool {
@@ -954,10 +968,10 @@ fun shift_work(parser: *Parser, count: usize) bool {
 }
 
 fun publish_field(parser: *Parser) Status {
-    if (parser.current_value_len > parser.limits.max_field_bytes ||
-        parser.current_has_length &&
-            parser.current_value_len::u64 != parser.current_declared_len) {
-        ret LIMIT;
+    if (parser.current_value_len > parser.limits.max_field_bytes) { ret LIMIT; }
+    if (parser.current_has_length &&
+        parser.current_value_len::u64 != parser.current_declared_len) {
+        ret MALFORMED;
     }
     if (!utf8.validate(?parser.storage.bytes[parser.current_value_start],
             parser.current_value_len)) { ret MALFORMED; }
@@ -973,10 +987,8 @@ fun publish_field(parser: *Parser) Status {
 }
 
 fun publish_file(parser: *Parser, file: upload.StoredFile) Status {
-    if (parser.current_has_length &&
-            parser.current_value_len::u64 != parser.current_declared_len ||
-        file.size != parser.current_value_len::u64 ||
-        parser.published_parts >= parser.storage.part_capacity) { ret LIMIT; }
+    if (file.size != parser.current_value_len::u64) { ret INVALID; }
+    if (parser.published_parts >= parser.storage.part_capacity) { ret LIMIT; }
     parser.storage.parts[parser.published_parts] = Part{
         name: parser.current_name, value: empty_view(),
         file_name: parser.current_file_name,
@@ -1041,8 +1053,16 @@ fun emit_body_byte(parser: *Parser, value: u8) Status {
 
 fun abort_failure(parser: *Parser, input: *u8, len: usize,
     offset: usize) Operation {
-    if (!parser.upload_active) { ret terminal_failure(parser, offset); }
-    val stopped: upload.Operation = upload.abort(parser.uploader);
+    if (!parser.upload_active) {
+        if ((parser.uploader.state == upload.READY ||
+                parser.uploader.state == upload.ABORTED) &&
+            !upload.release(parser.uploader)) {
+            ret unknown_storage(parser, offset,
+                "idle upload session could not release ownership");
+        }
+        ret terminal_failure(parser, offset);
+    }
+    val stopped: upload.Operation = upload.abort_batch(parser.uploader);
     if (stopped.status == upload.PENDING) {
         ret retain_pending(parser, stopped, input, len, offset);
     }
@@ -1051,12 +1071,12 @@ fun abort_failure(parser: *Parser, input: *u8, len: usize,
         parser.upload_active = false;
         if (!upload.release(parser.uploader)) {
             ret unknown_storage(parser, offset,
-                "aborted upload could not release ownership");
+                "aborted upload batch could not release ownership");
         }
         ret terminal_failure(parser, offset);
     }
     ret unknown_storage(parser, offset,
-        "upload abort did not produce a known outcome");
+        "upload batch abort did not produce a known outcome");
 }
 
 fun fail_and_abort(parser: *Parser, status: Status, kind: error.Kind,
@@ -1086,6 +1106,12 @@ fun flush_file(parser: *Parser, input: *u8, len: usize,
                 "uploaded file is too large",
                 "multipart file exceeded its configured limit",
                 input, len, offset);
+        } or (written.status == upload.INVALID &&
+            written.outcome == upload.OUTCOME_NONE) {
+            ret fail_and_abort(parser, INVALID, error.INTERNAL, 500,
+                "internal server error",
+                "multipart write ownership became invalid",
+                input, len, offset);
         } or {
             ret unknown_storage(parser, offset,
                 "multipart file write outcome was ambiguous");
@@ -1094,7 +1120,7 @@ fun flush_file(parser: *Parser, input: *u8, len: usize,
     ret operation(parser, MORE, 0, offset, empty_error());
 }
 
-fun commit_file(parser: *Parser, input: *u8, len: usize,
+fun seal_file(parser: *Parser, input: *u8, len: usize,
     offset: usize) Operation {
     if (parser.current_has_length &&
         parser.current_value_len::u64 != parser.current_declared_len) {
@@ -1103,35 +1129,44 @@ fun commit_file(parser: *Parser, input: *u8, len: usize,
             "multipart file length did not match content-length",
             input, len, offset);
     }
-    val committed: upload.Operation = upload.commit(parser.uploader);
-    if (committed.status == upload.PENDING) {
-        ret retain_pending(parser, committed, input, len, offset);
+    val sealed: upload.Operation = upload.seal_file(parser.uploader);
+    if (sealed.status == upload.PENDING) {
+        ret retain_pending(parser, sealed, input, len, offset);
     }
-    if (committed.status == upload.OK &&
-        committed.outcome == upload.OUTCOME_COMMITTED) {
-        val published: Status = publish_file(parser, committed.file);
-        parser.upload_active = false;
-        if (!upload.release(parser.uploader)) {
-            ret unknown_storage(parser, offset,
-                "committed upload could not release ownership");
-        }
-        if (!upload.init(parser.uploader, parser.store,
-                parser.limits.max_file_bytes)) {
-            ret unknown_storage(parser, offset,
-                "upload storage could not prepare the next transaction");
-        }
-        if (published != MORE) {
+    if (sealed.status == upload.OK &&
+        sealed.outcome == upload.OUTCOME_STAGED) {
+        val published: Status = publish_file(parser, sealed.file);
+        if (published == LIMIT) {
             remember_failure(parser, published, error.TOO_LARGE, 413,
                 "multipart body is too large",
                 "multipart result storage was exhausted");
-            ret terminal_failure(parser, offset);
+            ret abort_failure(parser, input, len, offset);
+        }
+        if (published != MORE) {
+            ret fail_and_abort(parser, INVALID, error.INTERNAL, 500,
+                "internal server error",
+                "staged upload size did not match parsed bytes",
+                input, len, offset);
         }
         parser.state = BOUNDARY_SUFFIX;
         parser.finish_after_flush = false;
         ret operation(parser, MORE, 0, offset, empty_error());
     }
+    if (sealed.status == upload.ERROR &&
+        sealed.outcome == upload.OUTCOME_ACTIVE) {
+        ret fail_and_abort(parser, STORAGE_ERROR, error.INTERNAL, 500,
+            "upload storage failed", "multipart file seal failed",
+            input, len, offset);
+    }
+    if (sealed.status == upload.INVALID &&
+        sealed.outcome == upload.OUTCOME_NONE) {
+        ret fail_and_abort(parser, INVALID, error.INTERNAL, 500,
+            "internal server error",
+            "multipart file seal ownership became invalid",
+            input, len, offset);
+    }
     ret unknown_storage(parser, offset,
-        "multipart file commit outcome was ambiguous");
+        "multipart file seal outcome was ambiguous");
 }
 
 fun finish_file(parser: *Parser, input: *u8, len: usize,
@@ -1139,10 +1174,10 @@ fun finish_file(parser: *Parser, input: *u8, len: usize,
     parser.finish_after_flush = true;
     val flushed: Operation = flush_file(parser, input, len, offset);
     if (flushed.status != MORE) { ret flushed; }
-    ret commit_file(parser, input, len, offset);
+    ret seal_file(parser, input, len, offset);
 }
 
-fun start_file(parser: *Parser, input: *u8, len: usize,
+fun start_provider_file(parser: *Parser, input: *u8, len: usize,
     offset: usize) Operation {
     val metadata: upload.Metadata = upload.Metadata{
         field_name: parser.current_name,
@@ -1150,40 +1185,59 @@ fun start_file(parser: *Parser, input: *u8, len: usize,
         content_type: parser.current_content_type,
         declared_len: parser.current_declared_len,
         has_length: parser.current_has_length};
-    parser.state = BODY;
-    val started: upload.Operation = upload.start(parser.uploader, metadata);
+    val started: upload.Operation = upload.start_file(parser.uploader,
+        metadata);
     if (started.status == upload.PENDING) {
-        parser.upload_active = true;
         ret retain_pending(parser, started, input, len, offset);
     }
     if (started.status == upload.OK &&
         started.outcome == upload.OUTCOME_ACTIVE) {
-        parser.upload_active = true;
         ret operation(parser, MORE, 0, offset, empty_error());
     }
     if (started.status == upload.ERROR &&
-        started.outcome == upload.OUTCOME_ABORTED) {
-        if (!upload.release(parser.uploader)) {
-            ret unknown_storage(parser, offset,
-                "rejected upload could not release ownership");
-        }
-        remember_failure(parser, STORAGE_ERROR, error.INTERNAL, 500,
-            "upload storage failed", "multipart upload begin failed");
-        ret terminal_failure(parser, offset);
+        started.outcome == upload.OUTCOME_ACTIVE) {
+        ret fail_and_abort(parser, STORAGE_ERROR, error.INTERNAL, 500,
+            "upload storage failed", "multipart file begin failed",
+            input, len, offset);
     }
     if (started.status == upload.INVALID &&
         started.outcome == upload.OUTCOME_NONE) {
-        if (!upload.release(parser.uploader)) {
-            ret unknown_storage(parser, offset,
-                "invalid upload metadata could not release ownership");
-        }
-        remember_failure(parser, MALFORMED, error.BAD_REQUEST, 400,
+        ret fail_and_abort(parser, MALFORMED, error.BAD_REQUEST, 400,
             "malformed multipart body",
-            "multipart file metadata was unsafe");
-        ret terminal_failure(parser, offset);
+            "multipart file metadata was unsafe", input, len, offset);
     }
     ret unknown_storage(parser, offset,
-        "multipart upload begin outcome was ambiguous");
+        "multipart file begin outcome was ambiguous");
+}
+
+fun start_file(parser: *Parser, input: *u8, len: usize,
+    offset: usize) Operation {
+    parser.state = BODY;
+    if (parser.uploader.state == upload.READY) {
+        val opened: upload.Operation = upload.begin_batch(parser.uploader);
+        if (opened.status == upload.PENDING) {
+            parser.upload_active = true;
+            parser.start_after_batch = true;
+            ret retain_pending(parser, opened, input, len, offset);
+        }
+        if (opened.status == upload.OK &&
+            opened.outcome == upload.OUTCOME_ACTIVE) {
+            parser.upload_active = true;
+        } or (opened.status == upload.ERROR &&
+            opened.outcome == upload.OUTCOME_ABORTED) {
+            if (!upload.release(parser.uploader)) {
+                ret unknown_storage(parser, offset,
+                    "rejected upload batch could not release ownership");
+            }
+            remember_failure(parser, STORAGE_ERROR, error.INTERNAL, 500,
+                "upload storage failed", "multipart batch begin failed");
+            ret terminal_failure(parser, offset);
+        } or {
+            ret unknown_storage(parser, offset,
+                "multipart batch begin outcome was ambiguous");
+        }
+    }
+    ret start_provider_file(parser, input, len, offset);
 }
 
 fun suffix_kind(parser: *Parser, closing: *bool) bool {
@@ -1459,30 +1513,54 @@ fun resume_input(parser: *Parser, input: *u8, len: usize,
     ret process(parser, input, len, offset);
 }
 
-fun accept_commit(parser: *Parser, committed: upload.Operation,
+fun accept_seal(parser: *Parser, sealed: upload.Operation,
     input: *u8, len: usize, offset: usize) Operation {
-    if (committed.status != upload.OK ||
-        committed.outcome != upload.OUTCOME_COMMITTED) {
+    if (sealed.status != upload.OK ||
+        sealed.outcome != upload.OUTCOME_STAGED) {
         ret unknown_storage(parser, offset,
-            "multipart file commit completion was ambiguous");
+            "multipart file seal completion was ambiguous");
     }
-    val published: Status = publish_file(parser, committed.file);
-    parser.upload_active = false;
-    if (!upload.release(parser.uploader) ||
-        !upload.init(parser.uploader, parser.store,
-            parser.limits.max_file_bytes)) {
-        ret unknown_storage(parser, offset,
-            "committed upload could not prepare the next transaction");
+    if (parser.cancel_requested) {
+        parser.cancel_requested = false;
+        ret abort_failure(parser, input, len, offset);
     }
-    if (published != MORE) {
+    val published: Status = publish_file(parser, sealed.file);
+    if (published == LIMIT) {
         remember_failure(parser, LIMIT, error.TOO_LARGE, 413,
             "multipart body is too large",
             "multipart result storage was exhausted");
-        ret terminal_failure(parser, offset);
+        ret abort_failure(parser, input, len, offset);
+    }
+    if (published != MORE) {
+        ret fail_and_abort(parser, INVALID, error.INTERNAL, 500,
+            "internal server error",
+            "staged upload size did not match parsed bytes",
+            input, len, offset);
     }
     parser.state = BOUNDARY_SUFFIX;
     parser.finish_after_flush = false;
     ret resume_input(parser, input, len, offset);
+}
+
+fun accept_batch_commit(parser: *Parser, committed: upload.Operation,
+    offset: usize) Operation {
+    if (committed.status != upload.OK ||
+        committed.outcome != upload.OUTCOME_COMMITTED) {
+        ret unknown_storage(parser, offset,
+            "multipart batch commit completion was ambiguous");
+    }
+    parser.upload_active = false;
+    if (!upload.release(parser.uploader)) {
+        ret unknown_storage(parser, offset,
+            "committed upload batch could not release ownership");
+    }
+    parser.retained_input = nil;
+    parser.retained_len = 0;
+    parser.retained_offset = 0;
+    parser.pending_upload_kind = 0;
+    parser.pending_token = 0;
+    parser.state = COMPLETE_STATE;
+    ret operation(parser, COMPLETE, 0, offset, empty_error());
 }
 
 pub fun complete_pending(parser: *Parser, token: u64) Operation {
@@ -1507,12 +1585,19 @@ pub fun complete_pending(parser: *Parser, token: u64) Operation {
     }
     parser.pending_upload_kind = 0;
     parser.pending_token = 0;
-    if (kind == upload.BEGIN) {
+    if (kind == upload.BATCH_BEGIN) {
         if (completed.status == upload.OK &&
             completed.outcome == upload.OUTCOME_ACTIVE) {
+            parser.upload_active = true;
             if (parser.cancel_requested) {
                 parser.cancel_requested = false;
                 ret abort_failure(parser, input, len, offset);
+            }
+            if (parser.start_after_batch) {
+                parser.start_after_batch = false;
+                val started: Operation = start_provider_file(parser,
+                    input, len, offset);
+                if (started.status != MORE) { ret started; }
             }
             ret resume_input(parser, input, len, offset);
         }
@@ -1525,11 +1610,30 @@ pub fun complete_pending(parser: *Parser, token: u64) Operation {
             }
             remember_failure(parser, STORAGE_ERROR, error.INTERNAL, 500,
                 "upload storage failed",
-                "multipart upload begin failed asynchronously");
+                "multipart batch begin failed asynchronously");
             ret terminal_failure(parser, offset);
         }
         ret unknown_storage(parser, offset,
-            "multipart upload begin completion was ambiguous");
+            "multipart batch begin completion was ambiguous");
+    }
+    if (kind == upload.FILE_BEGIN) {
+        if (completed.status == upload.OK &&
+            completed.outcome == upload.OUTCOME_ACTIVE) {
+            if (parser.cancel_requested) {
+                parser.cancel_requested = false;
+                ret abort_failure(parser, input, len, offset);
+            }
+            ret resume_input(parser, input, len, offset);
+        }
+        if (completed.status == upload.ERROR &&
+            completed.outcome == upload.OUTCOME_ACTIVE) {
+            ret fail_and_abort(parser, STORAGE_ERROR, error.INTERNAL, 500,
+                "upload storage failed",
+                "multipart file begin failed asynchronously",
+                input, len, offset);
+        }
+        ret unknown_storage(parser, offset,
+            "multipart file begin completion was ambiguous");
     }
     if (kind == upload.WRITE) {
         if (completed.status == upload.OK && completed.written != 0 &&
@@ -1541,7 +1645,7 @@ pub fun complete_pending(parser: *Parser, token: u64) Operation {
             val flushed: Operation = flush_file(parser, input, len, offset);
             if (flushed.status != MORE) { ret flushed; }
             if (parser.finish_after_flush) {
-                ret commit_file(parser, input, len, offset);
+                ret seal_file(parser, input, len, offset);
             }
             ret resume_input(parser, input, len, offset);
         }
@@ -1555,10 +1659,20 @@ pub fun complete_pending(parser: *Parser, token: u64) Operation {
         ret unknown_storage(parser, offset,
             "multipart file write completion was ambiguous");
     }
-    if (kind == upload.COMMIT) {
-        ret accept_commit(parser, completed, input, len, offset);
+    if (kind == upload.FILE_SEAL) {
+        if (completed.status == upload.ERROR &&
+            completed.outcome == upload.OUTCOME_ACTIVE) {
+            ret fail_and_abort(parser, STORAGE_ERROR, error.INTERNAL, 500,
+                "upload storage failed",
+                "multipart file seal failed asynchronously",
+                input, len, offset);
+        }
+        ret accept_seal(parser, completed, input, len, offset);
     }
-    if (kind == upload.ABORT) {
+    if (kind == upload.BATCH_COMMIT) {
+        ret accept_batch_commit(parser, completed, offset);
+    }
+    if (kind == upload.BATCH_ABORT) {
         if (completed.status == upload.OK &&
             completed.outcome == upload.OUTCOME_ABORTED) {
             parser.upload_active = false;
@@ -1600,12 +1714,19 @@ pub fun finish(parser: *Parser) Operation {
             "multipart body ended before its closing boundary",
             nil, 0, 0);
     }
-    if (!upload.release(parser.uploader)) {
-        ret unknown_storage(parser, 0,
-            "multipart uploader could not release idle ownership");
+    if (!parser.upload_active) {
+        if (!upload.release(parser.uploader)) {
+            ret unknown_storage(parser, 0,
+                "multipart uploader could not release idle ownership");
+        }
+        parser.state = COMPLETE_STATE;
+        ret operation(parser, COMPLETE, 0, 0, empty_error());
     }
-    parser.state = COMPLETE_STATE;
-    ret operation(parser, COMPLETE, 0, 0, empty_error());
+    val committed: upload.Operation = upload.commit_batch(parser.uploader);
+    if (committed.status == upload.PENDING) {
+        ret retain_pending(parser, committed, nil, 0, 0);
+    }
+    ret accept_batch_commit(parser, committed, 0);
 }
 
 pub fun result(parser: *Parser) Operation {
@@ -1617,6 +1738,31 @@ pub fun result(parser: *Parser) Operation {
     ret operation(parser, COMPLETE, 0, 0, empty_error());
 }
 
+pub fun resolve_storage(parser: *Parser, outcome: upload.Outcome) Operation {
+    if (!parser_valid(parser) || parser.state != UNKNOWN_STATE ||
+        parser.uploader.state != upload.UNKNOWN ||
+        !upload.resolve_unknown(parser.uploader, outcome)) {
+        ret operation(parser, INVALID, 0, 0,
+            error.make(error.INTERNAL, 500, "internal server error",
+                "invalid multipart storage reconciliation", false));
+    }
+    parser.upload_active = false;
+    if (!upload.release(parser.uploader)) {
+        ret unknown_storage(parser, 0,
+            "reconciled upload batch could not release ownership");
+    }
+    if (outcome == upload.OUTCOME_COMMITTED) {
+        parser.state = COMPLETE_STATE;
+        ret operation(parser, COMPLETE, 0, 0, empty_error());
+    }
+    if (parser.failure_status == 0) {
+        remember_failure(parser, STORAGE_ERROR, error.INTERNAL, 500,
+            "upload storage failed",
+            "multipart upload batch was aborted during reconciliation");
+    }
+    ret terminal_failure(parser, 0);
+}
+
 pub fun cancel_parser(parser: *Parser) Operation {
     if (!parser_valid(parser) || parser.state == COMPLETE_STATE ||
         parser.state == FAILED_STATE || parser.state == UNKNOWN_STATE) {
@@ -1624,7 +1770,7 @@ pub fun cancel_parser(parser: *Parser) Operation {
             error.make(error.INTERNAL, 500, "internal server error",
                 "invalid multipart cancellation", false));
     }
-    if (parser.pending_upload_kind == upload.COMMIT) {
+    if (parser.pending_upload_kind == upload.BATCH_COMMIT) {
         ret operation(parser, INVALID, 0, parser.retained_offset,
             error.make(error.CONFLICT, 409, "upload commit is in progress",
                 "multipart commit has crossed its cancellation point",
@@ -1632,8 +1778,8 @@ pub fun cancel_parser(parser: *Parser) Operation {
     }
     remember_failure(parser, CANCELLED, error.CANCELLED, 499,
         "request cancelled", "multipart parsing was cancelled");
-    if (parser.pending_upload_kind == upload.BEGIN ||
-        parser.pending_upload_kind == upload.WRITE) {
+    if (parser.pending_upload_kind != 0 &&
+        parser.pending_upload_kind != upload.BATCH_ABORT) {
         parser.cancel_requested = true;
         ret operation(parser, PENDING, parser.pending_token,
             parser.retained_offset, empty_error());
@@ -1869,25 +2015,37 @@ pub fun complete_body(parser: *BodyParser, token: u64) Operation {
 rec TestStore {
     bytes: [512]u8;
     len: usize;
-    file_id: [8]u8;
-    active: bool;
-    pending_begin: bool;
+    file_start: usize;
+    file_ids: [64]u8;
+    file_count: usize;
+    batch_active: bool;
+    file_active: bool;
+    committed: bool;
+    aborted: bool;
+    pending_batch_begin: bool;
+    pending_file_begin: bool;
     pending_write: bool;
-    pending_commit: bool;
-    pending_abort: bool;
+    pending_file_seal: bool;
+    pending_batch_commit: bool;
+    pending_batch_abort: bool;
     pending_kind: upload.Kind;
     pending_token: u64;
     pending_input: *u8;
     pending_len: usize;
     fail_write: bool;
+    unknown_commit: bool;
+    unknown_abort: bool;
+    batch_begin_calls: usize;
     begin_calls: usize;
     write_calls: usize;
+    seal_calls: usize;
     commit_calls: usize;
     abort_calls: usize;
 }
 
 fun test_aliases(ctx: ptr, data: *u8, len: usize) bool {
-    ret false;
+    val state: *TestStore = ctx::*TestStore;
+    ret overlap(?state.file_ids[0], 64, data, len);
 }
 
 fun test_progress(status: upload.Status, kind: upload.Kind,
@@ -1907,22 +2065,48 @@ fun test_pending(state: *TestStore, kind: upload.Kind) upload.Progress {
     ret result;
 }
 
-fun test_begin_done(state: *TestStore) upload.Progress {
-    state.active = true;
-    var result: upload.Progress = test_progress(upload.OK, upload.BEGIN,
+fun test_batch_begin_done(state: *TestStore) upload.Progress {
+    state.batch_active = true;
+    var result: upload.Progress = test_progress(upload.OK,
+        upload.BATCH_BEGIN,
         upload.OUTCOME_ACTIVE, nil);
-    result.transaction = upload.Transaction{owner: state::ptr, id: 11};
+    result.transaction = upload.Transaction{owner: state::ptr, id: 1};
     ret result;
 }
 
-fun test_begin(ctx: ptr, metadata: upload.Metadata) upload.Progress {
+fun test_batch_begin(ctx: ptr) upload.Progress {
+    val state: *TestStore = ctx::*TestStore;
+    state.batch_begin_calls = state.batch_begin_calls + 1;
+    if (state.pending_batch_begin) {
+        state.pending_batch_begin = false;
+        ret test_pending(state, upload.BATCH_BEGIN);
+    }
+    ret test_batch_begin_done(state);
+}
+
+fun test_file_begin_done(state: *TestStore) upload.Progress {
+    state.file_active = true;
+    state.file_start = state.len;
+    var result: upload.Progress = test_progress(upload.OK,
+        upload.FILE_BEGIN, upload.OUTCOME_ACTIVE, nil);
+    result.transaction = upload.Transaction{owner: state::ptr,
+        id: state.file_count::u64 + 2};
+    ret result;
+}
+
+fun test_file_begin(ctx: ptr, batch: upload.Transaction,
+    metadata: upload.Metadata) upload.Progress {
     val state: *TestStore = ctx::*TestStore;
     state.begin_calls = state.begin_calls + 1;
-    if (state.pending_begin) {
-        state.pending_begin = false;
-        ret test_pending(state, upload.BEGIN);
+    if (batch.id != 1 || !state.batch_active || state.file_active) {
+        ret test_progress(upload.ERROR, upload.FILE_BEGIN,
+            upload.OUTCOME_UNKNOWN, "bad test batch transaction");
     }
-    ret test_begin_done(state);
+    if (state.pending_file_begin) {
+        state.pending_file_begin = false;
+        ret test_pending(state, upload.FILE_BEGIN);
+    }
+    ret test_file_begin_done(state);
 }
 
 fun test_write_done(state: *TestStore, input: *u8,
@@ -1947,10 +2131,15 @@ fun test_write_done(state: *TestStore, input: *u8,
     ret result;
 }
 
-fun test_write(ctx: ptr, transaction: upload.Transaction,
-    input: *u8, len: usize) upload.Progress {
+fun test_write(ctx: ptr, batch: upload.Transaction,
+    file: upload.Transaction, input: *u8, len: usize) upload.Progress {
     val state: *TestStore = ctx::*TestStore;
     state.write_calls = state.write_calls + 1;
+    if (batch.id != 1 || file.id != state.file_count::u64 + 2 ||
+        !state.batch_active || !state.file_active) {
+        ret test_progress(upload.ERROR, upload.WRITE,
+            upload.OUTCOME_UNKNOWN, "bad test file transaction");
+    }
     if (state.pending_write) {
         state.pending_write = false;
         state.pending_input = input;
@@ -1961,46 +2150,92 @@ fun test_write(ctx: ptr, transaction: upload.Transaction,
 }
 
 fun test_file(state: *TestStore) upload.StoredFile {
-    state.file_id[0] = 'm';
-    state.file_id[1] = 'p';
-    ret upload.StoredFile{id: view.view(?state.file_id[0], 2),
-        size: state.len::u64};
+    val start: usize = state.file_count * 8;
+    state.file_ids[start] = 'm';
+    state.file_ids[start + 1] = '0' + state.file_count::u8;
+    ret upload.StoredFile{id: view.view(?state.file_ids[start], 2),
+        size: (state.len - state.file_start)::u64};
 }
 
-fun test_commit_done(state: *TestStore) upload.Progress {
-    state.active = false;
-    var result: upload.Progress = test_progress(upload.OK, upload.COMMIT,
-        upload.OUTCOME_COMMITTED, nil);
+fun test_file_seal_done(state: *TestStore) upload.Progress {
+    state.file_active = false;
+    var result: upload.Progress = test_progress(upload.OK,
+        upload.FILE_SEAL, upload.OUTCOME_STAGED, nil);
     result.file = test_file(state);
+    state.file_count = state.file_count + 1;
     ret result;
 }
 
-fun test_commit(ctx: ptr,
-    transaction: upload.Transaction) upload.Progress {
+fun test_file_seal(ctx: ptr, batch: upload.Transaction,
+    file: upload.Transaction) upload.Progress {
     val state: *TestStore = ctx::*TestStore;
-    state.commit_calls = state.commit_calls + 1;
-    if (state.pending_commit) {
-        state.pending_commit = false;
-        ret test_pending(state, upload.COMMIT);
+    state.seal_calls = state.seal_calls + 1;
+    if (batch.id != 1 || file.id != state.file_count::u64 + 2 ||
+        !state.batch_active || !state.file_active) {
+        ret test_progress(upload.ERROR, upload.FILE_SEAL,
+            upload.OUTCOME_UNKNOWN, "bad test file seal transaction");
     }
-    ret test_commit_done(state);
+    if (state.pending_file_seal) {
+        state.pending_file_seal = false;
+        ret test_pending(state, upload.FILE_SEAL);
+    }
+    ret test_file_seal_done(state);
 }
 
-fun test_abort_done(state: *TestStore) upload.Progress {
-    state.active = false;
-    ret test_progress(upload.OK, upload.ABORT,
+fun test_batch_commit_done(state: *TestStore) upload.Progress {
+    state.batch_active = false;
+    state.committed = true;
+    if (state.unknown_commit) {
+        ret test_progress(upload.ERROR, upload.BATCH_COMMIT,
+            upload.OUTCOME_UNKNOWN, "test batch commit outcome unknown");
+    }
+    ret test_progress(upload.OK, upload.BATCH_COMMIT,
+        upload.OUTCOME_COMMITTED, nil);
+}
+
+fun test_batch_commit(ctx: ptr,
+    batch: upload.Transaction) upload.Progress {
+    val state: *TestStore = ctx::*TestStore;
+    state.commit_calls = state.commit_calls + 1;
+    if (batch.id != 1 || !state.batch_active || state.file_active) {
+        ret test_progress(upload.ERROR, upload.BATCH_COMMIT,
+            upload.OUTCOME_UNKNOWN, "bad test batch commit transaction");
+    }
+    if (state.pending_batch_commit) {
+        state.pending_batch_commit = false;
+        ret test_pending(state, upload.BATCH_COMMIT);
+    }
+    ret test_batch_commit_done(state);
+}
+
+fun test_batch_abort_done(state: *TestStore) upload.Progress {
+    state.batch_active = false;
+    state.file_active = false;
+    state.aborted = true;
+    state.len = 0;
+    if (state.unknown_abort) {
+        ret test_progress(upload.ERROR, upload.BATCH_ABORT,
+            upload.OUTCOME_UNKNOWN, "test batch abort outcome unknown");
+    }
+    ret test_progress(upload.OK, upload.BATCH_ABORT,
         upload.OUTCOME_ABORTED, nil);
 }
 
-fun test_abort(ctx: ptr,
-    transaction: upload.Transaction) upload.Progress {
+fun test_batch_abort(ctx: ptr, batch: upload.Transaction,
+    file: upload.Transaction) upload.Progress {
     val state: *TestStore = ctx::*TestStore;
     state.abort_calls = state.abort_calls + 1;
-    if (state.pending_abort) {
-        state.pending_abort = false;
-        ret test_pending(state, upload.ABORT);
+    if (batch.id != 1 || !state.batch_active ||
+        state.file_active && file.id != state.file_count::u64 + 2 ||
+        !state.file_active && (file.owner != nil || file.id != 0)) {
+        ret test_progress(upload.ERROR, upload.BATCH_ABORT,
+            upload.OUTCOME_UNKNOWN, "bad test batch abort transaction");
     }
-    ret test_abort_done(state);
+    if (state.pending_batch_abort) {
+        state.pending_batch_abort = false;
+        ret test_pending(state, upload.BATCH_ABORT);
+    }
+    ret test_batch_abort_done(state);
 }
 
 fun test_complete(ctx: ptr, token: u64) upload.Progress {
@@ -2012,7 +2247,8 @@ fun test_complete(ctx: ptr, token: u64) upload.Progress {
     val kind: upload.Kind = state.pending_kind;
     state.pending_kind = 0;
     state.pending_token = 0;
-    if (kind == upload.BEGIN) { ret test_begin_done(state); }
+    if (kind == upload.BATCH_BEGIN) { ret test_batch_begin_done(state); }
+    if (kind == upload.FILE_BEGIN) { ret test_file_begin_done(state); }
     if (kind == upload.WRITE) {
         val input: *u8 = state.pending_input;
         val len: usize = state.pending_len;
@@ -2020,14 +2256,17 @@ fun test_complete(ctx: ptr, token: u64) upload.Progress {
         state.pending_len = 0;
         ret test_write_done(state, input, len);
     }
-    if (kind == upload.COMMIT) { ret test_commit_done(state); }
-    ret test_abort_done(state);
+    if (kind == upload.FILE_SEAL) { ret test_file_seal_done(state); }
+    if (kind == upload.BATCH_COMMIT) { ret test_batch_commit_done(state); }
+    ret test_batch_abort_done(state);
 }
 
 fun test_store(state: *TestStore) upload.Store {
     ret upload.Store{ctx: state::ptr, context_size: $size_of(TestStore),
-        aliases_state: test_aliases, begin: test_begin, write: test_write,
-        commit: test_commit, abort: test_abort, complete: test_complete};
+        aliases_state: test_aliases, batch_begin: test_batch_begin,
+        file_begin: test_file_begin, write: test_write,
+        file_seal: test_file_seal, batch_commit: test_batch_commit,
+        batch_abort: test_batch_abort, complete: test_complete};
 }
 
 fun test_limits() Limits {
@@ -2096,7 +2335,10 @@ test "laurel.multipart: fragmented fields and files remain bounded" {
     val body_text: str = "--edge\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nhello\r\n--edge\r\nContent-Disposition: form-data; name=\"asset\"; filename=\"note.txt\"\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\ndata\r\n--edge--\r\n";
     val fed: Operation = feed_bytes(?parser, body_text);
     if (fed.status != MORE) { ret 2; }
-    val done: Operation = finish(?parser);
+    var done: Operation = finish(?parser);
+    for (done.status == PENDING) {
+        done = complete_pending(?parser, done.token);
+    }
     if (done.status != COMPLETE || done.result.len != 2 ||
         parts[0].kind != FIELD_PART || !view_equal(parts[0].name, "title") ||
         !view_equal(parts[0].value, "hello") ||
@@ -2136,8 +2378,9 @@ test "laurel.multipart: asynchronous storage preserves retained input" {
     var parts: [8]Part;
     var bytes: [2048]u8;
     var work: [512]u8;
-    var state: TestStore = TestStore{pending_begin: true,
-        pending_write: true, pending_commit: true};
+    var state: TestStore = TestStore{pending_batch_begin: true,
+        pending_file_begin: true, pending_write: true,
+        pending_file_seal: true, pending_batch_commit: true};
     var uploader: upload.Upload;
     var parser: Parser;
     val storage: Storage = Storage{parts: ?parts[0], part_capacity: 8,
@@ -2148,11 +2391,16 @@ test "laurel.multipart: asynchronous storage preserves retained input" {
     val body_text: str = "--p\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n\r\nvalue\r\n--p--\r\n";
     val fed: Operation = feed_bytes(?parser, body_text);
     if (fed.status != MORE) { ret 2; }
-    val done: Operation = finish(?parser);
-    if (done.status != COMPLETE || done.result.len != 1 ||
-        parts[0].file.size != 5 || state.len != 5 ||
-        state.begin_calls != 1 || state.write_calls != 1 ||
-        state.commit_calls != 1 || state.abort_calls != 0) { ret 3; }
+    var done: Operation = finish(?parser);
+    for (done.status == PENDING) {
+        done = complete_pending(?parser, done.token);
+    }
+    if (done.status != COMPLETE) { ret 3; }
+    if (done.result.len != 1 || parts[0].file.size != 5) { ret 4; }
+    if (state.len != 5) { ret 5; }
+    if (state.batch_begin_calls != 1 || state.begin_calls != 1 ||
+        state.write_calls != 1 || state.seal_calls != 1 ||
+        state.commit_calls != 1 || state.abort_calls != 0) { ret 6; }
     ret 0;
 }
 
@@ -2161,7 +2409,7 @@ test "laurel.multipart: cancellation waits for storage then aborts once" {
     var bytes: [2048]u8;
     var work: [512]u8;
     var state: TestStore = TestStore{pending_write: true,
-        pending_abort: true};
+        pending_batch_abort: true};
     var uploader: upload.Upload;
     var parser: Parser;
     val storage: Storage = Storage{parts: ?parts[0], part_capacity: 8,
@@ -2179,7 +2427,7 @@ test "laurel.multipart: cancellation waits for storage then aborts once" {
     }
     current = complete_pending(?parser, requested.token);
     if (current.status != PENDING ||
-        parser.pending_upload_kind != upload.ABORT) { ret 4; }
+        parser.pending_upload_kind != upload.BATCH_ABORT) { ret 4; }
     current = complete_pending(?parser, current.token);
     if (current.status != CANCELLED || state.abort_calls != 1 ||
         state.commit_calls != 0 || parser.published_parts != 0 ||
@@ -2214,6 +2462,106 @@ test "laurel.multipart: traversal and storage failure never publish" {
     if (failed.status != STORAGE_ERROR || state.begin_calls != 1 ||
         state.write_calls != 1 || state.abort_calls != 1 ||
         state.commit_calls != 0 || parser.published_parts != 0) { ret 4; }
+    ret 0;
+}
+
+test "laurel.multipart: multiple files publish through one batch commit" {
+    var parts: [8]Part;
+    var bytes: [2048]u8;
+    var work: [512]u8;
+    var state: TestStore;
+    var uploader: upload.Upload;
+    var parser: Parser;
+    val storage: Storage = Storage{parts: ?parts[0], part_capacity: 8,
+        bytes: ?bytes[0], byte_capacity: 2048,
+        work: ?work[0], work_capacity: 512};
+    if (!init(?parser, view.view("g", 1), storage, test_limits(),
+            test_store(?state), ?uploader)) { ret 1; }
+    val body_text: str = "--g\r\nContent-Disposition: form-data; name=\"a\"; filename=\"a.txt\"\r\n\r\none\r\n--g\r\nContent-Disposition: form-data; name=\"b\"; filename=\"b.txt\"\r\n\r\ntwo\r\n--g--\r\n";
+    val fed: Operation = feed_bytes(?parser, body_text);
+    if (fed.status != MORE || state.seal_calls != 2 ||
+        state.commit_calls != 0) { ret 2; }
+    val done: Operation = finish(?parser);
+    if (done.status != COMPLETE || done.result.len != 2 ||
+        parts[0].file.size != 3 || parts[1].file.size != 3 ||
+        state.batch_begin_calls != 1 || state.begin_calls != 2 ||
+        state.seal_calls != 2 || state.commit_calls != 1 ||
+        state.abort_calls != 0 || !state.committed) { ret 3; }
+    ret 0;
+}
+
+test "laurel.multipart: later malformed part aborts earlier staged files" {
+    var parts: [8]Part;
+    var bytes: [2048]u8;
+    var work: [512]u8;
+    var state: TestStore;
+    var uploader: upload.Upload;
+    var parser: Parser;
+    val storage: Storage = Storage{parts: ?parts[0], part_capacity: 8,
+        bytes: ?bytes[0], byte_capacity: 2048,
+        work: ?work[0], work_capacity: 512};
+    if (!init(?parser, view.view("g", 1), storage, test_limits(),
+            test_store(?state), ?uploader)) { ret 1; }
+    val body_text: str = "--g\r\nContent-Disposition: form-data; name=\"a\"; filename=\"a.txt\"\r\n\r\none\r\n--g\r\nContent-Disposition: form-data; name=\"b\"\r\nBroken Header\r\n\r\ntwo\r\n--g--\r\n";
+    val failed: Operation = feed(?parser, body_text::*u8,
+        str_len(body_text));
+    if (failed.status != MALFORMED || state.seal_calls != 1 ||
+        state.commit_calls != 0 || state.abort_calls != 1 ||
+        !state.aborted || state.len != 0 || parser.published_parts != 0 ||
+        parser.state != FAILED_STATE) { ret 2; }
+    ret 0;
+}
+
+test "laurel.multipart: ambiguous batch commit reconciles explicitly" {
+    var parts: [8]Part;
+    var bytes: [2048]u8;
+    var work: [512]u8;
+    var state: TestStore = TestStore{unknown_commit: true};
+    var uploader: upload.Upload;
+    var parser: Parser;
+    val storage: Storage = Storage{parts: ?parts[0], part_capacity: 8,
+        bytes: ?bytes[0], byte_capacity: 2048,
+        work: ?work[0], work_capacity: 512};
+    if (!init(?parser, view.view("g", 1), storage, test_limits(),
+            test_store(?state), ?uploader)) { ret 1; }
+    val body_text: str = "--g\r\nContent-Disposition: form-data; name=\"a\"; filename=\"a.txt\"\r\n\r\none\r\n--g--\r\n";
+    if (feed_bytes(?parser, body_text).status != MORE) { ret 2; }
+    val uncertain: Operation = finish(?parser);
+    if (uncertain.status != STORAGE_UNKNOWN ||
+        parser.state != UNKNOWN_STATE || result(?parser).status != INVALID) {
+        ret 3;
+    }
+    val reconciled: Operation = resolve_storage(?parser,
+        upload.OUTCOME_COMMITTED);
+    if (reconciled.status != COMPLETE || reconciled.result.len != 1 ||
+        parts[0].file.size != 3 || result(?parser).status != COMPLETE ||
+        state.commit_calls != 1) { ret 4; }
+    ret 0;
+}
+
+test "laurel.multipart: ambiguous batch abort reconciles explicitly" {
+    var parts: [8]Part;
+    var bytes: [2048]u8;
+    var work: [512]u8;
+    var state: TestStore = TestStore{unknown_abort: true};
+    var uploader: upload.Upload;
+    var parser: Parser;
+    val storage: Storage = Storage{parts: ?parts[0], part_capacity: 8,
+        bytes: ?bytes[0], byte_capacity: 2048,
+        work: ?work[0], work_capacity: 512};
+    if (!init(?parser, view.view("g", 1), storage, test_limits(),
+            test_store(?state), ?uploader)) { ret 1; }
+    val body_text: str = "--g\r\nContent-Disposition: form-data; name=\"a\"; filename=\"a.txt\"\r\n\r\none\r\n--g\r\nBroken Header\r\n\r\n";
+    val uncertain: Operation = feed(?parser, body_text::*u8,
+        str_len(body_text));
+    if (uncertain.status != STORAGE_UNKNOWN ||
+        parser.state != UNKNOWN_STATE || state.seal_calls != 1 ||
+        state.commit_calls != 0 || state.abort_calls != 1) { ret 2; }
+    val reconciled: Operation = resolve_storage(?parser,
+        upload.OUTCOME_ABORTED);
+    if (reconciled.status != MALFORMED || parser.state != FAILED_STATE ||
+        parser.published_parts != 0 || state.len != 0 ||
+        result(?parser).status != INVALID) { ret 3; }
     ret 0;
 }
 
@@ -2364,8 +2712,9 @@ test "laurel.multipart: body adapter spans reader and storage pending work" {
     var bytes: [2048]u8;
     var work: [512]u8;
     var read_buffer: [5]u8;
-    var store_state: TestStore = TestStore{pending_begin: true,
-        pending_write: true, pending_commit: true};
+    var store_state: TestStore = TestStore{pending_batch_begin: true,
+        pending_file_begin: true, pending_write: true,
+        pending_file_seal: true, pending_batch_commit: true};
     var uploader: upload.Upload;
     var decoder: Parser;
     val storage: Storage = Storage{parts: ?parts[0], part_capacity: 8,
