@@ -132,9 +132,12 @@ pub def ClaimFun: fun(ptr, u32, *u8, usize, i64, i64) GuardStatus;
 pub def ForgetFun: fun(ptr, u32, *u8, usize) GuardStatus;
 
 pub rec Guard {
-    ctx:    ptr;
-    claim:  ClaimFun;
-    forget: ForgetFun;
+    ctx:         ptr;
+    domain:      ptr;
+    backend:     *u8;
+    backend_len: usize;
+    claim:       ClaimFun;
+    forget:      ForgetFun;
 }
 
 pub rec GuardSlot {
@@ -241,6 +244,20 @@ fun range_valid(data: *u8, len: usize) bool {
     ret len - 1 <= ~(0::usize) - data::usize;
 }
 
+fun multiply_size(count: usize, item_size: usize, output: *usize) bool {
+    if (output == nil || (count != 0 && item_size > ~(0::usize) / count)) {
+        ret false;
+    }
+    @output = count * item_size;
+    ret true;
+}
+
+fun array_valid(data: *u8, count: usize, item_size: usize,
+    output_bytes: *usize) bool {
+    ret multiply_size(count, item_size, output_bytes)
+        && range_valid(data, @output_bytes);
+}
+
 fun ranges_overlap(a: *u8, a_len: usize, b: *u8, b_len: usize) bool {
     if (a_len == 0 || b_len == 0) { ret false; }
     if (!range_valid(a, a_len) || !range_valid(b, b_len)) { ret true; }
@@ -252,11 +269,12 @@ fun ranges_overlap(a: *u8, a_len: usize, b: *u8, b_len: usize) bool {
 }
 
 fun view_valid(value: view.View, maximum: usize) bool {
-    ret value.len <= maximum && (value.len == 0 || value.data != nil);
+    ret value.len <= maximum && range_valid(value.data, value.len);
 }
 
 fun session_valid(value: *Session) bool {
-    ret value != nil && value.id.len > 0
+    ret value != nil && range_valid(value::*u8, $size_of(Session))
+        && value.id.len > 0
         && view_valid(value.id, MAX_SESSION_ID_BYTES)
         && value.data.len <= MAX_SESSION_DATA_BYTES
         && (value.data.len == 0 || value.data.data != nil)
@@ -265,8 +283,13 @@ fun session_valid(value: *Session) bool {
         && value.expires_at_unix > value.not_before_unix;
 }
 
+fun scope_valid(scope: *cancel.Scope) bool {
+    ret scope == nil || range_valid(scope::*u8, $size_of(cancel.Scope));
+}
+
 fun scope_cancelled(scope: *cancel.Scope) bool {
     if (scope == nil) { ret false; }
+    if (!scope_valid(scope)) { ret true; }
     val reason: cancel.Reason = cancel.reason(scope);
     ret reason != cancel.ACTIVE;
 }
@@ -294,9 +317,28 @@ fun clear_slot(slot: *MemorySlot) {
     slot.used = false;
 }
 
+fun memory_store_valid(store: *MemoryStore) bool {
+    if (store == nil || !range_valid(store::*u8, $size_of(MemoryStore))
+        || !store.active || store.capacity == 0
+        || store.len > store.capacity) { ret false; }
+    var slot_bytes: usize = 0;
+    ret array_valid(store.slots::*u8, store.capacity,
+        $size_of(MemorySlot), ?slot_bytes)
+        && !ranges_overlap(store::*u8, $size_of(MemoryStore),
+            store.slots::*u8, slot_bytes);
+}
+
 pub fun init_memory_store(store: *MemoryStore, slots: *MemorySlot,
     capacity: usize) bool {
-    if (store == nil || store.active || capacity == 0 || slots == nil) {
+    if (store == nil || !range_valid(store::*u8, $size_of(MemoryStore))) {
+        ret false;
+    }
+    var slot_bytes: usize = 0;
+    if (store.active || capacity == 0
+        || !array_valid(slots::*u8, capacity, $size_of(MemorySlot),
+            ?slot_bytes)
+        || ranges_overlap(store::*u8, $size_of(MemoryStore),
+            slots::*u8, slot_bytes)) {
         ret false;
     }
     var i: usize = 0;
@@ -315,7 +357,7 @@ pub fun init_memory_store(store: *MemoryStore, slots: *MemorySlot,
 
 fun memory_start(ctx: ptr) StoreStatus {
     val store: *MemoryStore = ctx::*MemoryStore;
-    if (store == nil || !store.active) { ret STORE_INVALID; }
+    if (!memory_store_valid(store)) { ret STORE_INVALID; }
     ret STORE_OK;
 }
 
@@ -333,7 +375,8 @@ fun memory_load(ctx: ptr, id: view.View, data_output: *u8,
     data_capacity: usize, output: *Session,
     scope: *cancel.Scope) StoreStatus {
     val store: *MemoryStore = ctx::*MemoryStore;
-    if (store == nil || !store.active || output == nil || id.len == 0
+    if (!memory_store_valid(store) || !scope_valid(scope) || output == nil
+        || !range_valid(output::*u8, $size_of(Session)) || id.len == 0
         || !view_valid(id, MAX_SESSION_ID_BYTES)) {
         ret STORE_INVALID;
     }
@@ -381,8 +424,10 @@ fun memory_load(ctx: ptr, id: view.View, data_output: *u8,
 fun memory_save(ctx: ptr, value: *Session, expected_version: u64,
     result: *SaveResult, scope: *cancel.Scope) StoreStatus {
     val store: *MemoryStore = ctx::*MemoryStore;
-    if (store == nil || !store.active || !session_valid(value)
-        || result == nil || value.version != expected_version) {
+    if (!memory_store_valid(store) || !scope_valid(scope)
+        || !session_valid(value)
+        || result == nil || !range_valid(result::*u8, $size_of(SaveResult))
+        || value.version != expected_version) {
         ret STORE_INVALID;
     }
     val result_bytes: *u8 = result::*u8;
@@ -472,7 +517,7 @@ fun memory_save(ctx: ptr, value: *Session, expected_version: u64,
 fun memory_delete(ctx: ptr, id: view.View, expected_version: u64,
     generation: u64, scope: *cancel.Scope) StoreStatus {
     val store: *MemoryStore = ctx::*MemoryStore;
-    if (store == nil || !store.active || id.len == 0
+    if (!memory_store_valid(store) || !scope_valid(scope) || id.len == 0
         || !view_valid(id, MAX_SESSION_ID_BYTES)) {
         ret STORE_INVALID;
     }
@@ -504,7 +549,7 @@ fun memory_delete(ctx: ptr, id: view.View, expected_version: u64,
 
 fun memory_stop(ctx: ptr) StoreStatus {
     val store: *MemoryStore = ctx::*MemoryStore;
-    if (store == nil || !store.active) { ret STORE_INVALID; }
+    if (!memory_store_valid(store)) { ret STORE_INVALID; }
     mutex.lock(?store.lock);
     var i: usize = 0;
     for (i < store.capacity) {
@@ -518,7 +563,7 @@ fun memory_stop(ctx: ptr) StoreStatus {
 }
 
 pub fun memory_store(store: *MemoryStore) Store {
-    if (store == nil || !store.active) { ret Store{}; }
+    if (!memory_store_valid(store)) { ret Store{}; }
     ret Store{ctx: store::ptr, start: memory_start, stop: memory_stop,
         load: memory_load, save: memory_save, delete: memory_delete};
 }
@@ -529,9 +574,27 @@ fun guard_token_equal(slot: *GuardSlot, key_id: u32, token: *u8,
         && public_equal(?slot.token[0], token, token_len);
 }
 
+fun memory_guard_valid(guard: *MemoryGuard) bool {
+    if (guard == nil || !range_valid(guard::*u8, $size_of(MemoryGuard))
+        || !guard.active || guard.capacity == 0) { ret false; }
+    var slot_bytes: usize = 0;
+    ret array_valid(guard.slots::*u8, guard.capacity,
+        $size_of(GuardSlot), ?slot_bytes)
+        && !ranges_overlap(guard::*u8, $size_of(MemoryGuard),
+            guard.slots::*u8, slot_bytes);
+}
+
 pub fun init_memory_guard(guard: *MemoryGuard, slots: *GuardSlot,
     capacity: usize) bool {
-    if (guard == nil || guard.active || capacity == 0 || slots == nil) {
+    if (guard == nil || !range_valid(guard::*u8, $size_of(MemoryGuard))) {
+        ret false;
+    }
+    var slot_bytes: usize = 0;
+    if (guard.active || capacity == 0
+        || !array_valid(slots::*u8, capacity, $size_of(GuardSlot),
+            ?slot_bytes)
+        || ranges_overlap(guard::*u8, $size_of(MemoryGuard),
+            slots::*u8, slot_bytes)) {
         ret false;
     }
     var i: usize = 0;
@@ -553,8 +616,9 @@ pub fun init_memory_guard(guard: *MemoryGuard, slots: *GuardSlot,
 fun memory_guard_claim(ctx: ptr, key_id: u32, token: *u8,
     token_len: usize, expires_at: i64, now: i64) GuardStatus {
     val guard: *MemoryGuard = ctx::*MemoryGuard;
-    if (guard == nil || !guard.active || key_id == 0 || token == nil
-        || token_len == 0 || token_len > 12 || expires_at <= now || now < 0) {
+    if (!memory_guard_valid(guard) || key_id == 0 || token_len == 0
+        || token_len > 12 || !range_valid(token, token_len)
+        || expires_at <= now || now < 0) {
         ret GUARD_INVALID;
     }
     mutex.lock(?guard.lock);
@@ -595,8 +659,8 @@ fun memory_guard_claim(ctx: ptr, key_id: u32, token: *u8,
 fun memory_guard_forget(ctx: ptr, key_id: u32, token: *u8,
     token_len: usize) GuardStatus {
     val guard: *MemoryGuard = ctx::*MemoryGuard;
-    if (guard == nil || !guard.active || token == nil || token_len == 0
-        || token_len > 12) { ret GUARD_INVALID; }
+    if (!memory_guard_valid(guard) || token_len == 0 || token_len > 12
+        || !range_valid(token, token_len)) { ret GUARD_INVALID; }
     mutex.lock(?guard.lock);
     var i: usize = 0;
     for (i < guard.capacity) {
@@ -617,13 +681,17 @@ fun memory_guard_forget(ctx: ptr, key_id: u32, token: *u8,
 }
 
 pub fun memory_guard(guard: *MemoryGuard) Guard {
-    if (guard == nil || !guard.active) { ret Guard{}; }
-    ret Guard{ctx: guard::ptr, claim: memory_guard_claim,
-        forget: memory_guard_forget};
+    if (!memory_guard_valid(guard)) { ret Guard{}; }
+    var backend_len: usize = 0;
+    if (!multiply_size(guard.capacity, $size_of(GuardSlot),
+        ?backend_len)) { ret Guard{}; }
+    ret Guard{ctx: guard::ptr, domain: guard::ptr,
+        backend: guard.slots::*u8, backend_len: backend_len,
+        claim: memory_guard_claim, forget: memory_guard_forget};
 }
 
 pub fun release_memory_guard(guard: *MemoryGuard) bool {
-    if (guard == nil || !guard.active) { ret false; }
+    if (!memory_guard_valid(guard)) { ret false; }
     mutex.lock(?guard.lock);
     var i: usize = 0;
     for (i < guard.capacity) {
@@ -649,10 +717,38 @@ fun key_at(ring: *KeyRing, id: u32) *KeyGeneration {
     ret nil;
 }
 
+fun key_ring_valid(ring: *KeyRing) bool {
+    if (ring == nil || !range_valid(ring::*u8, $size_of(KeyRing))
+        || !ring.active || ring.len == 0
+        || ring.len - 1 > ring.max_retired) { ret false; }
+    var item_bytes: usize = 0;
+    ret array_valid(ring.items::*u8, ring.len,
+        $size_of(KeyGeneration), ?item_bytes)
+        && !ranges_overlap(ring::*u8, $size_of(KeyRing),
+            ring.items::*u8, item_bytes);
+}
+
+fun key_material_equal(left: *u8, right: *u8) bool {
+    var different: u8 = 0;
+    var i: usize = 0;
+    for (i < 32) {
+        different = different | (left[i] ^ right[i]);
+        i = i + 1;
+    }
+    ret different == 0;
+}
+
 pub fun init_key_ring(ring: *KeyRing, items: *KeyGeneration, len: usize,
     current_id: u32, max_retired: usize) bool {
-    if (ring == nil || ring.active || items == nil || len == 0
-        || len > max_retired + 1 || current_id == 0) { ret false; }
+    if (ring == nil || !range_valid(ring::*u8, $size_of(KeyRing))) {
+        ret false;
+    }
+    var item_bytes: usize = 0;
+    if (ring.active || len == 0 || len - 1 > max_retired || current_id == 0
+        || !array_valid(items::*u8, len, $size_of(KeyGeneration),
+            ?item_bytes)
+        || ranges_overlap(ring::*u8, $size_of(KeyRing),
+            items::*u8, item_bytes)) { ret false; }
     var current_found: bool = false;
     var i: usize = 0;
     for (i < len) {
@@ -663,7 +759,9 @@ pub fun init_key_ring(ring: *KeyRing, items: *KeyGeneration, len: usize,
         if (item.id == current_id) { current_found = true; }
         var previous: usize = 0;
         for (previous < i) {
-            if (items[previous].id == item.id) { ret false; }
+            if (items[previous].id == item.id
+                || key_material_equal(?items[previous].key[0],
+                    ?item.key[0])) { ret false; }
             previous = previous + 1;
         }
         i = i + 1;
@@ -679,7 +777,7 @@ pub fun init_key_ring(ring: *KeyRing, items: *KeyGeneration, len: usize,
 }
 
 pub fun release_key_ring(ring: *KeyRing) bool {
-    if (ring == nil || !ring.active) { ret false; }
+    if (!key_ring_valid(ring)) { ret false; }
     mutex.lock(?ring.lock);
     if (!ring.active) {
         mutex.unlock(?ring.lock);
@@ -706,7 +804,7 @@ pub fun release_key_ring(ring: *KeyRing) bool {
 
 pub fun rotate_key_ring(ring: *KeyRing, current_id: u32,
     now: i64) bool {
-    if (ring == nil || !ring.active || current_id == 0 || now < 0) {
+    if (!key_ring_valid(ring) || current_id == 0 || now < 0) {
         ret false;
     }
     mutex.lock(?ring.lock);
@@ -726,17 +824,31 @@ pub fun rotate_key_ring(ring: *KeyRing, current_id: u32,
 }
 
 fun protected_valid(codec: *ProtectedCodec) bool {
-    ret codec != nil && codec.active && codec.ring != nil
+    ret codec != nil && range_valid(codec::*u8, $size_of(ProtectedCodec))
+        && codec.active && key_ring_valid(codec.ring)
         && codec.entropy.fill != nil
         && codec.nonce_guard.ctx != nil
+        && codec.nonce_guard.domain != nil
+        && codec.nonce_guard.backend_len > 0
+        && range_valid(codec.nonce_guard.backend,
+            codec.nonce_guard.backend_len)
         && codec.nonce_guard.claim != nil
         && codec.nonce_guard.forget != nil
         && (codec.replay_policy == REPLAY_ALLOW
             || (codec.replay_policy == REPLAY_REJECT
                 && codec.replay_guard.ctx != nil
+                && codec.replay_guard.domain != nil
+                && codec.replay_guard.backend_len > 0
+                && range_valid(codec.replay_guard.backend,
+                    codec.replay_guard.backend_len)
                 && codec.replay_guard.claim != nil
                 && codec.replay_guard.forget != nil
-                && codec.replay_guard.ctx != codec.nonce_guard.ctx))
+                && codec.replay_guard.ctx != codec.nonce_guard.ctx
+                && codec.replay_guard.domain != codec.nonce_guard.domain
+                && !ranges_overlap(codec.replay_guard.backend,
+                    codec.replay_guard.backend_len,
+                    codec.nonce_guard.backend,
+                    codec.nonce_guard.backend_len)))
         && (codec.algorithm == AES_256_GCM
             || codec.algorithm == CHACHA20_POLY1305)
         && codec.clock_skew_s >= 0 && codec.max_lifetime_s > 0
@@ -748,8 +860,15 @@ pub fun init_protected_codec(codec: *ProtectedCodec, ring: *KeyRing,
     entropy: Entropy, nonce_guard: Guard, replay_policy: ReplayPolicy,
     replay_guard: Guard, algorithm: Algorithm, clock_skew_s: i64,
     max_lifetime_s: i64, max_context_bytes: usize) bool {
-    if (codec == nil || codec.active) { ret false; }
-    if (ring == nil || !ring.active) { ret false; }
+    if (codec == nil || !range_valid(codec::*u8, $size_of(ProtectedCodec))
+        || codec.active || !key_ring_valid(ring)
+        || ranges_overlap(codec::*u8, $size_of(ProtectedCodec),
+            ring::*u8, $size_of(KeyRing))) { ret false; }
+    var ring_item_bytes: usize = 0;
+    if (!multiply_size(ring.len, $size_of(KeyGeneration),
+            ?ring_item_bytes)
+        || ranges_overlap(codec::*u8, $size_of(ProtectedCodec),
+            ring.items::*u8, ring_item_bytes)) { ret false; }
     var candidate: ProtectedCodec = ProtectedCodec{ring: ring,
         entropy: entropy, nonce_guard: nonce_guard,
         replay_guard: replay_guard, replay_policy: replay_policy,
@@ -757,6 +876,11 @@ pub fun init_protected_codec(codec: *ProtectedCodec, ring: *KeyRing,
         max_lifetime_s: max_lifetime_s,
         max_context_bytes: max_context_bytes, active: true};
     if (!protected_valid(?candidate)) { ret false; }
+    if (ranges_overlap(codec::*u8, $size_of(ProtectedCodec),
+            nonce_guard.backend, nonce_guard.backend_len)
+        || (replay_policy == REPLAY_REJECT
+            && ranges_overlap(codec::*u8, $size_of(ProtectedCodec),
+                replay_guard.backend, replay_guard.backend_len))) { ret false; }
     @codec = candidate;
     ret true;
 }
@@ -895,6 +1019,17 @@ fun map_guard(status: GuardStatus, nonce: bool) CodecStatus {
     ret CODEC_INVALID;
 }
 
+fun forget_nonce(guard: Guard, key_id: u32, nonce: *u8) {
+    var token: [12]u8;
+    var i: usize = 0;
+    for (i < 12) {
+        token[i] = nonce[i];
+        i = i + 1;
+    }
+    guard.forget(guard.ctx, key_id, ?token[0], 12);
+    clear_public(?token[0], 12);
+}
+
 fun base64url_text_len(input_len: usize) usize {
     val complete: usize = input_len / 3 * 4;
     val remaining: usize = input_len % 3;
@@ -959,8 +1094,15 @@ fun encode_protected(ctx: ptr, value: *Session, context_value: view.View,
         i = i + 1;
     }
     clear_public(?nonce_value[0], 12);
+    var claim_token: [12]u8;
+    i = 0;
+    for (i < 12) {
+        claim_token[i] = staged[8 + i];
+        i = i + 1;
+    }
     val claimed: GuardStatus = codec.nonce_guard.claim(codec.nonce_guard.ctx,
-        key_id, ?staged[8], 12, nonce_deadline, now);
+        key_id, ?claim_token[0], 12, nonce_deadline, now);
+    clear_public(?claim_token[0], 12);
     if (claimed != GUARD_OK) {
         ct.zeroize(?secret_key[0], 32);
         ret codec_result(map_guard(claimed, true));
@@ -999,16 +1141,14 @@ fun encode_protected(ctx: ptr, value: *Session, context_value: view.View,
     ct.zeroize(?secret_key[0], 32);
     ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
     if (sealed.error != contracts.OK || sealed.written != plaintext_len + 16) {
-        codec.nonce_guard.forget(codec.nonce_guard.ctx, key_id,
-            ?staged[8], 12);
+        forget_nonce(codec.nonce_guard, key_id, ?staged[8]);
         ret codec_result(CODEC_INVALID);
     }
     var encoded: [4097]u8;
     val encoded_len: usize = base64.encode_url(?staged[0], raw_len,
         ?encoded[0], 4097);
     if (encoded_len == 0 || encoded_len != required_output) {
-        codec.nonce_guard.forget(codec.nonce_guard.ctx, key_id,
-            ?staged[8], 12);
+        forget_nonce(codec.nonce_guard, key_id, ?staged[8]);
         ret codec_result(CODEC_INVALID);
     }
     i = 0;
@@ -1021,8 +1161,8 @@ fun encode_protected(ctx: ptr, value: *Session, context_value: view.View,
 }
 
 fun token_text_valid(input: *u8, input_len: usize) bool {
-    if (input == nil || input_len == 0 || input_len >= MAX_TOKEN_BYTES
-        || input_len % 4 == 1) { ret false; }
+    if (input_len == 0 || input_len >= MAX_TOKEN_BYTES
+        || input_len % 4 == 1 || !range_valid(input, input_len)) { ret false; }
     var i: usize = 0;
     for (i < input_len) {
         val c: u8 = input[i];
@@ -1040,7 +1180,8 @@ fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
     data_output: *u8, data_capacity: usize,
     output: *Session) CodecOperation {
     val codec: *ProtectedCodec = ctx::*ProtectedCodec;
-    if (!protected_valid(codec) || output == nil || now < 0
+    if (!protected_valid(codec) || output == nil
+        || !range_valid(output::*u8, $size_of(Session)) || now < 0
         || context_value.len == 0
         || !view_valid(context_value, codec.max_context_bytes)
         || !token_text_valid(input, input_len)) {
@@ -1183,7 +1324,8 @@ pub fun protected_codec(codec: *ProtectedCodec) Codec {
 }
 
 pub fun release_protected_codec(codec: *ProtectedCodec) bool {
-    if (codec == nil || !codec.active) { ret false; }
+    if (codec == nil || !range_valid(codec::*u8, $size_of(ProtectedCodec))
+        || !codec.active) { ret false; }
     codec.ring = nil;
     codec.entropy = Entropy{};
     codec.nonce_guard = Guard{};
@@ -1289,7 +1431,8 @@ pub fun secure_cookie(name: str) CookiePolicy {
 
 pub fun init_manager(manager: *Manager, store: Store, codec: Codec,
     cookie: CookiePolicy) bool {
-    if (manager == nil || manager.active || store.start == nil
+    if (manager == nil || !range_valid(manager::*u8, $size_of(Manager))
+        || manager.active || store.start == nil
         || store.stop == nil || store.load == nil || store.save == nil
         || store.delete == nil || codec.encode == nil || codec.decode == nil
         || cookie.name == nil || !cookie.secure || !cookie.http_only) {
@@ -1303,14 +1446,16 @@ pub fun init_manager(manager: *Manager, store: Store, codec: Codec,
 }
 
 pub fun start_manager(manager: *Manager) StoreStatus {
-    if (manager == nil || manager.active) { ret STORE_INVALID; }
+    if (manager == nil || !range_valid(manager::*u8, $size_of(Manager))
+        || manager.active) { ret STORE_INVALID; }
     val started: StoreStatus = manager.store.start(manager.store.ctx);
     if (started == STORE_OK) { manager.active = true; }
     ret started;
 }
 
 pub fun stop_manager(manager: *Manager) StoreStatus {
-    if (manager == nil || !manager.active) { ret STORE_INVALID; }
+    if (manager == nil || !range_valid(manager::*u8, $size_of(Manager))
+        || !manager.active) { ret STORE_INVALID; }
     val stopped: StoreStatus = manager.store.stop(manager.store.ctx);
     if (stopped == STORE_OK) { manager.active = false; }
     ret stopped;
@@ -1353,6 +1498,47 @@ fun mutating_entropy_fill(ctx: ptr, output: *u8, len: usize) i64 {
     }
     state.calls = state.calls + 1;
     ret 0;
+}
+
+rec MutatingGuardState {
+    inner:     Guard;
+    mutations: usize;
+}
+
+fun mutating_guard_claim(ctx: ptr, key_id: u32, token: *u8,
+    token_len: usize, expires_at: i64, now: i64) GuardStatus {
+    val state: *MutatingGuardState = ctx::*MutatingGuardState;
+    if (state == nil) { ret GUARD_INVALID; }
+    val status: GuardStatus = state.inner.claim(state.inner.ctx, key_id,
+        token, token_len, expires_at, now);
+    if (token != nil && token_len != 0) {
+        token[0] = token[0] ^ 0xff;
+        state.mutations = state.mutations + 1;
+    }
+    ret status;
+}
+
+fun mutating_guard_forget(ctx: ptr, key_id: u32, token: *u8,
+    token_len: usize) GuardStatus {
+    val state: *MutatingGuardState = ctx::*MutatingGuardState;
+    if (state == nil) { ret GUARD_INVALID; }
+    val status: GuardStatus = state.inner.forget(state.inner.ctx, key_id,
+        token, token_len);
+    if (token != nil && token_len != 0) {
+        token[0] = token[0] ^ 0xff;
+        state.mutations = state.mutations + 1;
+    }
+    ret status;
+}
+
+fun mutating_guard(state: *MutatingGuardState) Guard {
+    if (state == nil || state.inner.domain == nil
+        || state.inner.backend == nil || state.inner.backend_len == 0) {
+        ret Guard{};
+    }
+    ret Guard{ctx: state::ptr, domain: state.inner.domain,
+        backend: state.inner.backend, backend_len: state.inner.backend_len,
+        claim: mutating_guard_claim, forget: mutating_guard_forget};
 }
 
 rec CodecFixture {
@@ -1405,9 +1591,76 @@ fun init_codec_fixture(fixture: *CodecFixture, algorithm: Algorithm,
 
 fun release_codec_fixture(fixture: *CodecFixture) bool {
     ret release_protected_codec(?fixture.protected)
-        && release_key_ring(?fixture.ring)
         && release_memory_guard(?fixture.nonce_guard)
-        && release_memory_guard(?fixture.replay_guard);
+        && release_memory_guard(?fixture.replay_guard)
+        && release_key_ring(?fixture.ring);
+}
+
+fun duplicate_generation_rejected(algorithm: Algorithm) bool {
+    var items: [2]KeyGeneration;
+    items[0] = KeyGeneration{id: 1, key_len: 32,
+        activated_at: 0, encode_until: 100, decode_until: 200};
+    items[1] = KeyGeneration{id: 2, key_len: 32,
+        activated_at: 50, encode_until: 200, decode_until: 300};
+    var seed: u8 = 0x10;
+    if (algorithm == CHACHA20_POLY1305) { seed = 0x80; }
+    var i: usize = 0;
+    for (i < 32) {
+        items[0].key[i] = seed + i::u8;
+        items[1].key[i] = seed + i::u8;
+        i = i + 1;
+    }
+    var ring: KeyRing;
+    ring.active = false;
+    ret !init_key_ring(?ring, ?items[0], 2, 1, 1) && !ring.active;
+}
+
+fun mutating_guard_round_trip(algorithm: Algorithm) bool {
+    var fixture: CodecFixture;
+    if (!init_codec_fixture(?fixture, algorithm, REPLAY_ALLOW, 8, 8)
+        || !release_protected_codec(?fixture.protected)) { ret false; }
+    var mutation: MutatingGuardState = MutatingGuardState{
+        inner: memory_guard(?fixture.nonce_guard), mutations: 0};
+    val entropy: Entropy = Entropy{ctx: (?fixture.entropy)::ptr,
+        fill: test_entropy_fill};
+    if (!init_protected_codec(?fixture.protected, ?fixture.ring, entropy,
+        mutating_guard(?mutation), REPLAY_ALLOW,
+        memory_guard(?fixture.replay_guard), algorithm, 5, 3600,
+        MAX_CONTEXT_BYTES)) { ret false; }
+    fixture.codec = protected_codec(?fixture.protected);
+    fixture.entropy.seed = 1;
+    fixture.entropy.repeat = true;
+    var value: Session = sample_session();
+    var token: [4096]u8;
+    val first: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
+        ?value, view.view("binding", 7), 100, ?token[0], 4096);
+    if (first.status != CODEC_OK) { ret false; }
+    var raw: [3072]u8;
+    val first_raw_len: usize = base64.decode(?token[0], first.written,
+        ?raw[0], 3072);
+    if (first_raw_len == 0
+        || mutation.inner.claim(mutation.inner.ctx, 1, ?raw[8], 12,
+            3005, 100) != GUARD_SEEN) { ret false; }
+    var id_output: [64]u8;
+    var data_output: [2048]u8;
+    var decoded: Session;
+    if (fixture.codec.decode(fixture.codec.ctx, ?token[0], first.written,
+        view.view("binding", 7), 100, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_OK
+        || !rotate_key_ring(?fixture.ring, 2, 1100)) { ret false; }
+    val second: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
+        ?value, view.view("binding", 7), 1100, ?token[0], 4096);
+    if (second.status != CODEC_OK || second.key_id != 2) { ret false; }
+    val second_raw_len: usize = base64.decode(?token[0], second.written,
+        ?raw[0], 3072);
+    if (second_raw_len == 0
+        || mutation.inner.claim(mutation.inner.ctx, 2, ?raw[8], 12,
+            5005, 1100) != GUARD_SEEN
+        || fixture.codec.decode(fixture.codec.ctx, ?token[0], second.written,
+            view.view("binding", 7), 1100, ?id_output[0], 64,
+            ?data_output[0], 2048, ?decoded).status != CODEC_OK
+        || mutation.mutations != 2) { ret false; }
+    ret release_codec_fixture(?fixture);
 }
 
 fun sample_session() Session {
@@ -1732,6 +1985,127 @@ test "laurel.session: guard horizons and regeneration ownership fail closed" {
 
     fixture.protected.entropy = entropy;
     if (!release_codec_fixture(?fixture)) { ret 11; }
+    ret 0;
+}
+
+test "laurel.session: key and guard domains survive hostile providers" {
+    if (!duplicate_generation_rejected(AES_256_GCM)
+        || !duplicate_generation_rejected(CHACHA20_POLY1305)) { ret 1; }
+    if (!mutating_guard_round_trip(AES_256_GCM)) { ret 2; }
+    if (!mutating_guard_round_trip(CHACHA20_POLY1305)) { ret 3; }
+
+    var fixture: CodecFixture;
+    if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_REJECT, 8, 8)) {
+        ret 4;
+    }
+    val entropy: Entropy = Entropy{ctx: (?fixture.entropy)::ptr,
+        fill: test_entropy_fill};
+    val nonce: Guard = memory_guard(?fixture.nonce_guard);
+    var candidate: ProtectedCodec;
+    candidate.active = false;
+    candidate.algorithm = 77;
+    var same_domain: Guard = memory_guard(?fixture.replay_guard);
+    same_domain.domain = nonce.domain;
+    if (init_protected_codec(?candidate, ?fixture.ring, entropy, nonce,
+        REPLAY_REJECT, same_domain, AES_256_GCM, 5, 3600,
+        MAX_CONTEXT_BYTES) || candidate.active || candidate.algorithm != 77) {
+        ret 5;
+    }
+
+    var alias: MemoryGuard;
+    alias.active = false;
+    if (!init_memory_guard(?alias, ?fixture.nonce_slots[1], 7)) { ret 6; }
+    val aliased_backend: Guard = memory_guard(?alias);
+    if (init_protected_codec(?candidate, ?fixture.ring, entropy, nonce,
+        REPLAY_REJECT, aliased_backend, AES_256_GCM, 5, 3600,
+        MAX_CONTEXT_BYTES) || candidate.active || candidate.algorithm != 77) {
+        ret 7;
+    }
+    var missing_domain: Guard = memory_guard(?fixture.replay_guard);
+    missing_domain.domain = nil;
+    if (init_protected_codec(?candidate, ?fixture.ring, entropy, nonce,
+        REPLAY_REJECT, missing_domain, AES_256_GCM, 5, 3600,
+        MAX_CONTEXT_BYTES) || candidate.active || candidate.algorithm != 77) {
+        ret 8;
+    }
+    if (!release_memory_guard(?alias)
+        || !release_codec_fixture(?fixture)) { ret 9; }
+    ret 0;
+}
+
+test "laurel.session: every public range and array product is checked" {
+    val maximum: usize = ~(0::usize);
+    val near_end: *u8 = (maximum - 1)::*u8;
+
+    var invalid_store: MemoryStore;
+    invalid_store.active = false;
+    val store_overflow: usize = maximum / $size_of(MemorySlot) + 1;
+    if (init_memory_store(?invalid_store, (1::usize)::*MemorySlot,
+        store_overflow)) { ret 1; }
+    var invalid_guard: MemoryGuard;
+    invalid_guard.active = false;
+    val guard_overflow: usize = maximum / $size_of(GuardSlot) + 1;
+    if (init_memory_guard(?invalid_guard, (1::usize)::*GuardSlot,
+        guard_overflow)) { ret 2; }
+    var invalid_ring: KeyRing;
+    invalid_ring.active = false;
+    val key_overflow: usize = maximum / $size_of(KeyGeneration) + 1;
+    if (init_key_ring(?invalid_ring, (1::usize)::*KeyGeneration,
+        key_overflow, 1, maximum)) { ret 3; }
+
+    var one_key: KeyGeneration = KeyGeneration{id: 1, key_len: 32,
+        activated_at: 0, encode_until: 100, decode_until: 200};
+    var key_index: usize = 0;
+    for (key_index < 32) {
+        one_key.key[key_index] = 0x20 + key_index::u8;
+        key_index = key_index + 1;
+    }
+    if (!init_key_ring(?invalid_ring, ?one_key, 1, 1, maximum)
+        || !release_key_ring(?invalid_ring)) { ret 4; }
+
+    var slots: [1]MemorySlot;
+    var memory: MemoryStore;
+    memory.active = false;
+    if (!init_memory_store(?memory, ?slots[0], 1)) { ret 5; }
+    val store: Store = memory_store(?memory);
+    var data_output: [2048]u8;
+    var loaded: Session = Session{version: 99};
+    val invalid_id: view.View = view.view(near_end, 4);
+    if (store.load(store.ctx, invalid_id, ?data_output[0], 2048,
+            ?loaded, nil) != STORE_INVALID
+        || store.delete(store.ctx, invalid_id, 1, 1, nil) != STORE_INVALID
+        || loaded.version != 99) { ret 6; }
+
+    var guard_slots: [2]GuardSlot;
+    var guard_storage: MemoryGuard;
+    guard_storage.active = false;
+    if (!init_memory_guard(?guard_storage, ?guard_slots[0], 2)) { ret 7; }
+    val guard: Guard = memory_guard(?guard_storage);
+    if (guard.claim(guard.ctx, 1, near_end, 4, 100, 1) != GUARD_INVALID
+        || guard.forget(guard.ctx, 1, near_end, 4) != GUARD_INVALID) { ret 8; }
+
+    var fixture: CodecFixture;
+    if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_ALLOW, 8, 8)) {
+        ret 9;
+    }
+    var value: Session = sample_session();
+    var token: [4096]u8;
+    val entropy_calls: usize = fixture.entropy.calls;
+    if (fixture.codec.encode(fixture.codec.ctx, ?value,
+            view.view(near_end, 4), 100, ?token[0], 4096).status
+            != CODEC_INVALID
+        || fixture.codec.decode(fixture.codec.ctx, near_end, 4,
+            view.view("binding", 7), 100, ?data_output[0], 64,
+            ?data_output[64], 1984, ?loaded).status != CODEC_INVALID
+        || fixture.entropy.calls != entropy_calls) { ret 10; }
+    value.data = view.view(near_end, 4);
+    if (fixture.codec.encode(fixture.codec.ctx, ?value,
+        view.view("binding", 7), 100, ?token[0], 4096).status
+        != CODEC_INVALID || fixture.entropy.calls != entropy_calls) { ret 11; }
+
+    if (store.stop(store.ctx) != STORE_OK
+        || !release_memory_guard(?guard_storage)
+        || !release_codec_fixture(?fixture)) { ret 12; }
     ret 0;
 }
 
