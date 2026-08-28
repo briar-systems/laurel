@@ -63,8 +63,9 @@ per writer.
 
 Guard callbacks borrow a private token copy for the duration of one call and
 must not retain its pointer. A callback that writes through the public pointer
-cannot change the nonce stored in the envelope or passed to AEAD. A provider
-must publish a stable nonnull
+is detected after return. Encode fails closed without releasing the ambiguous
+claim, and the changed bytes never reach the envelope or AEAD. A provider must
+publish a stable nonnull
 domain identity and the complete range of its coordination backend. Nonce and
 replay domains, contexts, and backend ranges must be distinct. This rejects two
 separately locked in-memory guards over aliased `GuardSlot` storage as well as
