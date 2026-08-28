@@ -22,10 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Strict RFC 3629 public error validation with C0, DEL, and C1 rejection.
 - Bounded default error responses that never expose private error details.
 - Application-owned middleware depth and process-abort panic policy.
+- Strict bounded request Cookie parsing with explicit duplicate-name policy.
+- Transactional Set-Cookie serialization with prefix and security enforcement.
+- AES-256-GCM and ChaCha20-Poly1305 protected session codecs.
+- Explicit entropy, nonce reuse, context binding, clock, rotation, and replay policy.
+- Fixation-resistant 256-bit session identifier regeneration.
+- Bounded concurrent in-memory sessions with optimistic version and generation checks.
+- Injectable lifecycle-owned durable session store and replay guard boundaries.
 
 ### Changed
 
-- Pinned `mach-std` to v0.29.0 and `mach-http` to v0.3.0.
+- Pinned `mach-std` to v0.29.0, `mach-http` to v0.3.0, and `mach-crypto` to v0.5.0.
 - Routed handler response ownership through the bound request context.
 - Required complete allocator callback tables at context binding and allocating boundaries.
 - Revalidated response, body, field storage, generation, and cancellation state after allocator callbacks.

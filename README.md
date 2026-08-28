@@ -29,8 +29,17 @@ The framework has no global application registry, hidden allocator, mandatory te
 
 ## Local dependencies
 
-The manifest uses pinned Git tags for `mach-std` v0.29.0 and `mach-http` v0.3.0. Build output uses Mach's default `out/` directory.
+The manifest uses pinned Git tags for `mach-std` v0.29.0, `mach-http` v0.3.0,
+and `mach-crypto` v0.5.0. Build output uses Mach's default `out/` directory.
 
 ## Status
 
-Application composition, lifecycle, bounded admission, exact request-context ownership, compile-once typed routes, request-scoped parameter decoding, stale-dispatch rejection, immutable middleware execution snapshots, nonreentrant context execution, pre-execution cancellation classification, and value-owned fail-closed errors are implemented. Protected sessions, security defaults, forms, uploads, rendering, realtime responses, and the in-process harness remain tracked work. Security-sensitive operations have no fallback implementation. The route ownership and decoder contract is documented in [`doc/routing.md`](doc/routing.md). Middleware ordering, `Next` lifetime, and error ownership are documented in [`doc/middleware.md`](doc/middleware.md).
+Application composition, lifecycle, bounded admission, exact request-context
+ownership, typed routes, immutable middleware execution, value-owned errors,
+strict cookies, AEAD-protected sessions, bounded replay and nonce guards,
+generation-safe in-memory persistence, and the durable store boundary are
+implemented. Security defaults, forms, uploads, rendering, realtime responses,
+and the in-process harness remain tracked work. Security-sensitive operations
+have no fallback implementation. See [`doc/routing.md`](doc/routing.md),
+[`doc/middleware.md`](doc/middleware.md), and
+[`doc/sessions.md`](doc/sessions.md) for the ownership contracts.
