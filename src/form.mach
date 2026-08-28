@@ -24,7 +24,7 @@ pub rec Form {
     len:    usize;
 }
 
-pub def ParseFun: fun(ptr, *body.Body, *A.Allocator, Limits) R.Result[Form, error.AppError];
+pub def ParseFun: fun(ptr, *body.Reader, *A.Allocator, Limits) R.Result[Form, error.AppError];
 
 pub rec Parser {
     ctx:   ptr;

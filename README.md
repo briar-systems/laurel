@@ -2,7 +2,7 @@
 
 Laurel is a lightweight production web application framework for Mach. It defines the application layer above `mach-http` while keeping protocol parsing, transport ownership, application dispatch, and integration policy in separate packages.
 
-The current repository is a contract scaffold. It defines stable ownership and extension boundaries without pretending that route dispatch, middleware execution, session protection, multipart parsing, or rendering already work.
+The application foundation is implemented. Applications assemble caller-owned providers, limits, handlers, observers, security policy, and lifecycle callbacks. Startup, readiness, admission, drain, stop, and failure cleanup are deterministic. Each admitted request context borrows one exact `mach-http` exchange generation and cancellation scope.
 
 Production scope includes typed handlers, middleware, secure sessions and cookies, forms, streamed uploads, rendering, service providers, application lifecycle, structured failures, observability, in-process tests, streaming responses, server-sent events, and WebSockets. Database clients, template engines, queues, and identity systems remain replaceable providers rather than mandatory framework subsystems.
 
@@ -11,7 +11,7 @@ The framework has no global application registry, hidden allocator, mandatory te
 ## Boundaries
 
 - `app` owns assembled framework configuration and application state.
-- `context` carries one borrowed request, route parameters, request identity, cancellation state, and application state.
+- `context` carries one borrowed exchange, generation-bound route parameters, request identity, cancellation scope, allocator, and application state.
 - `handler` defines application handlers over an explicit context and response.
 - `router` connects framework handlers to caller-owned `mach-http` router storage.
 - `middleware` defines an allocation-free chain contract with explicit next handlers.
@@ -29,8 +29,8 @@ The framework has no global application registry, hidden allocator, mandatory te
 
 ## Local dependencies
 
-The manifest uses pinned Git tags for `mach-std` and `mach-http`. Build output uses Mach's default `out/` directory.
+The manifest uses pinned Git tags for `mach-std` v0.29.0 and `mach-http` v0.2.1. Build output uses Mach's default `out/` directory.
 
 ## Status
 
-This scaffold is not a runnable framework. Security-sensitive operations have no fallback implementation. A production release requires the corresponding `mach-http` server lifecycle, a reviewed session codec, bounded form and multipart parsers, and concrete error and observability adapters.
+Application composition, lifecycle, bounded admission, and exact request-context ownership are implemented. Route execution, middleware, protected sessions, security defaults, forms, uploads, rendering, realtime responses, and the in-process harness remain tracked work. Security-sensitive operations have no fallback implementation.

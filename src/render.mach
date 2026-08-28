@@ -7,7 +7,8 @@ use laurel.error;
 
 pub rec Rendered {
     content_type: view.View;
-    body:         body.Body;
+    body:         *body.Reader;
+    generation:   u64;
 }
 
 pub def RenderFun: fun(ptr, view.View, ptr) R.Result[Rendered, error.AppError];
