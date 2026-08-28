@@ -33,7 +33,9 @@ Serialization leaves the caller output unchanged on every failure and does not
 append a null terminator. Attribute name and value limits apply independently
 to every emitted standard attribute as well as extensions. The exact output
 range must not overlap the cookie record, attribute records, or any borrowed
-name, value, path, or domain view.
+name, value, path, or domain view. Scalar and count limits are resolved before
+any borrowed bytes or attribute records are traversed. Every serialized length
+component uses checked accumulation, including at the address-space maximum.
 
 The default cookie limits are 64 cookies, 128-byte names, 4096-byte values, 16
 attributes, 128-byte attribute names, 1024-byte attribute values, 4096 bytes per
@@ -59,6 +61,15 @@ generation. Exhaustion fails closed. A deployment with multiple writers must
 inject a shared atomic claim implementation or allocate disjoint nonce domains
 per writer.
 
+Guard callbacks borrow a private token copy for the duration of one call and
+must not retain its pointer. A callback that writes through the public pointer
+cannot change the nonce stored in the envelope or passed to AEAD. A provider
+must publish a stable nonnull
+domain identity and the complete range of its coordination backend. Nonce and
+replay domains, contexts, and backend ranges must be distinct. This rejects two
+separately locked in-memory guards over aliased `GuardSlot` storage as well as
+custom adapters that declare the same backend.
+
 Caller-owned key generation storage transfers exclusive mutation rights to the
 active `KeyRing`. Do not modify an item until `release_key_ring` returns. A
 generation has an activation time, an exclusive encode deadline, and an
@@ -69,6 +80,10 @@ active encode and decode calls. Retired generations may
 decode inside their bounded window and produce `needs_rotation`. Unknown and
 inactive generations fail before plaintext release. `release_key_ring` wipes
 all 32-byte key slots and invalidates the ring.
+Generation identifiers and 256-bit key material must both be unique within a
+ring. Initialization compares every key pair with fixed work and rejects
+duplicate material, preventing one AEAD key from receiving the same nonce under
+two generation identifiers.
 
 The public application callback ABI contains no secret-qualified pointers.
 Each operation copies the selected key and plaintext into fixed-size
@@ -133,6 +148,10 @@ connections, allocations, transactions, and cancellation machinery.
 
 Store result records and load buffers must not overlap their input views or
 session records. Unsafe aliasing fails before any caller output is written.
+All session, context, token, identifier, data, guard-token, and result ranges
+are validated before they are read. In-memory store, guard, and key-ring
+initializers check array multiplication, address ranges, and owner/backing
+disjointness before clearing or publishing caller storage.
 
 ## Lifecycle order
 

@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parser and serializer ownership aliases before mutation.
 - Retained nonce and replay claims for their complete cryptographic and accepted
   decode horizons, with distinct guard domains and hardened regeneration ownership.
+- Rejected duplicate key material across generations and isolated AEAD nonces
+  from mutable guard callback inputs.
+- Added explicit guard domain and backend identities with overlapping backing
+  rejection, checked session ranges, and overflow-safe initializer products.
+- Ordered cookie scalar preflight before traversal and checked every serialized
+  length component.
 
 ## [0.2.0] - 2026-08-27
 
