@@ -1,13 +1,22 @@
 # explicit application assembly and lifecycle ownership
 
+use A: std.allocator;
 use R: std.types.result;
+use std.chrono.time;
+use std.sync.atomic;
+use std.sync.cancel;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.view;
+use http.core.body;
+use http.core.exchange;
+use http.core.field;
 use http.core.message;
+use http.core.method;
+use http.core.target;
 use laurel.context;
 use laurel.error;
 use laurel.handler;
@@ -20,14 +29,18 @@ use laurel.router;
 use laurel.security;
 use laurel.session;
 
+val ADMISSION_CLOSED: i64 = -1;
+
 pub rec Limits {
-    max_body_bytes:      usize;
-    max_form_fields:     usize;
-    max_upload_bytes:    usize;
-    max_route_params:    usize;
-    handler_deadline_ns: i64;
-    max_providers:       usize;
-    max_provider_key_bytes: usize;
+    max_body_bytes:          usize;
+    max_form_fields:         usize;
+    max_upload_bytes:        usize;
+    max_route_params:        usize;
+    max_request_id_bytes:    usize;
+    max_active_requests:     usize;
+    handler_deadline_ns:     i64;
+    max_providers:           usize;
+    max_provider_key_bytes:  usize;
     max_background_services: usize;
 }
 
@@ -52,7 +65,8 @@ pub rec App {
     renderer:     *render.Renderer;
     observer:     *observability.Observer;
     app_state:    ptr;
-    accepting:    bool;
+    admission:    i64;
+    generation:   u64;
     valid:        bool;
 }
 
@@ -76,7 +90,9 @@ pub rec Assembly {
 
 pub fun validate_limits(limits: Limits) bool {
     ret limits.max_body_bytes > 0 && limits.max_form_fields > 0 && limits.max_upload_bytes > 0
-        && limits.max_route_params > 0 && limits.handler_deadline_ns >= lifecycle.NO_DEADLINE
+        && limits.max_route_params > 0 && limits.max_request_id_bytes > 0
+        && limits.max_active_requests > 0 && limits.max_active_requests <= 9223372036854775807
+        && limits.handler_deadline_ns >= lifecycle.NO_DEADLINE
         && limits.max_provider_key_bytes > 0 && limits.max_background_services > 0;
 }
 
@@ -119,7 +135,8 @@ pub fun validate_assembly(assembly: Assembly) bool {
 }
 
 pub fun assemble(app: *App, assembly: Assembly) bool {
-    if (app == nil || app.valid || !validate_assembly(assembly)) { ret false; }
+    if (app == nil || app.valid || app.generation == 18446744073709551615
+        || !validate_assembly(assembly)) { ret false; }
     app.config = assembly.config;
     app.router = assembly.router;
     app.middleware = assembly.middleware;
@@ -135,7 +152,8 @@ pub fun assemble(app: *App, assembly: Assembly) bool {
     app.renderer = assembly.renderer;
     app.observer = assembly.observer;
     app.app_state = assembly.app_state;
-    app.accepting = false;
+    app.admission = ADMISSION_CLOSED;
+    app.generation = app.generation + 1;
     app.valid = true;
     ret true;
 }
@@ -145,7 +163,7 @@ pub fun start(app: *App) lifecycle.Transition {
         ret lifecycle.Transition{status: lifecycle.TRANSITION_INVALID, state: lifecycle.FAILED,
             component: lifecycle.NO_COMPONENT, error: view.view("invalid application", 19)};
     }
-    app.accepting = false;
+    atomic.store(?app.admission, ADMISSION_CLOSED);
     ret lifecycle.start(app.lifecycle);
 }
 
@@ -155,8 +173,79 @@ pub fun poll_ready(app: *App) lifecycle.Transition {
             component: lifecycle.NO_COMPONENT, error: view.view("invalid application", 19)};
     }
     val result: lifecycle.Transition = lifecycle.poll_ready(app.lifecycle);
-    app.accepting = result.status == lifecycle.TRANSITION_OK && lifecycle.accepting(app.lifecycle);
+    if (result.status == lifecycle.TRANSITION_OK && lifecycle.accepting(app.lifecycle)) {
+        var expected: i64 = ADMISSION_CLOSED;
+        if (!atomic.cas(?app.admission, ?expected, 0) && expected < 0) {
+            ret request_transition(app, lifecycle.TRANSITION_INVALID);
+        }
+    }
     ret result;
+}
+
+fun request_transition(app: *App, status: lifecycle.TransitionStatus) lifecycle.Transition {
+    var state: lifecycle.State = lifecycle.FAILED;
+    if (app != nil && app.lifecycle != nil) { state = app.lifecycle.state; }
+    ret lifecycle.Transition{status: status, state: state, component: lifecycle.NO_COMPONENT,
+        error: view.view(nil, 0)};
+}
+
+pub fun active_request_count(app: *App) usize {
+    if (app == nil) { ret 0; }
+    val admission: i64 = atomic.load(?app.admission);
+    if (admission >= 0) { ret admission::usize; }
+    ret (0 - admission - 1)::usize;
+}
+
+fun close_admission(app: *App) {
+    for (true) {
+        val current: i64 = atomic.load(?app.admission);
+        if (current < 0) { ret; }
+        var expected: i64 = current;
+        if (atomic.cas(?app.admission, ?expected, 0 - current - 1)) { ret; }
+    }
+}
+
+fun reserve_context(app: *App) bool {
+    if (app == nil || app.generation == 0) { ret false; }
+    val limit: i64 = app.config.limits.max_active_requests::i64;
+    for (true) {
+        val current: i64 = atomic.load(?app.admission);
+        if (current < 0 || current >= limit) { ret false; }
+        var expected: i64 = current;
+        if (atomic.cas(?app.admission, ?expected, current + 1)) { ret true; }
+    }
+    ret false;
+}
+
+fun release_reservation(app: *App) bool {
+    for (true) {
+        val current: i64 = atomic.load(?app.admission);
+        if ((current == 0) || (current == ADMISSION_CLOSED)) { ret false; }
+        var next: i64 = current - 1;
+        if (current < 0) { next = current + 1; }
+        var expected: i64 = current;
+        if (atomic.cas(?app.admission, ?expected, next)) { ret true; }
+    }
+    ret false;
+}
+
+pub fun bind_context(app: *App, request_context: *context.Context,
+    exchange_ptr: *exchange.Exchange, params: context.Params, allocator: *A.Allocator,
+    request_id: view.View) bool {
+    if (!reserve_context(app)) { ret false; }
+    if (!context.bind(request_context, exchange_ptr, params, app.config.limits.max_route_params,
+        allocator, app, app.generation, app.app_state, request_id,
+        app.config.limits.max_request_id_bytes)) {
+        release_reservation(app);
+        ret false;
+    }
+    ret true;
+}
+
+pub fun release_context(app: *App, request_context: *context.Context) bool {
+    if (app == nil || request_context == nil || !context.owned_by(request_context, app, app.generation)
+        || !context.unbind(request_context, app, app.generation)) { ret false; }
+    ret release_reservation(app);
 }
 
 pub fun drain(app: *App, deadline_ns: i64) lifecycle.Transition {
@@ -164,8 +253,17 @@ pub fun drain(app: *App, deadline_ns: i64) lifecycle.Transition {
         ret lifecycle.Transition{status: lifecycle.TRANSITION_INVALID, state: lifecycle.FAILED,
             component: lifecycle.NO_COMPONENT, error: view.view("invalid application", 19)};
     }
-    app.accepting = false;
-    ret lifecycle.drain(app.lifecycle, deadline_ns);
+    close_admission(app);
+    var result: lifecycle.Transition;
+    if (app.lifecycle.state == lifecycle.DRAINED) {
+        result = request_transition(app, lifecycle.TRANSITION_OK);
+    } or {
+        result = lifecycle.drain(app.lifecycle, deadline_ns);
+    }
+    if (result.status == lifecycle.TRANSITION_OK && active_request_count(app) > 0) {
+        ret request_transition(app, lifecycle.TRANSITION_PENDING);
+    }
+    ret result;
 }
 
 pub fun stop(app: *App) lifecycle.Transition {
@@ -173,16 +271,27 @@ pub fun stop(app: *App) lifecycle.Transition {
         ret lifecycle.Transition{status: lifecycle.TRANSITION_INVALID, state: lifecycle.FAILED,
             component: lifecycle.NO_COMPONENT, error: view.view("invalid application", 19)};
     }
-    app.accepting = false;
+    close_admission(app);
+    if (active_request_count(app) > 0) {
+        ret request_transition(app, lifecycle.TRANSITION_PENDING);
+    }
     ret lifecycle.stop(app.lifecycle);
 }
 
 pub fun can_accept(app: *App) bool {
-    ret app != nil && app.valid && app.accepting && lifecycle.accepting(app.lifecycle);
+    if (app == nil || !app.valid) { ret false; }
+    val admission: i64 = atomic.load(?app.admission);
+    ret admission >= 0 && admission < app.config.limits.max_active_requests::i64;
+}
+
+pub fun drained(app: *App) bool {
+    ret app != nil && app.valid && atomic.load(?app.admission) == ADMISSION_CLOSED
+        && app.lifecycle.state == lifecycle.DRAINED;
 }
 
 pub fun release(app: *App) bool {
-    if (app == nil || !app.valid || !lifecycle.terminal(app.lifecycle)) { ret false; }
+    if (app == nil || !app.valid || atomic.load(?app.admission) != ADMISSION_CLOSED
+        || !lifecycle.terminal(app.lifecycle)) { ret false; }
     app.router = nil;
     app.middleware = nil;
     app.providers = nil;
@@ -195,7 +304,7 @@ pub fun release(app: *App) bool {
     app.renderer = nil;
     app.observer = nil;
     app.app_state = nil;
-    app.accepting = false;
+    app.admission = ADMISSION_CLOSED;
     app.valid = false;
     ret true;
 }
@@ -216,8 +325,7 @@ fun test_lifecycle_stop(context: ptr) R.Result[lifecycle.CallbackStatus, view.Vi
     ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
 }
 
-fun test_handler(context_ptr: ptr, request_context: *context.Context,
-    response: *message.Response) R.Result[u8, error.AppError] {
+fun test_handler(context_ptr: ptr, request_context: *context.Context) R.Result[u8, error.AppError] {
     ret R.ok[u8, error.AppError](handler.RESPOND);
 }
 
@@ -245,7 +353,8 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     var app: App;
     val assembly: Assembly = Assembly{
         config: Config{limits: Limits{max_body_bytes: 1024, max_form_fields: 16, max_upload_bytes: 4096,
-            max_route_params: 8, handler_deadline_ns: lifecycle.NO_DEADLINE, max_providers: 0,
+            max_route_params: 8, max_request_id_bytes: 64, max_active_requests: 1,
+            handler_deadline_ns: lifecycle.NO_DEADLINE, max_providers: 0,
             max_provider_key_bytes: 32, max_background_services: 1}, trust_proxy: false},
         router: ?routes,
         middleware: ?middlewares,
@@ -265,8 +374,48 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     if (!assemble(?app, assembly) || can_accept(?app)) { ret 3; }
     if (start(?app).status != lifecycle.TRANSITION_OK || can_accept(?app)) { ret 4; }
     if (poll_ready(?app).status != lifecycle.TRANSITION_OK || !can_accept(?app)) { ret 5; }
-    if (drain(?app, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_OK || can_accept(?app)) { ret 6; }
-    if (stop(?app).status != lifecycle.TRANSITION_OK || !lifecycle.terminal(?controller)) { ret 7; }
-    if (!release(?app) || app.valid || app.app_state != nil) { ret 8; }
+
+    val configured: message.Limits = message.limits_default();
+    var scope: cancel.Scope;
+    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) { ret 6; }
+    var request_fields: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    var request_trailers: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    var request_body: body.Reader = body.empty_reader(101);
+    var request: message.Request;
+    val metadata: message.Metadata = message.Metadata{
+        version: message.version_h1(1, 1), secure: true, early_data: false,
+        peer: message.unspecified_endpoint(), local: message.unspecified_endpoint(),
+        received_at: time.Time{sec: 1, nsec: 0}, has_deadline: false,
+        deadline: time.Time{sec: 0, nsec: 0}, request_index: 1,
+    };
+    if (!message.init_request(?request, method.from_kind(method.GET),
+        target.origin(view.view("/", 1), view.view("/", 1), view.view(nil, 0)), metadata,
+        request_fields, request_trailers, ?request_body, 101, configured)) { ret 7; }
+    var response_fields: [100]field.Field;
+    var response_trailers: [32]field.Field;
+    var response: message.Response;
+    if (!message.init_response(?response, ?response_fields[0], 100,
+        ?response_trailers[0], 32, 101, configured)) { ret 8; }
+    var informationals: [8]message.Informational;
+    var http_exchange: exchange.Exchange;
+    if (!exchange.init(?http_exchange, ?request, ?response, ?informationals[0], 8,
+        ?scope, 101, configured) || !exchange.begin(?http_exchange)) { ret 9; }
+    var allocator: A.Allocator;
+    var request_context: context.Context;
+    if (!bind_context(?app, ?request_context, ?http_exchange,
+        context.Params{items: nil, len: 0, generation: 101}, ?allocator,
+        view.view("request-101", 11)) || active_request_count(?app) != 1) { ret 10; }
+    var rejected_context: context.Context;
+    if (can_accept(?app) || bind_context(?app, ?rejected_context, ?http_exchange,
+        context.Params{items: nil, len: 0, generation: 101}, ?allocator,
+        view.view("rejected-101", 12)) || rejected_context.bound
+        || active_request_count(?app) != 1) { ret 10; }
+    if (drain(?app, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_PENDING
+        || can_accept(?app) || stop(?app).status != lifecycle.TRANSITION_PENDING) { ret 11; }
+    if (!release_context(?app, ?request_context) || release_context(?app, ?request_context)
+        || drain(?app, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_OK
+        || !drained(?app)) { ret 12; }
+    if (stop(?app).status != lifecycle.TRANSITION_OK || !lifecycle.terminal(?controller)) { ret 13; }
+    if (!release(?app) || app.valid || app.app_state != nil || !cancel.destroy(?scope)) { ret 14; }
     ret 0;
 }
