@@ -37,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key rotation and clock windows.
 - Authentication principal ownership with deterministic failure and release.
 - Transactional relative, same-origin, and allowlisted redirect policy.
+- Incremental URL-encoded decoding with independent encoded, field, name,
+  value, and temporary-storage limits.
+- Fragmented and nested multipart decoding with strict MIME parameter grammar.
+- Request-wide asynchronous upload batches with per-file staging and one atomic
+  publish or abort decision.
+- Explicit durable reconciliation for unknown upload commit and abort outcomes.
+- HTTP body adapters that span pending body and storage operations without
+  losing token ownership.
 
 ### Changed
 
