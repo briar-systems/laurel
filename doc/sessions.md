@@ -73,7 +73,10 @@ Encode and decode take Unix seconds explicitly. The codec enforces nonnegative
 times, issued-at, not-before, expiry, maximum lifetime, configured clock skew,
 and key windows. Decode authenticates before it evaluates encrypted session
 metadata. Outputs remain byte-for-byte unchanged on authentication, semantic,
-capacity, replay, and clock failures.
+capacity, replay, and clock failures. Encode output cannot overlap the input
+session record, identifier, or data. Decode identifier and data outputs must be
+disjoint and cannot overlap the output session record. Decode may reuse token
+input storage because the complete envelope is staged before plaintext release.
 
 `REPLAY_ALLOW` permits repeated valid tokens. `REPLAY_REJECT` atomically claims
 the authenticated key and nonce after all validation and capacity checks but
@@ -96,11 +99,11 @@ when it is no longer active.
 
 An insert passes expected version zero and a session generation of zero. A
 successful provider chooses a nonzero immutable generation and version one,
-and returns both in `SaveResult`. An
-update must match both the current version and generation, increments the
+and returns both in `SaveResult`. An update must match both the current version
+and generation, increments the
 version exactly once, and publishes the version and unchanged generation only
-on success. Delete
-requires the same exact pair. A version mismatch is `STORE_CONFLICT`. A
+on success. Delete requires the same exact pair. A version mismatch is
+`STORE_CONFLICT`. A
 generation mismatch is `STORE_STALE_GENERATION`. These rules make a distributed
 compare-and-swap store a drop-in implementation and prevent a deleted handle
 from mutating a later session that reused the same identifier.
@@ -110,6 +113,9 @@ mutex. Capacity is explicit. Concurrent updates with the same expected version
 produce exactly one success. Stop wipes identifiers and application data before
 releasing the lifecycle. Durable providers retain ownership of their internal
 connections, allocations, transactions, and cancellation machinery.
+
+Store result records and load buffers must not overlap their input views or
+session records. Unsafe aliasing fails before any caller output is written.
 
 ## Lifecycle order
 
