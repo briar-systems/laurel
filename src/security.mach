@@ -79,15 +79,6 @@ pub rec RedirectPolicy {
     initialized: bool;
 }
 
-pub def IssueCsrfFun: fun(ptr, *u8, usize) R.Result[usize, error.AppError];
-pub def VerifyCsrfFun: fun(ptr, view.View) R.Result[bool, error.AppError];
-
-pub rec CsrfProtector {
-    ctx: ptr;
-    issue: IssueCsrfFun;
-    verify: VerifyCsrfFun;
-}
-
 pub def AliasesStateFun: fun(ptr, *u8, usize) bool;
 pub def AuthenticateFun: fun(ptr, *message.Request)
     R.Result[ptr, error.AppError];
