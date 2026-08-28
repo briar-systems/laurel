@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compile-once typed method, host, path, parameter, wildcard, and handler routes.
 - Request-scoped text, integer, boolean, UUID, and custom parameter decoding.
 - Structured route conflict, malformed target, decoder, capacity, and stale-dispatch errors.
+- Single-pass middleware with generation-bound, single-use next tokens.
+- Deterministic short-circuit, error replacement, and cancellation unwinding.
+- Bounded default error responses that never expose private error details.
+- Application-owned middleware depth and process-abort panic policy.
 
 ### Changed
 
