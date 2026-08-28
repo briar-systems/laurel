@@ -1,10 +1,19 @@
-# application error classification and response mapping
+# application errors and fail-closed response mapping
 
+use A: std.allocator;
 use R: std.types.result;
 use std.types.bool.bool;
 use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
 use std.types.string.str;
+use std.types.string.str_len;
+use std.types.view;
+use http.core.body;
+use http.core.field;
 use http.core.message;
+use http.core.status;
+use laurel.context;
 
 pub def Kind: u8;
 
@@ -16,34 +25,242 @@ pub val CONFLICT:     Kind = 5;
 pub val TOO_LARGE:    Kind = 6;
 pub val UNAVAILABLE:  Kind = 7;
 pub val INTERNAL:     Kind = 8;
+pub val CANCELLED:    Kind = 9;
 
 pub rec AppError {
     kind:       Kind;
     status:     u16;
-    public_msg: str;
-    detail:     str;
+    public_msg: view.View;
+    detail:     view.View;
     retryable:  bool;
 }
 
-pub fun make(kind: Kind, status: u16, public_msg: str, detail: str, retryable: bool) AppError {
-    ret AppError{
-        kind: kind,
-        status: status,
-        public_msg: public_msg,
-        detail: detail,
-        retryable: retryable,
-    };
+pub fun make_view(kind: Kind, status_code: u16, public_msg: view.View,
+    detail: view.View, retryable: bool) AppError {
+    ret AppError{kind: kind, status: status_code, public_msg: public_msg,
+        detail: detail, retryable: retryable};
 }
 
-pub def RenderFun: fun(ptr, AppError, *message.Response) R.Result[u8, str];
+pub fun make(kind: Kind, status_code: u16, public_msg: str,
+    detail: str, retryable: bool) AppError {
+    ret make_view(kind, status_code,
+        view.view(public_msg, str_len(public_msg)),
+        view.view(detail, str_len(detail)), retryable);
+}
+
+pub def RenderFun: fun(ptr, AppError, *context.Context) R.Result[u8, str];
 
 pub rec Mapper {
     ctx:    ptr;
     render: RenderFun;
 }
 
-test "laurel.error: make preserves classification" {
-    val e: AppError = make(NOT_FOUND, 404, "not found", "route missing", false);
-    if (e.kind != NOT_FOUND || e.status != 404 || e.retryable) { ret 1; }
+pub rec Default {
+    limits:           message.Limits;
+    max_public_bytes: usize;
+    initialized:      bool;
+}
+
+rec DefaultBody {
+    message: view.View;
+    offset:  usize;
+    reader:  body.Reader;
+}
+
+fun default_status(kind: Kind) status.Status {
+    if (kind == BAD_REQUEST) { ret status.BAD_REQUEST; }
+    if (kind == UNAUTHORIZED) { ret status.UNAUTHORIZED; }
+    if (kind == FORBIDDEN) { ret status.FORBIDDEN; }
+    if (kind == NOT_FOUND) { ret status.NOT_FOUND; }
+    if (kind == CONFLICT) { ret status.CONFLICT; }
+    if (kind == TOO_LARGE) { ret status.CONTENT_TOO_LARGE; }
+    if (kind == UNAVAILABLE) { ret status.SERVICE_UNAVAILABLE; }
+    if (kind == CANCELLED) { ret status.REQUEST_TIMEOUT; }
+    ret status.INTERNAL_SERVER_ERROR;
+}
+
+fun fallback_message(kind: Kind) view.View {
+    if (kind == BAD_REQUEST) { ret view.view("bad request", 11); }
+    if (kind == UNAUTHORIZED) { ret view.view("unauthorized", 12); }
+    if (kind == FORBIDDEN) { ret view.view("forbidden", 9); }
+    if (kind == NOT_FOUND) { ret view.view("not found", 9); }
+    if (kind == CONFLICT) { ret view.view("conflict", 8); }
+    if (kind == TOO_LARGE) { ret view.view("request too large", 17); }
+    if (kind == UNAVAILABLE) { ret view.view("service unavailable", 19); }
+    if (kind == CANCELLED) { ret view.view("request cancelled", 17); }
+    ret view.view("internal server error", 21);
+}
+
+fun public_message_valid(value: view.View, limit: usize) bool {
+    if (value.len == 0 || value.len > limit || value.data == nil) { ret false; }
+    var i: usize = 0;
+    for (i < value.len) {
+        val c: u8 = value.data[i];
+        if (c == 0 || c == '\r' || c == '\n' || c < ' ' || c == 127) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun public_message(app_error: AppError, limit: usize) view.View {
+    if (app_error.kind != INTERNAL && app_error.kind >= BAD_REQUEST
+        && app_error.kind <= CANCELLED
+        && public_message_valid(app_error.public_msg, limit)) {
+        ret app_error.public_msg;
+    }
+    ret fallback_message(app_error.kind);
+}
+
+fun body_read(ctx: ptr, output: *u8, capacity: usize,
+    trailers: *field.Fields) body.Progress {
+    val state: *DefaultBody = ctx::*DefaultBody;
+    if (state == nil || state.offset > state.message.len
+        || (capacity != 0 && output == nil)) {
+        ret body.failed("invalid default error body", body.REUSE_FORBIDDEN);
+    }
+    if (state.offset == state.message.len) { ret body.complete(body.REUSE_ALLOWED); }
+    var count: usize = state.message.len - state.offset;
+    if (count > capacity) { count = capacity; }
+    if (count == 0) { ret body.failed("empty default error read", body.REUSE_FORBIDDEN); }
+    var i: usize = 0;
+    for (i < count) {
+        output[i] = state.message.data[state.offset + i];
+        i = i + 1;
+    }
+    state.offset = state.offset + count;
+    ret body.data(count);
+}
+
+fun body_finish(ctx: ptr, mode: body.Mode,
+    trailers: *field.Fields) body.Progress {
+    val state: *DefaultBody = ctx::*DefaultBody;
+    if (state == nil) { ret body.failed("invalid default error body", body.REUSE_FORBIDDEN); }
+    if (mode == body.DRAIN) {
+        state.offset = state.message.len;
+        ret body.complete(body.REUSE_ALLOWED);
+    }
+    if (mode == body.REJECT) { ret body.rejected(body.REUSE_ALLOWED); }
+    if (mode == body.CANCEL) { ret body.cancelled(body.REUSE_FORBIDDEN); }
+    if (mode == body.TIMEOUT) { ret body.timed_out(body.REUSE_FORBIDDEN); }
+    ret body.failed("invalid default error finish", body.REUSE_FORBIDDEN);
+}
+
+fun body_complete(ctx: ptr, token: u64,
+    trailers: *field.Fields) body.Progress {
+    ret body.failed("default error body has no pending operation",
+        body.REUSE_FORBIDDEN);
+}
+
+fun body_release(ctx: ptr) {}
+
+fun default_valid(renderer: *Default) bool {
+    if (renderer == nil || !renderer.initialized || renderer.max_public_bytes < 21
+        || renderer.limits.response_fields.max_count < 2
+        || renderer.limits.response_fields.max_bytes < 58
+        || renderer.limits.response_fields.max_name_bytes < 13
+        || renderer.limits.response_fields.max_value_bytes < 25
+        || renderer.limits.response_body.max_chunk_bytes == 0
+        || renderer.limits.response_body.max_chunks == 0
+        || renderer.max_public_bytes::u64 > renderer.limits.response_body.max_bytes) {
+        ret false;
+    }
+    val chunks: usize = renderer.max_public_bytes
+        / renderer.limits.response_body.max_chunk_bytes;
+    val remainder: usize = renderer.max_public_bytes
+        % renderer.limits.response_body.max_chunk_bytes;
+    ret chunks < renderer.limits.response_body.max_chunks
+        || (chunks == renderer.limits.response_body.max_chunks && remainder == 0);
+}
+
+pub fun initialize_default(renderer: *Default, limits: message.Limits,
+    max_public_bytes: usize) bool {
+    if (renderer == nil || renderer.initialized) { ret false; }
+    renderer.limits = limits;
+    renderer.max_public_bytes = max_public_bytes;
+    renderer.initialized = true;
+    if (!default_valid(renderer)) {
+        renderer.initialized = false;
+        ret false;
+    }
+    ret true;
+}
+
+fun render_default(ctx: ptr, app_error: AppError,
+    request_context: *context.Context) R.Result[u8, str] {
+    val renderer: *Default = ctx::*Default;
+    if (!default_valid(renderer) || !context.active(request_context)
+        || request_context.alloc == nil) {
+        ret R.err[u8, str]("invalid default error renderer");
+    }
+    val response: *message.Response = context.response(request_context);
+    if (response == nil || response.committed
+        || response.body_kind != message.BODY_NONE
+        || response.fields.capacity < 2) {
+        ret R.err[u8, str]("error response is unavailable");
+    }
+    val selected_message: view.View = public_message(app_error,
+        renderer.max_public_bytes);
+    val body_allocation: R.Result[*DefaultBody, *u8] =
+        A.allocate[DefaultBody](request_context.alloc, 1);
+    if (R.is_err[*DefaultBody, *u8](body_allocation)) {
+        ret R.err[u8, str]("default error body allocation failed");
+    }
+    val message_allocation: R.Result[*u8, *u8] =
+        A.allocate[u8](request_context.alloc, selected_message.len);
+    if (R.is_err[*u8, *u8](message_allocation)) {
+        ret R.err[u8, str]("default error message allocation failed");
+    }
+    val message_bytes: *u8 = R.unwrap_ok[*u8, *u8](message_allocation);
+    var i: usize = 0;
+    for (i < selected_message.len) {
+        message_bytes[i] = selected_message.data[i];
+        i = i + 1;
+    }
+    val state: *DefaultBody = R.unwrap_ok[*DefaultBody, *u8](body_allocation);
+    state.message = view.view(message_bytes, selected_message.len);
+    state.offset = 0;
+    state.reader = body.init_reader(state::ptr, body_read, body_finish,
+        body_complete, body_release, body.OWNER_APPLICATION,
+        response.generation, true, selected_message.len::u64,
+        renderer.limits.response_body, ?response.trailers,
+        request_context.scope);
+    if (!state.reader.valid) {
+        ret R.err[u8, str]("default error body is invalid");
+    }
+    val response_fields: *field.Field = response.fields.items;
+    val response_field_capacity: usize = response.fields.capacity;
+    val response_trailers: *field.Field = response.trailers.items;
+    val response_trailer_capacity: usize = response.trailers.capacity;
+    val generation: u64 = response.generation;
+    if (!message.init_response(response, response_fields,
+        response_field_capacity, response_trailers, response_trailer_capacity,
+        generation, renderer.limits)
+        || message.set_status(response, default_status(app_error.kind))
+            != message.RESPONSE_OK
+        || message.add_field(response, field.Field{
+            name: view.view("content-type", 12),
+            value: view.view("text/plain; charset=utf-8", 25),
+            sensitive: false}) != field.ADD_OK
+        || message.add_field(response, field.Field{
+            name: view.view("cache-control", 13),
+            value: view.view("no-store", 8), sensitive: false}) != field.ADD_OK
+        || message.set_body_reader(response, ?state.reader, renderer.limits)
+            != message.RESPONSE_OK) {
+        ret R.err[u8, str]("default error response initialization failed");
+    }
+    ret R.ok[u8, str](1);
+}
+
+pub fun default_mapper(renderer: *Default) Mapper {
+    if (!default_valid(renderer)) { ret Mapper{ctx: nil, render: nil}; }
+    ret Mapper{ctx: renderer::ptr, render: render_default};
+}
+
+test "laurel.error: make preserves public and private classification" {
+    val app_error: AppError = make(NOT_FOUND, 404,
+        "not found", "private route name", false);
+    if (app_error.kind != NOT_FOUND || app_error.status != 404
+        || app_error.retryable || app_error.public_msg.len != 9
+        || app_error.detail.len != 18) { ret 1; }
     ret 0;
 }
