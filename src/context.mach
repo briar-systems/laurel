@@ -1,6 +1,8 @@
 # generation-bound request state borrowed from one HTTP exchange
 
 use A: std.allocator;
+use O: std.types.option;
+use std.allocator.fixed;
 use std.chrono.time;
 use std.sync.cancel;
 use std.types.bool.bool;
@@ -55,6 +57,10 @@ pub rec Context {
     session:          ptr;
     request_id:       view.View;
     request_id_limit: usize;
+    execution_state:  ptr;
+    execution_id:     u64;
+    execution_counter: u64;
+    executing:        bool;
     bound:            bool;
 }
 
@@ -121,13 +127,23 @@ fun clear(context: *Context) {
     context.session = nil;
     context.request_id = view.view(nil, 0);
     context.request_id_limit = 0;
+    context.execution_state = nil;
+    context.execution_id = 0;
+    context.execution_counter = 0;
+    context.executing = false;
     context.bound = false;
+}
+
+pub fun allocator_valid(allocator: *A.Allocator) bool {
+    ret allocator != nil && allocator.fn_allocate != nil
+        && allocator.fn_reallocate != nil && allocator.fn_deallocate != nil;
 }
 
 pub fun bind(context: *Context, exchange_ptr: *exchange.Exchange, params: Params,
     param_limit: usize, allocator: *A.Allocator, app_owner: ptr, app_generation: u64,
     app_state: ptr, request_id: view.View, request_id_limit: usize) bool {
-    if (context == nil || context.bound || exchange_ptr == nil || allocator == nil
+    if (context == nil || context.bound || exchange_ptr == nil
+        || !allocator_valid(allocator)
         || app_owner == nil || app_generation == 0 || param_limit == 0 || request_id_limit == 0
         || !exchange_ptr.valid || exchange_ptr.state != exchange.HANDLING
         || exchange_ptr.generation == 0 || exchange_ptr.request == nil || exchange_ptr.response == nil
@@ -149,6 +165,10 @@ pub fun bind(context: *Context, exchange_ptr: *exchange.Exchange, params: Params
     context.session = nil;
     context.request_id = request_id;
     context.request_id_limit = request_id_limit;
+    context.execution_state = nil;
+    context.execution_id = 0;
+    context.execution_counter = 0;
+    context.executing = false;
     context.bound = true;
     if (!exchange_matches(context) || cancel.reason(context.scope) != cancel.ACTIVE) {
         clear(context);
@@ -169,6 +189,36 @@ pub fun reason(context: *Context) cancel.Reason {
 
 pub fun active(context: *Context) bool {
     ret exchange_matches(context) && cancel.reason(context.scope) == cancel.ACTIVE;
+}
+
+pub fun claim_execution(context: *Context, state: ptr, execution_id: *u64) bool {
+    if (!active(context) || state == nil || execution_id == nil
+        || context.executing || context.execution_counter == 18446744073709551615) {
+        ret false;
+    }
+    context.execution_counter = context.execution_counter + 1;
+    context.execution_state = state;
+    context.execution_id = context.execution_counter;
+    context.executing = true;
+    @execution_id = context.execution_id;
+    ret true;
+}
+
+pub fun active_execution(context: *Context, request_generation: u64,
+    execution_id: u64) ptr {
+    if (context == nil || !context.bound || !context.executing
+        || request_generation == 0 || request_generation != context.generation
+        || execution_id == 0 || execution_id != context.execution_id
+        || context.execution_state == nil) { ret nil; }
+    ret context.execution_state;
+}
+
+pub fun release_execution(context: *Context, execution_id: u64) {
+    if (context == nil || execution_id == 0 || !context.executing
+        || execution_id != context.execution_id) { ret; }
+    context.execution_state = nil;
+    context.execution_id = 0;
+    context.executing = false;
 }
 
 pub fun request(context: *Context) *message.Request {
@@ -208,7 +258,9 @@ pub fun find_param(context: *Context, name: view.View) *Param {
 }
 
 pub fun unbind(context: *Context, app_owner: ptr, app_generation: u64) bool {
-    if (!owned_by(context, app_owner, app_generation)) { ret false; }
+    if (!owned_by(context, app_owner, app_generation) || context.executing) {
+        ret false;
+    }
     clear(context);
     ret true;
 }
@@ -222,6 +274,9 @@ rec Fixture {
     response:          message.Response;
     informationals:    [8]message.Informational;
     exchange:          exchange.Exchange;
+    allocation_bytes:  [4096]u8;
+    allocation_state:  fixed.FixedState;
+    allocator:         A.Allocator;
 }
 
 fun metadata(has_deadline: bool, deadline_value: time.Time) message.Metadata {
@@ -241,6 +296,8 @@ fun metadata(has_deadline: bool, deadline_value: time.Time) message.Metadata {
 fun init_fixture(fixture: *Fixture, generation: u64,
     has_deadline: bool, deadline_value: time.Time) bool {
     if (fixture == nil || !cancel.make_root(?fixture.scope, has_deadline, deadline_value)) { ret false; }
+    if (O.is_some[*u8](fixed.make(?fixture.allocator,
+        ?fixture.allocation_state, ?fixture.allocation_bytes[0], 4096))) { ret false; }
     val configured: message.Limits = message.limits_default();
     var request_fields: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
     var request_trailers: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
@@ -265,17 +322,16 @@ test "laurel.context: one binding borrows the exact exchange generation" {
     items[1] = Param{name: view.view("slug", 4), value: view.view("news", 4),
         kind: PARAM_TEXT};
     val params: Params = Params{items: ?items[0], len: 2, generation: 41};
-    var allocator: A.Allocator;
     var owner: i64 = 7;
     var context: Context;
-    if (!bind(?context, ?fixture.exchange, params, 4, ?allocator, ?owner, 9,
+    if (!bind(?context, ?fixture.exchange, params, 4, ?fixture.allocator, ?owner, 9,
         ?owner, view.view("request-41", 10), 32)) { ret 2; }
     if (!active(?context) || request(?context) != ?fixture.request
         || response(?context) != ?fixture.response || exchange_ref(?context) != ?fixture.exchange
         || cancellation(?context) != ?fixture.scope || !owned_by(?context, ?owner, 9)) { ret 3; }
     val found: *Param = find_param(?context, view.view("id", 2));
     if (found == nil || found.value.len != 2 || found.value.data[0] != '4'
-        || bind(?context, ?fixture.exchange, params, 4, ?allocator, ?owner, 9,
+        || bind(?context, ?fixture.exchange, params, 4, ?fixture.allocator, ?owner, 9,
             ?owner, view.view("request-41", 10), 32)) { ret 4; }
     if (!unbind(?context, ?owner, 9) || context.bound || request(?context) != nil
         || unbind(?context, ?owner, 9)) { ret 5; }
@@ -287,10 +343,9 @@ test "laurel.context: stale generations and cancellation fail closed" {
     var fixture: Fixture;
     if (!init_fixture(?fixture, 51, false, time.Time{sec: 0, nsec: 0})) { ret 1; }
     val params: Params = Params{items: nil, len: 0, generation: 51};
-    var allocator: A.Allocator;
     var owner: i64 = 1;
     var context: Context;
-    if (!bind(?context, ?fixture.exchange, params, 1, ?allocator, ?owner, 3,
+    if (!bind(?context, ?fixture.exchange, params, 1, ?fixture.allocator, ?owner, 3,
         nil, view.view("request-51", 10), 32)) { ret 2; }
     fixture.request.generation = 52;
     if (active(?context) || request(?context) != nil || response(?context) != nil
@@ -311,17 +366,21 @@ test "laurel.context: capture and identity bounds are transactional" {
         kind: PARAM_TEXT};
     duplicate[1] = Param{name: view.view("id", 2), value: view.view("2", 1),
         kind: PARAM_TEXT};
-    var allocator: A.Allocator;
     var owner: i64 = 1;
     var context: Context;
     if (bind(?context, ?fixture.exchange,
-        Params{items: ?duplicate[0], len: 2, generation: 61}, 2, ?allocator, ?owner, 1,
+        Params{items: ?duplicate[0], len: 2, generation: 61}, 2, ?fixture.allocator, ?owner, 1,
         nil, view.view("request-61", 10), 32) || context.bound) { ret 2; }
     if (bind(?context, ?fixture.exchange, Params{items: nil, len: 0, generation: 60},
-        2, ?allocator, ?owner, 1, nil, view.view("request-61", 10), 32) || context.bound) { ret 3; }
+        2, ?fixture.allocator, ?owner, 1, nil, view.view("request-61", 10), 32) || context.bound) { ret 3; }
     if (bind(?context, ?fixture.exchange, Params{items: nil, len: 0, generation: 61},
-        2, ?allocator, ?owner, 1, nil, view.view("", 0), 32) || context.bound) { ret 4; }
-    if (!cancel.destroy(?fixture.scope)) { ret 5; }
+        2, ?fixture.allocator, ?owner, 1, nil, view.view("", 0), 32) || context.bound) { ret 4; }
+    var invalid_allocator: A.Allocator;
+    if (bind(?context, ?fixture.exchange,
+        Params{items: nil, len: 0, generation: 61}, 2,
+        ?invalid_allocator, ?owner, 1, nil,
+        view.view("request-61", 10), 32) || context.bound) { ret 5; }
+    if (!cancel.destroy(?fixture.scope)) { ret 6; }
     ret 0;
 }
 
@@ -329,11 +388,10 @@ test "laurel.context: deadlines remain owned by the exchange scope" {
     val expected: time.Time = time.Time{sec: 20, nsec: 7};
     var fixture: Fixture;
     if (!init_fixture(?fixture, 71, true, expected)) { ret 1; }
-    var allocator: A.Allocator;
     var owner: i64 = 1;
     var context: Context;
     if (!bind(?context, ?fixture.exchange, Params{items: nil, len: 0, generation: 71},
-        1, ?allocator, ?owner, 1, nil, view.view("request-71", 10), 32)) { ret 2; }
+        1, ?fixture.allocator, ?owner, 1, nil, view.view("request-71", 10), 32)) { ret 2; }
     var actual: time.Time;
     if (!deadline(?context, ?actual) || actual.sec != expected.sec || actual.nsec != expected.nsec) { ret 3; }
     if (!cancel.timeout(?fixture.scope) || deadline(?context, ?actual)) { ret 4; }

@@ -14,8 +14,8 @@ The framework has no global application registry, hidden allocator, mandatory te
 - `context` carries one borrowed exchange, generation-bound route parameters, request identity, cancellation scope, allocator, and application state.
 - `handler` defines application handlers over an explicit context and response.
 - `router` compiles typed framework routes into caller-owned `mach-http` matcher storage and decodes parameters from the request scope.
-- `middleware` defines an allocation-free chain contract with explicit next handlers.
-- `error` classifies application failures and maps them to HTTP responses.
+- `middleware` snapshots and executes an application-owned chain with value-typed, single-use next handlers.
+- `error` owns bounded failure text and maps strict UTF-8 public messages to fail-closed HTTP responses.
 - `session` separates session lifecycle, protected cookie encoding, and durable storage.
 - `security` defines response header, CSRF, origin, and authentication policy hooks.
 - `form` and `upload` keep bounded parsing and streamed file storage separate.
@@ -33,4 +33,4 @@ The manifest uses pinned Git tags for `mach-std` v0.29.0 and `mach-http` v0.3.0.
 
 ## Status
 
-Application composition, lifecycle, bounded admission, exact request-context ownership, compile-once typed routes, request-scoped parameter decoding, and stale-dispatch rejection are implemented. Middleware, protected sessions, security defaults, forms, uploads, rendering, realtime responses, and the in-process harness remain tracked work. Security-sensitive operations have no fallback implementation. The route ownership and decoder contract is documented in [`doc/routing.md`](doc/routing.md).
+Application composition, lifecycle, bounded admission, exact request-context ownership, compile-once typed routes, request-scoped parameter decoding, stale-dispatch rejection, immutable middleware execution snapshots, nonreentrant context execution, pre-execution cancellation classification, and value-owned fail-closed errors are implemented. Protected sessions, security defaults, forms, uploads, rendering, realtime responses, and the in-process harness remain tracked work. Security-sensitive operations have no fallback implementation. The route ownership and decoder contract is documented in [`doc/routing.md`](doc/routing.md). Middleware ordering, `Next` lifetime, and error ownership are documented in [`doc/middleware.md`](doc/middleware.md).

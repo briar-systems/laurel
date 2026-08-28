@@ -15,11 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compile-once typed method, host, path, parameter, wildcard, and handler routes.
 - Request-scoped text, integer, boolean, UUID, and custom parameter decoding.
 - Structured route conflict, malformed target, decoder, capacity, and stale-dispatch errors.
+- Immutable middleware snapshots with context-bound, value-typed next tokens.
+- Nonreentrant execution claims with deterministic sequential context reuse.
+- Deterministic short-circuit, error replacement, and pre-cancelled or timed-out classification.
+- Value-owned application and mapper errors with explicit production bounds.
+- Strict RFC 3629 public error validation with C0, DEL, and C1 rejection.
+- Bounded default error responses that never expose private error details.
+- Application-owned middleware depth and process-abort panic policy.
 
 ### Changed
 
 - Pinned `mach-std` to v0.29.0 and `mach-http` to v0.3.0.
 - Routed handler response ownership through the bound request context.
+- Required complete allocator callback tables at context binding and allocating boundaries.
+- Revalidated response, body, field storage, generation, and cancellation state after allocator callbacks.
 
 ## [0.2.0] - 2026-08-27
 

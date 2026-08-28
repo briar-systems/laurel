@@ -1,7 +1,9 @@
 # explicit application assembly and lifecycle ownership
 
 use A: std.allocator;
+use O: std.types.option;
 use R: std.types.result;
+use std.allocator.fixed;
 use std.chrono.time;
 use std.sync.atomic;
 use std.sync.cancel;
@@ -38,6 +40,7 @@ pub rec Limits {
     max_route_params:        usize;
     max_request_id_bytes:    usize;
     max_active_requests:     usize;
+    max_middleware_depth:    usize;
     handler_deadline_ns:     i64;
     max_providers:           usize;
     max_provider_key_bytes:  usize;
@@ -45,8 +48,9 @@ pub rec Limits {
 }
 
 pub rec Config {
-    limits:      Limits;
-    trust_proxy: bool;
+    limits:       Limits;
+    trust_proxy:  bool;
+    panic_policy: middleware.PanicPolicy;
 }
 
 pub rec App {
@@ -92,6 +96,7 @@ pub fun validate_limits(limits: Limits) bool {
     ret limits.max_body_bytes > 0 && limits.max_form_fields > 0 && limits.max_upload_bytes > 0
         && limits.max_route_params > 0 && limits.max_request_id_bytes > 0
         && limits.max_active_requests > 0 && limits.max_active_requests <= 9223372036854775807
+        && limits.max_middleware_depth > 0
         && limits.handler_deadline_ns >= lifecycle.NO_DEADLINE
         && limits.max_provider_key_bytes > 0 && limits.max_background_services > 0;
 }
@@ -125,6 +130,8 @@ fun valid_optional_components(assembly: Assembly) bool {
 pub fun validate_assembly(assembly: Assembly) bool {
     if (!validate_limits(assembly.config.limits) || assembly.router == nil
         || !assembly.router.initialized || !valid_stack(assembly.middleware)
+        || assembly.middleware.len > assembly.config.limits.max_middleware_depth
+        || assembly.config.panic_policy != middleware.PANIC_ABORT
         || assembly.fallback.call == nil || assembly.errors.render == nil || assembly.security == nil
         || !provider.validate(assembly.providers) || !lifecycle.validate(assembly.lifecycle)
         || assembly.lifecycle.state != lifecycle.ASSEMBLED || !valid_observer(assembly.observer)
@@ -249,6 +256,29 @@ pub fun release_context(app: *App, request_context: *context.Context) bool {
     ret release_reservation(app);
 }
 
+fun invalid_execution(detail: str) middleware.Outcome {
+    ret middleware.Outcome{
+        status: middleware.EXECUTION_ERROR_UNMAPPED,
+        action: 0,
+        app_error: error.make(error.INTERNAL, 500,
+            "internal server error", detail, false),
+        render_error: error.render_failure(detail),
+    };
+}
+
+pub fun execute(app: *App, terminal: handler.Handler,
+    request_context: *context.Context) middleware.Outcome {
+    if (app == nil || !app.valid || request_context == nil
+        || !context.owned_by(request_context, app, app.generation)) {
+        ret invalid_execution("middleware context is not owned by the application");
+    }
+    ret middleware.execute(app.middleware, terminal, app.errors,
+        request_context, middleware.Policy{
+            max_depth: app.config.limits.max_middleware_depth,
+            panic_policy: app.config.panic_policy,
+        });
+}
+
 pub fun drain(app: *App, deadline_ns: i64) lifecycle.Transition {
     if (app == nil || !app.valid) {
         ret lifecycle.Transition{status: lifecycle.TRANSITION_INVALID, state: lifecycle.FAILED,
@@ -331,8 +361,8 @@ fun test_handler(context_ptr: ptr, request_context: *context.Context) R.Result[u
 }
 
 fun test_error(context_ptr: ptr, app_error: error.AppError,
-    response: *message.Response) R.Result[u8, str] {
-    ret R.ok[u8, str](1);
+    request_context: *context.Context) R.Result[u8, error.RenderFailure] {
+    ret R.ok[u8, error.RenderFailure](1);
 }
 
 fun test_observer_start(context_ptr: ptr, event: *observability.RequestEvent) {}
@@ -357,8 +387,10 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     val assembly: Assembly = Assembly{
         config: Config{limits: Limits{max_body_bytes: 1024, max_form_fields: 16, max_upload_bytes: 4096,
             max_route_params: 8, max_request_id_bytes: 64, max_active_requests: 1,
+            max_middleware_depth: 16,
             handler_deadline_ns: lifecycle.NO_DEADLINE, max_providers: 0,
-            max_provider_key_bytes: 32, max_background_services: 1}, trust_proxy: false},
+            max_provider_key_bytes: 32, max_background_services: 1}, trust_proxy: false,
+            panic_policy: middleware.PANIC_ABORT},
         router: ?routes,
         middleware: ?middlewares,
         fallback: handler.Handler{ctx: nil, call: test_handler},
@@ -403,11 +435,19 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     var http_exchange: exchange.Exchange;
     if (!exchange.init(?http_exchange, ?request, ?response, ?informationals[0], 8,
         ?scope, 101, configured) || !exchange.begin(?http_exchange)) { ret 9; }
+    var allocation_bytes: [4096]u8;
+    var allocation_state: fixed.FixedState;
     var allocator: A.Allocator;
+    if (O.is_some[*u8](fixed.make(?allocator, ?allocation_state,
+        ?allocation_bytes[0], 4096))) { ret 10; }
     var request_context: context.Context;
     if (!bind_context(?app, ?request_context, ?http_exchange,
         context.Params{items: nil, len: 0, generation: 101}, ?allocator,
         view.view("request-101", 11)) || active_request_count(?app) != 1) { ret 10; }
+    val executed: middleware.Outcome = execute(?app,
+        handler.Handler{ctx: nil, call: test_handler}, ?request_context);
+    if (executed.status != middleware.EXECUTION_RESPOND
+        || executed.action != handler.RESPOND) { ret 10; }
     var rejected_context: context.Context;
     if (can_accept(?app) || bind_context(?app, ?rejected_context, ?http_exchange,
         context.Params{items: nil, len: 0, generation: 101}, ?allocator,
