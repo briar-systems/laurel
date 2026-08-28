@@ -989,10 +989,15 @@ fun publish_field(parser: *Parser) Status {
 fun publish_file(parser: *Parser, file: upload.StoredFile) Status {
     if (file.size != parser.current_value_len::u64) { ret INVALID; }
     if (parser.published_parts >= parser.storage.part_capacity) { ret LIMIT; }
+    var file_id: view.View;
+    if (!arena_store(parser, file.id.data, file.id.len, ?file_id)) {
+        ret LIMIT;
+    }
     parser.storage.parts[parser.published_parts] = Part{
         name: parser.current_name, value: empty_view(),
         file_name: parser.current_file_name,
-        content_type: parser.current_content_type, file: file,
+        content_type: parser.current_content_type,
+        file: upload.StoredFile{id: file_id, size: file.size},
         kind: FILE_PART, depth: parser.depth};
     parser.published_parts = parser.published_parts + 1;
     ret MORE;
@@ -2487,6 +2492,9 @@ test "laurel.multipart: multiple files publish through one batch commit" {
         state.batch_begin_calls != 1 || state.begin_calls != 2 ||
         state.seal_calls != 2 || state.commit_calls != 1 ||
         state.abort_calls != 0 || !state.committed) { ret 3; }
+    state.file_ids[0] = 'x';
+    if (!view_equal(parts[0].file.id, "m0") ||
+        !view_equal(parts[1].file.id, "m1")) { ret 4; }
     ret 0;
 }
 
