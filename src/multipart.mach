@@ -237,14 +237,22 @@ fun token_byte(value: u8) bool {
 
 fun boundary_valid(value: view.View) bool {
     if (value.len == 0 || value.len > MAX_BOUNDARY_BYTES ||
-        !range_valid(value.data, value.len) || value.data[value.len - 1] == ' ') {
+        !range_valid(value.data, value.len)) {
         ret false;
     }
     var i: usize = 0;
     for (i < value.len) {
         val current: u8 = value.data[i];
-        if (current < 0x21 || current > 0x7e || current == '"' ||
-            current == '\\') { ret false; }
+        val alpha: bool = current >= 'a' && current <= 'z' ||
+            current >= 'A' && current <= 'Z';
+        val digit: bool = current >= '0' && current <= '9';
+        val punctuation: bool = current == '\'' || current == '(' ||
+            current == ')' || current == '+' || current == '_' ||
+            current == ',' || current == '-' || current == '.' ||
+            current == '/' || current == ':' || current == '=' ||
+            current == '?';
+        if (!alpha && !digit && !punctuation && current != ' ') { ret false; }
+        if (i + 1 == value.len && current == ' ') { ret false; }
         i = i + 1;
     }
     ret true;
@@ -457,9 +465,18 @@ fun copy_parameter(parser: *Parser, data: *u8, len: usize,
     if (output == nil || !range_valid(data, len)) { ret false; }
     var offset: usize = 0;
     if (extended) {
-        if (len < 7 || !equal_ci(data, 5, "utf-8") || data[5] != '\'' ||
-            data[6] != '\'') { ret false; }
-        offset = 7;
+        var first_quote: usize = 0;
+        for (first_quote < len && data[first_quote] != '\'') {
+            first_quote = first_quote + 1;
+        }
+        if (first_quote == 0 || first_quote >= len ||
+            !equal_ci(data, first_quote, "utf-8")) { ret false; }
+        var second_quote: usize = first_quote + 1;
+        for (second_quote < len && data[second_quote] != '\'') {
+            second_quote = second_quote + 1;
+        }
+        if (second_quote >= len) { ret false; }
+        offset = second_quote + 1;
     }
     val start: usize = parser.stored_bytes;
     var i: usize = offset;
@@ -481,6 +498,7 @@ fun copy_parameter(parser: *Parser, data: *u8, len: usize,
             current = data[i];
         }
         if (current == 0 || current == '\r' || current == '\n' ||
+            current < 0x20 && current != '\t' || current == 0x7f ||
             !arena_append(parser, current)) { ret false; }
         i = i + 1;
     }
@@ -545,6 +563,7 @@ fun parameter(parser: *Parser, data: *u8, len: usize, cursor: *usize,
     }
     val arena_start: usize = parser.stored_bytes;
     if (@cursor < len && data[@cursor] == '"') {
+        if (@extended) { ret false; }
         @cursor = @cursor + 1;
         val start: usize = @cursor;
         var escaped: bool = false;
@@ -605,7 +624,10 @@ fun parse_disposition(parser: *Parser, data: *u8, len: usize,
             parser.current_name = value;
             @has_name = true;
         } or (equal_ci(?data[name_start], base_len, "filename")) {
-            if (!extended && @has_filename && !filename_extended) { ret false; }
+            if (extended && filename_extended ||
+                !extended && @has_filename && !filename_extended) {
+                ret false;
+            }
             if (extended || !filename_extended) {
                 parser.current_file_name = value;
                 @has_filename = true;
@@ -628,14 +650,19 @@ fun parse_content_type(parser: *Parser, data: *u8, len: usize,
     nested: *bool) bool {
     if (nested == nil || len == 0 || !range_valid(data, len)) { ret false; }
     var media_end: usize = 0;
+    var slash: usize = ~(0::usize);
     for (media_end < len && data[media_end] != ';' &&
             data[media_end] != ' ' && data[media_end] != '\t') {
-        if (!token_byte(data[media_end]) && data[media_end] != '/') {
+        if (data[media_end] == '/') {
+            if (slash != ~(0::usize)) { ret false; }
+            slash = media_end;
+        } or (!token_byte(data[media_end])) {
             ret false;
         }
         media_end = media_end + 1;
     }
-    if (media_end == 0) { ret false; }
+    if (media_end == 0 || slash == ~(0::usize) || slash == 0 ||
+        slash + 1 >= media_end) { ret false; }
     @nested = starts_ci(data, media_end, "multipart/");
     var cursor: usize = media_end;
     for (cursor < len && (data[cursor] == ' ' || data[cursor] == '\t')) {
