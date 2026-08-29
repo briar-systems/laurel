@@ -826,6 +826,61 @@ fun secret_handler(ctx: ptr,
         "database dsn user:password@host", "private detail", false));
 }
 
+fun harness_clock(ctx: ptr) i64 { ret 1000; }
+
+fun contains(haystack: view.View, needle: str) bool {
+    val length: usize = str_len(needle);
+    if (length == 0 || haystack.len < length || haystack.data == nil) {
+        ret false;
+    }
+    var start: usize = 0;
+    for (start + length <= haystack.len) {
+        var matched: bool = true;
+        var i: usize = 0;
+        for (i < length) {
+            if (haystack.data[start + i] != needle[i]) { matched = false; }
+            i = i + 1;
+        }
+        if (matched) { ret true; }
+        start = start + 1;
+    }
+    ret false;
+}
+
+# the ordinary application path: a handler reaches its session through the
+# context, and never sees the binder, the manager, or a buffer
+fun session_login(ctx: ptr,
+    request_context: *context.Context) R.Result[u8, error.AppError] {
+    val request_session: *session.RequestSession =
+        session.from_context(request_context);
+    if (request_session == nil) {
+        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
+            "internal server error", "no session was bound", false));
+    }
+    if (session.load(request_context, 1000) == session.REQUEST_INVALID) {
+        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
+            "internal server error", "session load was refused", false));
+    }
+    if (session.request_state(request_session) != session.SESSION_PRESENT
+        && session.create_request(request_session, 600, 1000)
+            != session.REQUEST_OK) {
+        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
+            "internal server error", "session creation was refused", false));
+    }
+    if (session.write_request(request_session, view.view("user=1", 6))
+        != session.REQUEST_OK) {
+        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
+            "internal server error", "session write was refused", false));
+    }
+    val response: *message.Response = context.response(request_context);
+    if (response == nil) {
+        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
+            "internal server error", "no response", false));
+    }
+    message.set_status(response, status.OK);
+    ret R.ok[u8, error.AppError](handler.RESPOND);
+}
+
 fun fallback_handler(ctx: ptr,
     request_context: *context.Context) R.Result[u8, error.AppError] {
     ret R.err[u8, error.AppError](error.make(error.NOT_FOUND, 404, "not found",
@@ -967,12 +1022,12 @@ fun sink_error(ctx: ptr, event: *observability.RequestEvent,
 
 rec AppFixture {
     parameters:      [1]router.Parameter;
-    routes:          [5]router.Route;
-    specifications:  [5]http_router.Route;
-    compiled:        [5]http_router.CompiledRoute;
-    segments:        [16]http_router.Segment;
+    routes:          [6]router.Route;
+    specifications:  [6]http_router.Route;
+    compiled:        [6]http_router.CompiledRoute;
+    segments:        [20]http_router.Segment;
     matcher:         router.Router;
-    middlewares:     [2]middleware.Middleware;
+    middlewares:     [3]middleware.Middleware;
     stack:           middleware.Stack;
     provider_items:  [1]provider.Provider;
     providers:       provider.Set;
@@ -992,6 +1047,7 @@ rec AppFixture {
     entropy_state:   EntropyState;
     codec:           session.ProtectedCodec;
     manager:         session.Manager;
+    binder:          session.Binder;
     errors:          error.Default;
     sink:            Sink;
     label_values:    [2]observability.Term;
@@ -1055,7 +1111,8 @@ fun init_sessions(fixture: *AppFixture) bool {
     val store: session.Store = session.memory_store(?fixture.memory);
     if (!session.init_manager(?fixture.manager, store,
         session.protected_codec(?fixture.codec),
-        session.secure_cookie("laurel_session"))
+        session.secure_cookie("laurel_session"),
+        "laurel.test")
         || session.start_manager(?fixture.manager) != session.STORE_OK) { ret false; }
     fixture.handlers.store = store;
     ret true;
@@ -1091,17 +1148,26 @@ fun init_application(fixture: *AppFixture, limits: message.Limits) bool {
         router.exact_method(method.from_kind(method.GET)),
         router.path(view.view("/secret", 7)), "secret.show", nil, 0,
         secret_handler, (?fixture.handlers)::ptr);
+    fixture.routes[5] = test_route(
+        router.exact_method(method.from_kind(method.GET)),
+        router.path(view.view("/login", 6)), "session.login", nil, 0,
+        session_login, (?fixture.handlers)::ptr);
     val route_storage: router.Storage = router.Storage{
-        specifications: ?fixture.specifications[0], specification_cap: 5,
-        compiled_routes: ?fixture.compiled[0], compiled_route_cap: 5,
-        segments: ?fixture.segments[0], segment_cap: 16};
-    if (router.compile(?fixture.matcher, ?fixture.routes[0], 5, route_storage,
+        specifications: ?fixture.specifications[0], specification_cap: 6,
+        compiled_routes: ?fixture.compiled[0], compiled_route_cap: 6,
+        segments: ?fixture.segments[0], segment_cap: 20};
+    if (router.compile(?fixture.matcher, ?fixture.routes[0], 6, route_storage,
         router.limits_default()).status != router.COMPILE_OK) { ret false; }
     fixture.middlewares[0] = middleware.Middleware{ctx: (?fixture.handlers)::ptr,
         call: headers_middleware};
     fixture.middlewares[1] = middleware.Middleware{ctx: (?fixture.handlers)::ptr,
         call: trace_middleware};
-    fixture.stack = middleware.Stack{items: ?fixture.middlewares[0], len: 2};
+    fixture.binder.initialized = false;
+    if (!session.init_binder(?fixture.binder, ?fixture.manager,
+        session.Clock{ctx: nil, now: harness_clock},
+        session.request_limits_default())) { ret false; }
+    fixture.middlewares[2] = session.binder_middleware(?fixture.binder);
+    fixture.stack = middleware.Stack{items: ?fixture.middlewares[0], len: 3};
     fixture.provider_items[0] = provider.Provider{ctx: (?fixture.counter)::ptr,
         resolve: counter_resolve};
     fixture.counter = 7;
@@ -1267,6 +1333,45 @@ test "laurel.testing: the harness drives a whole application without a socket" {
         || !lifecycle.terminal(?fixture.controller)) { ret 12; }
     val released: usize = release_code(?fixture);
     if (released != 0) { ret 13 + released::i32; }
+    ret 0;
+}
+
+test "laurel.testing: a handler reaches its session through the application" {
+    val limits: message.Limits = message.limits_default();
+    var fixture: AppFixture;
+    if (!init_application(?fixture, limits)) { ret 1; }
+    var storage: HarnessStorage;
+    var harness: Harness;
+    if (!init(?harness, ?fixture.application, ?fixture.matcher,
+        harness_storage(?storage), limits, DEFAULT_BODY_POLLS)) { ret 2; }
+    if (start(?harness).status != lifecycle.TRANSITION_OK
+        || ready(?harness).status != lifecycle.TRANSITION_OK) { ret 3; }
+    var items: [4]field.Field;
+    var fields: field.Fields;
+    if (!host_fields(?items[0], limits, ?fields)) { ret 4; }
+    var result: Result;
+    if (invoke(?harness, get_request(fields, view.view("/login", 6),
+        view.view("harness-s1", 10)), ?result) != INVOKE_OK
+        || result.response.status != 200) { ret 5; }
+    # the framework applied the assembled cookie policy; the handler never did
+    val issued: *field.Field = response_field(?result,
+        view.view("set-cookie", 10));
+    if (issued == nil || issued.value.len == 0) { ret 6; }
+    if (!contains(issued.value, "laurel_session=")
+        || !contains(issued.value, "Secure")
+        || !contains(issued.value, "HttpOnly")
+        || !contains(issued.value, "SameSite=Lax")
+        || !contains(issued.value, "Path=/")) { ret 7; }
+    # a route that never touches a session emits no cookie at all
+    if (invoke(?harness, get_request(fields, view.view("/orders/42", 10),
+        view.view("harness-s2", 10)), ?result) != INVOKE_OK
+        || response_field(?result, view.view("set-cookie", 10)) != nil) {
+        ret 8;
+    }
+    if (drain(?harness, lifecycle.NO_DEADLINE).status
+            != lifecycle.TRANSITION_OK
+        || stop(?harness).status != lifecycle.TRANSITION_OK
+        || release_code(?fixture) != 0) { ret 9; }
     ret 0;
 }
 
@@ -1464,6 +1569,9 @@ fun erase_stack(value: *middleware.Stack) ptr { ret value::ptr; }
 fun erase_mapper(value: *error.Mapper) ptr { ret value::ptr; }
 fun erase_default_errors(value: *error.Default) ptr { ret value::ptr; }
 fun erase_manager(value: *session.Manager) ptr { ret value::ptr; }
+fun erase_request_session(value: *session.RequestSession) ptr { ret value::ptr; }
+fun erase_request_storage(value: *session.RequestStorage) ptr { ret value::ptr; }
+fun erase_binder(value: *session.Binder) ptr { ret value::ptr; }
 fun erase_headers(value: *security.HeadersPolicy) ptr { ret value::ptr; }
 fun erase_origins(value: *security.OriginPolicy) ptr { ret value::ptr; }
 fun erase_redirects(value: *security.RedirectPolicy) ptr { ret value::ptr; }
@@ -1495,6 +1603,8 @@ test "laurel.testing: every public type erases to the untyped ptr" {
         || erase_context(nil) != nil || erase_handler(nil) != nil
         || erase_router(nil) != nil || erase_stack(nil) != nil
         || erase_mapper(nil) != nil || erase_default_errors(nil) != nil) { ret 1; }
+    if (erase_request_session(nil) != nil || erase_request_storage(nil) != nil
+        || erase_binder(nil) != nil) { ret 6; }
     if (erase_manager(nil) != nil || erase_headers(nil) != nil
         || erase_origins(nil) != nil || erase_redirects(nil) != nil
         || erase_authenticator(nil) != nil || erase_protector(nil) != nil
