@@ -199,19 +199,51 @@ lifecycle storage directly.
 
 ## What a request does
 
-`context.Context` does not carry a session. There is no request-level session
-operation: `session` exports construction and lifecycle only, and nothing in the
-framework turns a request into a loaded session. An application drives the
-sequence itself — `cookie.parse_request` over the request's `Cookie` field, the
-codec decode over the resulting value, then `Store.load` — and drives the save
-and the `Set-Cookie` on the way out.
+`session.Binder` is application middleware, and it is the only thing that drives
+a session. Assemble it with `init_binder` over the manager, a caller-supplied
+`Clock`, and `RequestLimits`, put `binder_middleware` in the application stack,
+and a handler reaches its session through `session.from_context`. The handler
+never sees the binder, the manager, the codec, the store, or a buffer.
 
-`Context` previously declared a `session: ptr` field that was assigned nil on
-every path and read nowhere. It was removed rather than wired, because wiring it
-means first designing the request-level session boundary: who owns the
-`Session`, when it loads and saves, how the cookie is emitted, what a request
-with no session holds, and how long the views inside `Session` must outlive the
-request. When that boundary exists the field returns designed against it.
+The load is lazy. `session.load` parses the request `Cookie` field, finds the
+policy'"'"'s cookie, decodes the token, and reads the record, and nothing happens
+until a handler asks. A route that never touches a session performs no store
+round-trip and emits no cookie.
+
+`create_request` starts a session, `write_request` replaces its data,
+`regenerate_request` replaces its identity through `Store.replace`, and
+`destroy_request` marks it for removal. Each of those only records intent. The
+binder calls `commit_request` on the way out of the middleware chain, before the
+response is committed, and that is the single place a session reaches the store
+and the response: it saves or deletes, encodes the token, and serializes one
+`Set-Cookie` from the assembled `CookiePolicy`. An application never restates
+the policy the manager already holds.
+
+### Absence is a state
+
+`request_state` is one of `SESSION_IDLE`, `SESSION_ABSENT`, `SESSION_PRESENT`,
+`SESSION_DIRTY`, or `SESSION_DESTROYED`, and `request_session_value` returns nil
+unless a session is actually loaded. A request with no cookie, an unparseable
+cookie, a rejected token, and a record the store no longer holds are all
+`SESSION_ABSENT`, so absence is never a nil that reads as a value. A rejected
+token is distinguishable from a missing one by `REQUEST_REJECTED` against
+`REQUEST_NONE`.
+
+### Storage and lifetime
+
+Every buffer comes from the request arena through `context.alloc`, so one binder
+serves every concurrently admitted request without holding per-request state.
+`request_storage_valid` rejects any two of the jar, identifier, data, token, and
+header ranges that overlap. The identifier and data views inside `Session` point
+into that storage, so a `Session` is valid only for the request that loaded it —
+copy anything that must outlive the request.
+
+### The clock and the authenticated context
+
+Laurel owns no clock. The application supplies one through `Clock`, and the
+codec and store are judged against the value it returns. The authenticated
+context the codec binds each token to lives on the `Manager`, set once at
+`init_manager`, because it is application-scoped rather than per-request.
 
 ## Lifecycle order
 
