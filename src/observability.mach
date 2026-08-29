@@ -9,6 +9,7 @@ use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
+use std.types.string.str;
 use std.types.view;
 use http.core.body;
 use http.core.exchange;
@@ -42,6 +43,7 @@ pub val OUTCOME_COMPLETED: Outcome = 2;
 pub val OUTCOME_FAILED:    Outcome = 3;
 pub val OUTCOME_CANCELLED: Outcome = 4;
 pub val OUTCOME_TIMED_OUT: Outcome = 5;
+pub val OUTCOME_UNREPORTED: Outcome = 6;
 
 pub def Truncation: u8;
 
@@ -520,6 +522,25 @@ pub fun failed(recorder: *Recorder, app_error: error.AppError, status_code: u16,
     ret RECORD_OK;
 }
 
+# a request whose termination the host could not describe still gets exactly
+# one terminal event, because a start with no terminal reads as a request that
+# is still in flight and a consumer counts a leak that is not there
+pub fun unreported(recorder: *Recorder, detail: str) RecordStatus {
+    if (!recorder_ready(recorder)) { ret RECORD_INVALID; }
+    if (!recorder.started || recorder.terminal) { ret RECORD_STATE; }
+    val app_error: error.AppError = error.make(error.INTERNAL, 500,
+        "internal server error", detail, false);
+    recorder.event.phase = PHASE_ERROR;
+    recorder.event.outcome = OUTCOME_UNREPORTED;
+    recorder.event.status = 0;
+    recorder.event.duration_ns = 0;
+    recorder.event.error_kind = error.INTERNAL;
+    recorder.event.valid = true;
+    recorder.terminal = true;
+    recorder.observer.error(recorder.observer.ctx, ?recorder.event, app_error);
+    ret RECORD_OK;
+}
+
 # the middleware outcome selects exactly one terminal event
 pub fun observe_execution(recorder: *Recorder, outcome: middleware.Outcome,
     reason: cancel.Reason, status_code: u16, now_ns: i64) RecordStatus {
@@ -770,6 +791,7 @@ test "laurel.observability: one start and one terminal event per request" {
     if (finish(?recorder, 200, 30) != RECORD_STATE
         || failed(?recorder, error.make(error.INTERNAL, 500, "internal server error",
             "late", false), 500, 30) != RECORD_STATE
+        || unreported(?recorder, "late") != RECORD_STATE
         || sink.finishes != 1 || sink.errors != 0) { ret 7; }
     if (!release(?recorder) || !release_fixture(?completed)) { ret 8; }
     var faulted: Fixture;
@@ -799,6 +821,19 @@ test "laurel.observability: one start and one terminal event per request" {
         || sink.finishes != 2 || sink.last_outcome != OUTCOME_TIMED_OUT
         || sink.last_status != 408) { ret 15; }
     if (!release(?recorder) || !release_fixture(?cancelled_fixture)) { ret 16; }
+    var undescribed: Fixture;
+    if (!init_fixture(?undescribed, 24, view.view("/d", 2),
+        view.view("request-24", 10))) { ret 17; }
+    if (begin(?recorder, ?undescribed.context, view.view(nil, 0), 0) != RECORD_OK
+        || unreported(?recorder, "undescribed") != RECORD_OK
+        || sink.errors != 2 || sink.last_phase != PHASE_ERROR
+        || sink.last_outcome != OUTCOME_UNREPORTED
+        || sink.last_kind != error.INTERNAL || sink.last_status != 0
+        || sink.finishes != 2) { ret 18; }
+    if (unreported(?recorder, "again") != RECORD_STATE || sink.errors != 2) {
+        ret 19;
+    }
+    if (!release(?recorder) || !release_fixture(?undescribed)) { ret 20; }
     ret 0;
 }
 
