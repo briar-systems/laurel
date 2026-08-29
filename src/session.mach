@@ -15,7 +15,17 @@ use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 use std.types.string.str;
+use std.types.string.str_len;
 use std.types.view;
+use A: std.allocator;
+use R: std.types.result;
+use http.core.field;
+use http.core.message;
+use laurel.context;
+use laurel.cookie;
+use laurel.error;
+use laurel.handler;
+use laurel.middleware;
 
 pub val MAX_SESSION_ID_BYTES: usize = 64;
 pub val MAX_SESSION_DATA_BYTES: usize = 2048;
@@ -207,10 +217,13 @@ pub def EncodeFun: fun(ptr, *Session, view.View, i64, *u8, usize)
 pub def DecodeFun: fun(ptr, *u8, usize, view.View, i64,
     *u8, usize, *u8, usize, *Session) CodecOperation;
 
+pub def RegenerateFun: fun(ptr, *Session, *u8, usize, *Session) CodecStatus;
+
 pub rec Codec {
-    ctx:    ptr;
-    encode: EncodeFun;
-    decode: DecodeFun;
+    ctx:        ptr;
+    encode:     EncodeFun;
+    decode:     DecodeFun;
+    regenerate: RegenerateFun;
 }
 
 pub def EntropyFun: fun(ptr, *u8, usize) i64;
@@ -245,10 +258,11 @@ pub rec CookiePolicy {
 }
 
 pub rec Manager {
-    store:  Store;
-    codec:  Codec;
-    cookie: CookiePolicy;
-    state:  ManagerState;
+    store:   Store;
+    codec:   Codec;
+    cookie:  CookiePolicy;
+    context: str;
+    state:   ManagerState;
 }
 
 fun public_equal(a: *u8, b: *u8, len: usize) bool {
@@ -1704,10 +1718,18 @@ fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
         key_id: key_id, needs_rotation: needs_rotation};
 }
 
+fun regenerate_protected(ctx: ptr, source: *Session, id_output: *u8,
+    id_capacity: usize, output: *Session) CodecStatus {
+    ret regenerate_id(ctx::*ProtectedCodec, source, id_output, id_capacity,
+        output);
+}
+
 pub fun protected_codec(codec: *ProtectedCodec) Codec {
-    if (!protected_valid(codec)) { ret Codec{ctx: nil, encode: nil, decode: nil}; }
+    if (!protected_valid(codec)) {
+        ret Codec{ctx: nil, encode: nil, decode: nil, regenerate: nil};
+    }
     ret Codec{ctx: codec::ptr, encode: encode_protected,
-        decode: decode_protected};
+        decode: decode_protected, regenerate: regenerate_protected};
 }
 
 pub fun release_protected_codec(codec: *ProtectedCodec) bool {
@@ -1826,6 +1848,7 @@ pub fun secure_cookie(name: str) CookiePolicy {
 
 fun manager_dependencies_valid(store: Store, codec: Codec,
     cookie: CookiePolicy) bool {
+    if (codec.regenerate == nil) { ret false; }
     ret store.ctx != nil && store.aliases != nil && store.start != nil
         && store.stop != nil && store.load != nil && store.save != nil
         && store.delete != nil && store.replace != nil && store.reap != nil
@@ -1849,8 +1872,10 @@ pub fun manager_active(manager: *Manager) bool {
 }
 
 pub fun init_manager(manager: *Manager, store: Store, codec: Codec,
-    cookie: CookiePolicy) bool {
+    cookie: CookiePolicy, context_value: str) bool {
     if (manager == nil || !range_valid(manager::*u8, $size_of(Manager))
+        || context_value == nil || str_len(context_value) == 0
+        || str_len(context_value) > MAX_CONTEXT_BYTES
         || !manager_dependencies_valid(store, codec, cookie)
         || store.aliases(store.ctx, manager::*u8, $size_of(Manager))) {
         ret false;
@@ -1864,6 +1889,7 @@ pub fun init_manager(manager: *Manager, store: Store, codec: Codec,
     manager.store = store;
     manager.codec = codec;
     manager.cookie = cookie;
+    manager.context = context_value;
     atomic.store(?manager.state, MANAGER_STOPPED);
     ret true;
 }
@@ -2171,6 +2197,867 @@ fun sample_session() Session {
 
 # these constructors hand back a provider record on failure, and a caller that
 # detects the failure by testing a callback against nil must not get one
+# ---- the request-level boundary ----
+
+pub def RequestStatus: u8;
+
+pub val REQUEST_OK:          RequestStatus = 1;
+pub val REQUEST_NONE:        RequestStatus = 2;
+pub val REQUEST_REJECTED:    RequestStatus = 3;
+pub val REQUEST_INVALID:     RequestStatus = 4;
+pub val REQUEST_UNAVAILABLE: RequestStatus = 5;
+pub val REQUEST_CONFLICT:    RequestStatus = 6;
+pub val REQUEST_LIMIT:       RequestStatus = 7;
+
+pub def RequestState: u8;
+
+pub val SESSION_IDLE:      RequestState = 1;
+pub val SESSION_ABSENT:    RequestState = 2;
+pub val SESSION_PRESENT:   RequestState = 3;
+pub val SESSION_DIRTY:     RequestState = 4;
+pub val SESSION_DESTROYED: RequestState = 5;
+
+# every buffer one request needs, owned by whoever drives the boundary
+pub rec RequestStorage {
+    jar_items:       *cookie.Cookie;
+    jar_capacity:    usize;
+    id_bytes:        *u8;
+    id_capacity:     usize;
+    data_bytes:      *u8;
+    data_capacity:   usize;
+    token_bytes:     *u8;
+    token_capacity:  usize;
+    header_bytes:    *u8;
+    header_capacity: usize;
+}
+
+pub rec RequestSession {
+    manager:     *Manager;
+    storage:     RequestStorage;
+    value:       Session;
+    state:       RequestState;
+    initialized: bool;
+}
+
+fun storage_span(base: ptr, count: usize, item_size: usize,
+    length: *usize) *u8 {
+    var total: usize = 0;
+    if (!multiply_size(count, item_size, ?total)) {
+        @length = 0;
+        ret nil;
+    }
+    @length = total;
+    ret base::*u8;
+}
+
+fun spans_disjoint(first: *u8, first_len: usize, second: *u8,
+    second_len: usize) bool {
+    if (first_len == 0 || second_len == 0) { ret true; }
+    val a: usize = first::usize;
+    val b: usize = second::usize;
+    if (first_len - 1 > ~(0::usize) - a || second_len - 1 > ~(0::usize) - b) {
+        ret false;
+    }
+    ret a + first_len - 1 < b || b + second_len - 1 < a;
+}
+
+pub fun request_storage_valid(storage: RequestStorage) bool {
+    if (storage.jar_items == nil || storage.jar_capacity == 0
+        || storage.id_bytes == nil || storage.id_capacity < MAX_SESSION_ID_BYTES
+        || storage.data_bytes == nil || storage.data_capacity == 0
+        || storage.token_bytes == nil || storage.token_capacity == 0
+        || storage.header_bytes == nil || storage.header_capacity == 0) {
+        ret false;
+    }
+    var jar_bytes: usize = 0;
+    val jar: *u8 = storage_span(storage.jar_items::ptr, storage.jar_capacity,
+        $size_of(cookie.Cookie), ?jar_bytes);
+    if (jar == nil || !range_valid(jar, jar_bytes)
+        || !range_valid(storage.id_bytes, storage.id_capacity)
+        || !range_valid(storage.data_bytes, storage.data_capacity)
+        || !range_valid(storage.token_bytes, storage.token_capacity)
+        || !range_valid(storage.header_bytes, storage.header_capacity)) {
+        ret false;
+    }
+    ret spans_disjoint(jar, jar_bytes, storage.id_bytes, storage.id_capacity)
+        && spans_disjoint(jar, jar_bytes, storage.data_bytes,
+            storage.data_capacity)
+        && spans_disjoint(jar, jar_bytes, storage.token_bytes,
+            storage.token_capacity)
+        && spans_disjoint(jar, jar_bytes, storage.header_bytes,
+            storage.header_capacity)
+        && spans_disjoint(storage.id_bytes, storage.id_capacity,
+            storage.data_bytes, storage.data_capacity)
+        && spans_disjoint(storage.id_bytes, storage.id_capacity,
+            storage.token_bytes, storage.token_capacity)
+        && spans_disjoint(storage.id_bytes, storage.id_capacity,
+            storage.header_bytes, storage.header_capacity)
+        && spans_disjoint(storage.data_bytes, storage.data_capacity,
+            storage.token_bytes, storage.token_capacity)
+        && spans_disjoint(storage.data_bytes, storage.data_capacity,
+            storage.header_bytes, storage.header_capacity)
+        && spans_disjoint(storage.token_bytes, storage.token_capacity,
+            storage.header_bytes, storage.header_capacity);
+}
+
+fun clear_session_value(value: *Session) {
+    value.id = view.view(nil, 0);
+    value.data = view.view(nil, 0);
+    value.issued_at_unix = 0;
+    value.not_before_unix = 0;
+    value.expires_at_unix = 0;
+    value.version = 0;
+    value.generation = 0;
+}
+
+pub fun init_request(request_session: *RequestSession, manager: *Manager,
+    storage: RequestStorage) bool {
+    if (request_session == nil
+        || !range_valid(request_session::*u8, $size_of(RequestSession))
+        || request_session.initialized || !manager_active(manager)
+        || !request_storage_valid(storage)) { ret false; }
+    request_session.manager = manager;
+    request_session.storage = storage;
+    clear_session_value(?request_session.value);
+    request_session.state = SESSION_IDLE;
+    request_session.initialized = true;
+    ret true;
+}
+
+pub fun request_state(request_session: *RequestSession) RequestState {
+    if (request_session == nil || !request_session.initialized) {
+        ret SESSION_IDLE;
+    }
+    ret request_session.state;
+}
+
+# nil unless a session is actually loaded, so absence is a state rather than a
+# value that reads as one
+pub fun request_session_value(request_session: *RequestSession) *Session {
+    if (request_session == nil || !request_session.initialized
+        || (request_session.state != SESSION_PRESENT
+            && request_session.state != SESSION_DIRTY)) { ret nil; }
+    ret ?request_session.value;
+}
+
+fun request_cookie_value(request: *message.Request) view.View {
+    if (request == nil) { ret view.view(nil, 0); }
+    var i: usize = 0;
+    for (i < request.fields.len) {
+        if (field.name_equal(request.fields.items[i].name,
+            view.view("cookie", 6))) { ret request.fields.items[i].value; }
+        i = i + 1;
+    }
+    ret view.view(nil, 0);
+}
+
+fun manager_context(manager: *Manager) view.View {
+    if (manager == nil || manager.context == nil) { ret view.view(nil, 0); }
+    ret view.view(manager.context, str_len(manager.context));
+}
+
+# lazy: nothing is parsed, decoded, or loaded until the application asks
+pub fun open_request(request_session: *RequestSession,
+    request: *message.Request, now_unix: i64,
+    scope: *cancel.Scope) RequestStatus {
+    if (request_session == nil || !request_session.initialized
+        || request == nil || now_unix < 0) { ret REQUEST_INVALID; }
+    if (request_session.state != SESSION_IDLE) {
+        if (request_session.state == SESSION_ABSENT) { ret REQUEST_NONE; }
+        ret REQUEST_OK;
+    }
+    val manager: *Manager = request_session.manager;
+    if (!manager_active(manager)) { ret REQUEST_UNAVAILABLE; }
+    val header: view.View = request_cookie_value(request);
+    if (header.len == 0) {
+        request_session.state = SESSION_ABSENT;
+        ret REQUEST_NONE;
+    }
+    var jar: cookie.Jar = cookie.init(request_session.storage.jar_items,
+        request_session.storage.jar_capacity);
+    if (cookie.parse_request(header, ?jar, cookie.limits_default(),
+        cookie.DUPLICATE_REJECT) != cookie.OK) {
+        request_session.state = SESSION_ABSENT;
+        ret REQUEST_NONE;
+    }
+    val name: str = manager.cookie.name;
+    if (name == nil) {
+        request_session.state = SESSION_ABSENT;
+        ret REQUEST_NONE;
+    }
+    val entry: *cookie.Cookie = cookie.find(?jar,
+        view.view(name, str_len(name)));
+    if (entry == nil || entry.value.len == 0) {
+        request_session.state = SESSION_ABSENT;
+        ret REQUEST_NONE;
+    }
+    val codec: Codec = manager.codec;
+    val decoded: CodecOperation = codec.decode(codec.ctx, entry.value.data,
+        entry.value.len, manager_context(manager), now_unix,
+        request_session.storage.id_bytes, request_session.storage.id_capacity,
+        request_session.storage.data_bytes,
+        request_session.storage.data_capacity, ?request_session.value);
+    if (decoded.status != CODEC_OK) {
+        clear_session_value(?request_session.value);
+        request_session.state = SESSION_ABSENT;
+        ret REQUEST_REJECTED;
+    }
+    val store: Store = manager.store;
+    val loaded: StoreStatus = store.load(store.ctx, request_session.value.id,
+        now_unix, request_session.storage.data_bytes,
+        request_session.storage.data_capacity, ?request_session.value, scope);
+    if (loaded == STORE_NOT_FOUND) {
+        clear_session_value(?request_session.value);
+        request_session.state = SESSION_ABSENT;
+        ret REQUEST_NONE;
+    }
+    if (loaded != STORE_OK) {
+        clear_session_value(?request_session.value);
+        request_session.state = SESSION_ABSENT;
+        if (loaded == STORE_CANCELLED) { ret REQUEST_UNAVAILABLE; }
+        ret REQUEST_UNAVAILABLE;
+    }
+    request_session.state = SESSION_PRESENT;
+    ret REQUEST_OK;
+}
+
+fun copy_into(source: view.View, output: *u8, capacity: usize) bool {
+    if (source.len > capacity || (source.len != 0 && source.data == nil)) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < source.len) {
+        output[i] = source.data[i];
+        i = i + 1;
+    }
+    ret true;
+}
+
+pub fun write_request(request_session: *RequestSession,
+    data: view.View) RequestStatus {
+    if (request_session == nil || !request_session.initialized) {
+        ret REQUEST_INVALID;
+    }
+    if (request_session.state != SESSION_PRESENT
+        && request_session.state != SESSION_DIRTY) { ret REQUEST_INVALID; }
+    if (data.len > MAX_SESSION_DATA_BYTES
+        || data.len > request_session.storage.data_capacity) {
+        ret REQUEST_LIMIT;
+    }
+    if (!copy_into(data, request_session.storage.data_bytes,
+        request_session.storage.data_capacity)) { ret REQUEST_INVALID; }
+    request_session.value.data =
+        view.view(request_session.storage.data_bytes, data.len);
+    request_session.state = SESSION_DIRTY;
+    ret REQUEST_OK;
+}
+
+pub fun destroy_request(request_session: *RequestSession) RequestStatus {
+    if (request_session == nil || !request_session.initialized) {
+        ret REQUEST_INVALID;
+    }
+    if (request_session.state != SESSION_PRESENT
+        && request_session.state != SESSION_DIRTY) { ret REQUEST_INVALID; }
+    request_session.state = SESSION_DESTROYED;
+    ret REQUEST_OK;
+}
+
+pub fun release_request(request_session: *RequestSession) bool {
+    if (request_session == nil || !request_session.initialized) { ret false; }
+    clear_session_value(?request_session.value);
+    request_session.manager = nil;
+    request_session.state = SESSION_IDLE;
+    request_session.initialized = false;
+    ret true;
+}
+
+fun policy_same_site(value: str) u8 {
+    if (value == nil) { ret cookie.SAME_SITE_DEFAULT; }
+    val text: view.View = view.view(value, str_len(value));
+    if (view_text_equal(text, "Lax")) { ret cookie.SAME_SITE_LAX; }
+    if (view_text_equal(text, "Strict")) { ret cookie.SAME_SITE_STRICT; }
+    if (view_text_equal(text, "None")) { ret cookie.SAME_SITE_NONE; }
+    ret cookie.SAME_SITE_DEFAULT;
+}
+
+fun view_text_equal(value: view.View, expected: str) bool {
+    val length: usize = str_len(expected);
+    if (value.len != length || value.data == nil) { ret false; }
+    var i: usize = 0;
+    for (i < length) {
+        if (value.data[i] != expected[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun policy_view(value: str) view.View {
+    if (value == nil) { ret view.view(nil, 0); }
+    ret view.view(value, str_len(value));
+}
+
+# one Set-Cookie built from the assembled policy, so an application never
+# restates the policy the manager already holds
+fun emit_cookie(request_session: *RequestSession, response: *message.Response,
+    value: view.View, max_age: i64, expiring: bool) RequestStatus {
+    val policy: CookiePolicy = request_session.manager.cookie;
+    var header: cookie.Cookie = cookie.Cookie{
+        name: policy_view(policy.name), value: value,
+        path: policy_view(policy.path), domain: policy_view(policy.domain),
+        has_max_age: true, max_age_s: max_age, has_expires: expiring,
+        expires_unix: 0, secure: policy.secure, http_only: policy.http_only,
+        partitioned: false, same_site: policy_same_site(policy.same_site),
+        attributes: nil, attribute_len: 0};
+    val written: cookie.Operation = cookie.serialize_set_cookie(?header,
+        request_session.storage.header_bytes,
+        request_session.storage.header_capacity, cookie.limits_default());
+    if (written.status != cookie.OK) { ret REQUEST_LIMIT; }
+    if (field.append(?response.fields, field.Field{
+        name: view.view("set-cookie", 10),
+        value: view.view(request_session.storage.header_bytes, written.written),
+        sensitive: true}) != field.ADD_OK) { ret REQUEST_LIMIT; }
+    ret REQUEST_OK;
+}
+
+fun map_store_status(status: StoreStatus) RequestStatus {
+    if (status == STORE_OK) { ret REQUEST_OK; }
+    if (status == STORE_CONFLICT || status == STORE_STALE_GENERATION) {
+        ret REQUEST_CONFLICT;
+    }
+    if (status == STORE_CAPACITY) { ret REQUEST_LIMIT; }
+    ret REQUEST_UNAVAILABLE;
+}
+
+# a new session starts from a seed the codec immediately replaces, so the only
+# identifier that ever reaches the store or the wire is a generated one
+pub fun create_request(request_session: *RequestSession, lifetime_s: i64,
+    now_unix: i64) RequestStatus {
+    if (request_session == nil || !request_session.initialized
+        || now_unix < 0 || lifetime_s <= 0) { ret REQUEST_INVALID; }
+    if (request_session.state != SESSION_IDLE
+        && request_session.state != SESSION_ABSENT) { ret REQUEST_INVALID; }
+    val manager: *Manager = request_session.manager;
+    if (!manager_active(manager)) { ret REQUEST_UNAVAILABLE; }
+    val codec: Codec = manager.codec;
+    if (codec.regenerate == nil) { ret REQUEST_INVALID; }
+    var seed_id: [64]u8;
+    seed_id[0] = 's';
+    var seed: Session = Session{id: view.view(?seed_id[0], 1),
+        data: view.view(nil, 0), issued_at_unix: now_unix,
+        not_before_unix: now_unix, expires_at_unix: now_unix + lifetime_s,
+        version: 0, generation: 0};
+    var created: Session;
+    if (codec.regenerate(codec.ctx, ?seed,
+        request_session.storage.id_bytes, request_session.storage.id_capacity,
+        ?created) != CODEC_OK) { ret REQUEST_INVALID; }
+    request_session.value = created;
+    request_session.value.data = view.view(nil, 0);
+    request_session.value.version = 0;
+    request_session.value.generation = 0;
+    request_session.state = SESSION_DIRTY;
+    ret REQUEST_OK;
+}
+
+# the session identity is replaced and the old record removed, so a fixated
+# identifier cannot survive the privilege change that motivated the call
+pub fun regenerate_request(request_session: *RequestSession, now_unix: i64,
+    scope: *cancel.Scope) RequestStatus {
+    if (request_session == nil || !request_session.initialized
+        || now_unix < 0) { ret REQUEST_INVALID; }
+    if (request_session.state != SESSION_PRESENT
+        && request_session.state != SESSION_DIRTY) { ret REQUEST_INVALID; }
+    val manager: *Manager = request_session.manager;
+    if (!manager_active(manager)) { ret REQUEST_UNAVAILABLE; }
+    val codec: Codec = manager.codec;
+    if (codec.regenerate == nil) { ret REQUEST_INVALID; }
+    # the generated identifier lands in the same buffer the current one
+    # occupies, so the source is snapshotted out of the way first
+    var previous_id: [64]u8;
+    val current: Session = request_session.value;
+    if (current.id.len == 0 || current.id.len > MAX_SESSION_ID_BYTES) {
+        ret REQUEST_INVALID;
+    }
+    var index: usize = 0;
+    for (index < current.id.len) {
+        previous_id[index] = current.id.data[index];
+        index = index + 1;
+    }
+    var previous: Session = current;
+    previous.id = view.view(?previous_id[0], current.id.len);
+    var replacement: Session;
+    if (codec.regenerate(codec.ctx, ?previous,
+        request_session.storage.id_bytes, request_session.storage.id_capacity,
+        ?replacement) != CODEC_OK) { ret REQUEST_INVALID; }
+    val store: Store = manager.store;
+    var saved: SaveResult = SaveResult{version: 0, generation: 0};
+    val replaced: StoreStatus = store.replace(store.ctx, previous.id,
+        previous.version, previous.generation, ?replacement, now_unix,
+        ?saved, scope);
+    if (replaced != STORE_OK) { ret map_store_status(replaced); }
+    request_session.value = replacement;
+    request_session.value.version = saved.version;
+    request_session.value.generation = saved.generation;
+    request_session.state = SESSION_DIRTY;
+    ret REQUEST_OK;
+}
+
+# the one place a session reaches the store and the response, so ordering and
+# the cookie policy are the framework's problem rather than the application's
+pub fun commit_request(request_session: *RequestSession,
+    response: *message.Response, now_unix: i64,
+    scope: *cancel.Scope) RequestStatus {
+    if (request_session == nil || !request_session.initialized
+        || response == nil || now_unix < 0) { ret REQUEST_INVALID; }
+    if (request_session.state == SESSION_IDLE
+        || request_session.state == SESSION_ABSENT
+        || request_session.state == SESSION_PRESENT) { ret REQUEST_OK; }
+    val manager: *Manager = request_session.manager;
+    if (!manager_active(manager)) { ret REQUEST_UNAVAILABLE; }
+    if (response.committed) { ret REQUEST_INVALID; }
+    val store: Store = manager.store;
+    if (request_session.state == SESSION_DESTROYED) {
+        val removed: StoreStatus = store.delete(store.ctx,
+            request_session.value.id, request_session.value.version,
+            request_session.value.generation, scope);
+        if (removed != STORE_OK && removed != STORE_NOT_FOUND) {
+            ret map_store_status(removed);
+        }
+        val cleared: RequestStatus = emit_cookie(request_session, response,
+            view.view("", 0), 0, true);
+        clear_session_value(?request_session.value);
+        request_session.state = SESSION_ABSENT;
+        ret cleared;
+    }
+    var saved: SaveResult = SaveResult{version: 0, generation: 0};
+    val stored: StoreStatus = store.save(store.ctx, ?request_session.value,
+        request_session.value.version, now_unix, ?saved, scope);
+    if (stored != STORE_OK) { ret map_store_status(stored); }
+    request_session.value.version = saved.version;
+    request_session.value.generation = saved.generation;
+    val codec: Codec = manager.codec;
+    val token: CodecOperation = codec.encode(codec.ctx,
+        ?request_session.value, manager_context(manager), now_unix,
+        request_session.storage.token_bytes,
+        request_session.storage.token_capacity);
+    if (token.status != CODEC_OK) { ret REQUEST_INVALID; }
+    val emitted: RequestStatus = emit_cookie(request_session, response,
+        view.view(request_session.storage.token_bytes, token.written),
+        manager.cookie.max_age, false);
+    if (emitted != REQUEST_OK) { ret emitted; }
+    request_session.state = SESSION_PRESENT;
+    ret REQUEST_OK;
+}
+
+pub def ClockFun: fun(ptr) i64;
+
+# laurel owns no clock, so the application supplies the one the codec and the
+# store are judged against
+pub rec Clock {
+    ctx: ptr;
+    now: ClockFun;
+}
+
+pub rec RequestLimits {
+    max_cookies:      usize;
+    max_data_bytes:   usize;
+    max_token_bytes:  usize;
+    max_header_bytes: usize;
+}
+
+pub fun request_limits_default() RequestLimits {
+    ret RequestLimits{max_cookies: 16, max_data_bytes: MAX_SESSION_DATA_BYTES,
+        max_token_bytes: MAX_TOKEN_BYTES, max_header_bytes: 1024};
+}
+
+pub fun request_limits_valid(limits: RequestLimits) bool {
+    ret limits.max_cookies != 0 && limits.max_data_bytes != 0
+        && limits.max_data_bytes <= MAX_SESSION_DATA_BYTES
+        && limits.max_token_bytes != 0
+        && limits.max_token_bytes <= MAX_TOKEN_BYTES
+        && limits.max_header_bytes != 0;
+}
+
+pub rec Binder {
+    manager:     *Manager;
+    clock:       Clock;
+    limits:      RequestLimits;
+    initialized: bool;
+}
+
+pub fun init_binder(binder: *Binder, manager: *Manager, clock: Clock,
+    limits: RequestLimits) bool {
+    if (binder == nil || !range_valid(binder::*u8, $size_of(Binder))
+        || binder.initialized || !manager_valid(manager) || clock.now == nil
+        || !request_limits_valid(limits)) { ret false; }
+    binder.manager = manager;
+    binder.clock = clock;
+    binder.limits = limits;
+    binder.initialized = true;
+    ret true;
+}
+
+# the request session and every buffer it needs come from the request arena,
+# so one binder serves every concurrently admitted request
+fun allocate_request(binder: *Binder,
+    request_context: *context.Context) *RequestSession {
+    val alloc: *A.Allocator = request_context.alloc;
+    val session_slot: R.Result[*RequestSession, *u8] =
+        A.allocate[RequestSession](alloc, 1);
+    if (R.is_err[*RequestSession, *u8](session_slot)) { ret nil; }
+    val jar: R.Result[*cookie.Cookie, *u8] =
+        A.allocate[cookie.Cookie](alloc, binder.limits.max_cookies);
+    if (R.is_err[*cookie.Cookie, *u8](jar)) { ret nil; }
+    val ids: R.Result[*u8, *u8] = A.allocate[u8](alloc, MAX_SESSION_ID_BYTES);
+    if (R.is_err[*u8, *u8](ids)) { ret nil; }
+    val data: R.Result[*u8, *u8] =
+        A.allocate[u8](alloc, binder.limits.max_data_bytes);
+    if (R.is_err[*u8, *u8](data)) { ret nil; }
+    val token: R.Result[*u8, *u8] =
+        A.allocate[u8](alloc, binder.limits.max_token_bytes);
+    if (R.is_err[*u8, *u8](token)) { ret nil; }
+    val header: R.Result[*u8, *u8] =
+        A.allocate[u8](alloc, binder.limits.max_header_bytes);
+    if (R.is_err[*u8, *u8](header)) { ret nil; }
+    val request_session: *RequestSession =
+        R.unwrap_ok[*RequestSession, *u8](session_slot);
+    request_session.initialized = false;
+    if (!init_request(request_session, binder.manager, RequestStorage{
+        jar_items: R.unwrap_ok[*cookie.Cookie, *u8](jar),
+        jar_capacity: binder.limits.max_cookies,
+        id_bytes: R.unwrap_ok[*u8, *u8](ids),
+        id_capacity: MAX_SESSION_ID_BYTES,
+        data_bytes: R.unwrap_ok[*u8, *u8](data),
+        data_capacity: binder.limits.max_data_bytes,
+        token_bytes: R.unwrap_ok[*u8, *u8](token),
+        token_capacity: binder.limits.max_token_bytes,
+        header_bytes: R.unwrap_ok[*u8, *u8](header),
+        header_capacity: binder.limits.max_header_bytes})) { ret nil; }
+    ret request_session;
+}
+
+fun binder_failure(detail: str) R.Result[u8, error.AppError] {
+    ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
+        "internal server error", detail, false));
+}
+
+fun bind_session(ctx: ptr, next: middleware.Next,
+    request_context: *context.Context) R.Result[u8, error.AppError] {
+    val binder: *Binder = ctx::*Binder;
+    if (binder == nil || !binder.initialized
+        || !context.active(request_context)
+        || request_context.session != nil) {
+        ret binder_failure("session binder is invalid");
+    }
+    val request_session: *RequestSession =
+        allocate_request(binder, request_context);
+    if (request_session == nil) {
+        ret binder_failure("session storage could not be allocated");
+    }
+    request_context.session = request_session::ptr;
+    val outcome: R.Result[u8, error.AppError] =
+        middleware.call(next, request_context);
+    val response: *message.Response = context.response(request_context);
+    var settled: RequestStatus = REQUEST_OK;
+    if (response != nil) {
+        settled = commit_request(request_session, response,
+            binder.clock.now(binder.clock.ctx),
+            context.cancellation(request_context));
+    } or {
+        if (request_state(request_session) == SESSION_DIRTY
+            || request_state(request_session) == SESSION_DESTROYED) {
+            settled = REQUEST_UNAVAILABLE;
+        }
+    }
+    request_context.session = nil;
+    release_request(request_session);
+    if (settled != REQUEST_OK
+        && !R.is_err[u8, error.AppError](outcome)) {
+        if (settled == REQUEST_CONFLICT) {
+            ret R.err[u8, error.AppError](error.make(error.CONFLICT, 409,
+                "request conflicted", "session was modified concurrently",
+                true));
+        }
+        ret binder_failure("session could not be committed");
+    }
+    ret outcome;
+}
+
+pub fun binder_middleware(binder: *Binder) middleware.Middleware {
+    if (binder == nil || !binder.initialized) {
+        ret middleware.Middleware{ctx: nil, call: nil};
+    }
+    ret middleware.Middleware{ctx: binder::ptr, call: bind_session};
+}
+
+# the request's session, for a handler that never sees the binder
+pub fun from_context(request_context: *context.Context) *RequestSession {
+    if (!context.active(request_context)
+        || request_context.session == nil) { ret nil; }
+    ret request_context.session::*RequestSession;
+}
+
+# read-through open, so a route that never asks pays for nothing
+pub fun load(request_context: *context.Context, now_unix: i64) RequestStatus {
+    val request_session: *RequestSession = from_context(request_context);
+    if (request_session == nil) { ret REQUEST_INVALID; }
+    ret open_request(request_session, context.request(request_context),
+        now_unix, context.cancellation(request_context));
+}
+
+rec RequestFixture {
+    codec_fixture:   CodecFixture;
+    memory:          MemoryStore;
+    slots:           [4]MemorySlot;
+    manager:         Manager;
+    jar_items:       [8]cookie.Cookie;
+    id_bytes:        [64]u8;
+    data_bytes:      [256]u8;
+    token_bytes:     [4096]u8;
+    header_bytes:    [1024]u8;
+    request_items:   [4]field.Field;
+    response_items:  [8]field.Field;
+    request:         message.Request;
+    response:        message.Response;
+    scope:           cancel.Scope;
+    session:         RequestSession;
+}
+
+fun request_fixture_storage(fixture: *RequestFixture) RequestStorage {
+    ret RequestStorage{jar_items: ?fixture.jar_items[0], jar_capacity: 8,
+        id_bytes: ?fixture.id_bytes[0], id_capacity: 64,
+        data_bytes: ?fixture.data_bytes[0], data_capacity: 256,
+        token_bytes: ?fixture.token_bytes[0], token_capacity: 4096,
+        header_bytes: ?fixture.header_bytes[0], header_capacity: 1024};
+}
+
+fun init_request_fixture(fixture: *RequestFixture) bool {
+    if (!init_codec_fixture(?fixture.codec_fixture, AES_256_GCM, REPLAY_ALLOW,
+        8, 8)) { ret false; }
+    fixture.memory.initialized = false;
+    fixture.memory.active = false;
+    if (!init_memory_store(?fixture.memory, ?fixture.slots[0], 4)) {
+        ret false;
+    }
+    fixture.manager.state = MANAGER_EMPTY;
+    if (!init_manager(?fixture.manager, memory_store(?fixture.memory),
+            fixture.codec_fixture.codec, secure_cookie("laurel_session"),
+            "laurel.request")
+        || start_manager(?fixture.manager) != STORE_OK) { ret false; }
+    if (!cancel.make_root(?fixture.scope, false, time.Time{sec: 0, nsec: 0})) {
+        ret false;
+    }
+    fixture.request.fields = field.init(?fixture.request_items[0], 4,
+        field.limits(4, 8192, 64, 4096));
+    fixture.request.trailers = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    fixture.request.body = nil;
+    fixture.request.generation = 9;
+    fixture.response.status = 200;
+    fixture.response.fields = field.init(?fixture.response_items[0], 8,
+        field.limits(8, 8192, 64, 4096));
+    fixture.response.trailers = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    fixture.response.body_kind = message.BODY_NONE;
+    fixture.response.body_reader = nil;
+    fixture.response.body_writer = nil;
+    fixture.response.generation = 9;
+    fixture.response.committed = false;
+    fixture.session.initialized = false;
+    ret init_request(?fixture.session, ?fixture.manager,
+        request_fixture_storage(fixture));
+}
+
+fun emitted_cookie(fixture: *RequestFixture) view.View {
+    var i: usize = 0;
+    for (i < fixture.response.fields.len) {
+        if (field.name_equal(fixture.response.fields.items[i].name,
+            view.view("set-cookie", 10))) {
+            ret fixture.response.fields.items[i].value;
+        }
+        i = i + 1;
+    }
+    ret view.view(nil, 0);
+}
+
+# take the token out of one response's Set-Cookie and present it as the next
+# request's Cookie, which is what a browser does
+fun replay_cookie(fixture: *RequestFixture, buffer: *u8,
+    capacity: usize) bool {
+    val header: view.View = emitted_cookie(fixture);
+    if (header.len == 0) { ret false; }
+    var length: usize = 0;
+    var scanning: bool = true;
+    for (scanning && length < header.len) {
+        if (header.data[length] == ';') { scanning = false; }
+        or { length = length + 1; }
+    }
+    if (length == 0 || length > capacity) { ret false; }
+    var i: usize = 0;
+    for (i < length) {
+        buffer[i] = header.data[i];
+        i = i + 1;
+    }
+    fixture.request.fields = field.init(?fixture.request_items[0], 4,
+        field.limits(4, 8192, 64, 4096));
+    ret field.append(?fixture.request.fields, field.Field{
+        name: view.view("cookie", 6), value: view.view(buffer, length),
+        sensitive: true}) == field.ADD_OK;
+}
+
+fun reset_response(fixture: *RequestFixture) {
+    fixture.response.fields = field.init(?fixture.response_items[0], 8,
+        field.limits(8, 8192, 64, 4096));
+    fixture.response.committed = false;
+}
+
+test "laurel.session: a request reaches its session through the boundary" {
+    var fixture: RequestFixture;
+    if (!init_request_fixture(?fixture)) { ret 1; }
+
+    # no cookie at all is an absent session, not a nil that reads as one
+    if (open_request(?fixture.session, ?fixture.request, 100, ?fixture.scope)
+            != REQUEST_NONE
+        || request_state(?fixture.session) != SESSION_ABSENT
+        || request_session_value(?fixture.session) != nil) { ret 2; }
+
+    # a fresh session is created, written, and committed
+    if (create_request(?fixture.session, 600, 100) != REQUEST_OK
+        || request_state(?fixture.session) != SESSION_DIRTY
+        || request_session_value(?fixture.session) == nil) { ret 3; }
+    if (write_request(?fixture.session, view.view("user=7", 6)) != REQUEST_OK
+        || commit_request(?fixture.session, ?fixture.response, 100,
+            ?fixture.scope) != REQUEST_OK
+        || request_state(?fixture.session) != SESSION_PRESENT) { ret 4; }
+    val issued: view.View = emitted_cookie(?fixture);
+    if (issued.len == 0) { ret 5; }
+
+    # the token round-trips: a second request loads what the first stored
+    var carried: [4096]u8;
+    if (!replay_cookie(?fixture, ?carried[0], 4096)) { ret 6; }
+    var second: RequestSession;
+    second.initialized = false;
+    if (!init_request(?second, ?fixture.manager,
+        request_fixture_storage(?fixture))) { ret 7; }
+    if (open_request(?second, ?fixture.request, 120, ?fixture.scope)
+            != REQUEST_OK
+        || request_state(?second) != SESSION_PRESENT) { ret 8; }
+    val loaded: *Session = request_session_value(?second);
+    if (loaded == nil || loaded.data.len != 6
+        || loaded.data.data[0] != 'u') { ret 9; }
+
+    # a tampered token is rejected and leaves no session behind
+    var tampered: RequestSession;
+    tampered.initialized = false;
+    carried[20] = carried[20] + 1;
+    if (!init_request(?tampered, ?fixture.manager,
+            request_fixture_storage(?fixture))
+        || open_request(?tampered, ?fixture.request, 120, ?fixture.scope)
+            != REQUEST_REJECTED
+        || request_state(?tampered) != SESSION_ABSENT
+        || request_session_value(?tampered) != nil) { ret 10; }
+    carried[20] = carried[20] - 1;
+
+    # an expired token is refused by the codec rather than the store
+    var expired: RequestSession;
+    expired.initialized = false;
+    if (!init_request(?expired, ?fixture.manager,
+            request_fixture_storage(?fixture))
+        || open_request(?expired, ?fixture.request, 5000, ?fixture.scope)
+            == REQUEST_OK) { ret 11; }
+
+    # regeneration replaces the identity and the old record
+    var rotated: RequestSession;
+    rotated.initialized = false;
+    if (!init_request(?rotated, ?fixture.manager,
+            request_fixture_storage(?fixture))
+        || open_request(?rotated, ?fixture.request, 130, ?fixture.scope)
+            != REQUEST_OK) { ret 12; }
+    var previous_id: [64]u8;
+    val before: *Session = request_session_value(?rotated);
+    if (before == nil || before.id.len == 0 || before.id.len > 64) { ret 13; }
+    var i: usize = 0;
+    for (i < before.id.len) {
+        previous_id[i] = before.id.data[i];
+        i = i + 1;
+    }
+    val previous_len: usize = before.id.len;
+    if (regenerate_request(?rotated, 130, ?fixture.scope) != REQUEST_OK) {
+        ret 14;
+    }
+    val after: *Session = request_session_value(?rotated);
+    if (after == nil || after.id.len == 0) { ret 15; }
+    if (after.id.len == previous_len) {
+        var same: bool = true;
+        var j: usize = 0;
+        for (j < previous_len) {
+            if (after.id.data[j] != previous_id[j]) { same = false; }
+            j = j + 1;
+        }
+        if (same) { ret 16; }
+    }
+    reset_response(?fixture);
+    if (commit_request(?rotated, ?fixture.response, 130, ?fixture.scope)
+        != REQUEST_OK || emitted_cookie(?fixture).len == 0) { ret 17; }
+
+    # destroying clears the record and emits an expiring cookie
+    var carried_again: [4096]u8;
+    if (!replay_cookie(?fixture, ?carried_again[0], 4096)) { ret 18; }
+    var ending: RequestSession;
+    ending.initialized = false;
+    if (!init_request(?ending, ?fixture.manager,
+            request_fixture_storage(?fixture))
+        || open_request(?ending, ?fixture.request, 140, ?fixture.scope)
+            != REQUEST_OK
+        || destroy_request(?ending) != REQUEST_OK
+        || request_state(?ending) != SESSION_DESTROYED) { ret 19; }
+    reset_response(?fixture);
+    if (commit_request(?ending, ?fixture.response, 140, ?fixture.scope)
+            != REQUEST_OK
+        || request_state(?ending) != SESSION_ABSENT
+        || emitted_cookie(?fixture).len == 0) { ret 20; }
+    var gone: RequestSession;
+    gone.initialized = false;
+    if (!init_request(?gone, ?fixture.manager,
+            request_fixture_storage(?fixture))
+        || open_request(?gone, ?fixture.request, 150, ?fixture.scope)
+            != REQUEST_NONE) { ret 21; }
+
+    # a request that never asks costs nothing and writes no cookie
+    var untouched: RequestSession;
+    untouched.initialized = false;
+    reset_response(?fixture);
+    if (!init_request(?untouched, ?fixture.manager,
+            request_fixture_storage(?fixture))
+        || request_state(?untouched) != SESSION_IDLE
+        || commit_request(?untouched, ?fixture.response, 160, ?fixture.scope)
+            != REQUEST_OK
+        || emitted_cookie(?fixture).len != 0
+        || fixture.response.fields.len != 0) { ret 22; }
+
+    if (!release_request(?fixture.session) || !cancel.destroy(?fixture.scope)
+        || stop_manager(?fixture.manager) != STORE_OK) { ret 23; }
+    ret 0;
+}
+
+test "laurel.session: request storage must be disjoint and complete" {
+    var fixture: RequestFixture;
+    if (!init_request_fixture(?fixture)) { ret 1; }
+    var probe: RequestSession;
+    probe.initialized = false;
+    var aliased: RequestStorage = request_fixture_storage(?fixture);
+    aliased.token_bytes = ?fixture.data_bytes[0];
+    if (request_storage_valid(aliased)
+        || init_request(?probe, ?fixture.manager, aliased)) { ret 2; }
+    var short_id: RequestStorage = request_fixture_storage(?fixture);
+    short_id.id_capacity = 8;
+    if (request_storage_valid(short_id)) { ret 3; }
+    var absent: RequestStorage = request_fixture_storage(?fixture);
+    absent.header_bytes = nil;
+    if (request_storage_valid(absent)) { ret 4; }
+    if (!request_storage_valid(request_fixture_storage(?fixture))) { ret 5; }
+    if (!cancel.destroy(?fixture.scope)
+        || stop_manager(?fixture.manager) != STORE_OK) { ret 6; }
+    ret 0;
+}
+
 test "laurel.session: invalid provider records carry no callable pointer" {
     var store: MemoryStore;
     val absent_store: Store = memory_store(?store);
@@ -3174,7 +4061,7 @@ test "laurel.session: manager ownership and lifecycle fail closed" {
     slots[0].id[0] = 0x5a;
     val aliased_manager: *Manager = (?slots[0])::*Manager;
     if (init_manager(aliased_manager, memory_store(?memory),
-            codec_fixture.codec, secure_cookie("__Host-aliased"))
+            codec_fixture.codec, secure_cookie("__Host-aliased"), "laurel.test")
         || slots[0].id[0] != 0x5a) { ret 3; }
 
     var probe: DurableProbe;
@@ -3183,9 +4070,9 @@ test "laurel.session: manager ownership and lifecycle fail closed" {
     probe.manager = ?manager;
     probe.fail_start = true;
     if (!init_manager(?manager, durable_store(?probe), codec_fixture.codec,
-            secure_cookie("__Host-managed"))
+            secure_cookie("__Host-managed"), "laurel.test")
         || init_manager(?manager, durable_store(?probe), codec_fixture.codec,
-            secure_cookie("__Host-managed"))
+            secure_cookie("__Host-managed"), "laurel.test")
         || !manager_valid(?manager) || manager_active(?manager)
         || start_manager(?manager) != STORE_UNAVAILABLE
         || manager.state != MANAGER_STOPPED || manager_active(?manager)) {
@@ -3295,7 +4182,7 @@ test "laurel.session: concurrent updates conflict and durable stores inject clea
     var manager: Manager;
     manager.state = MANAGER_EMPTY;
     if (!init_manager(?manager, durable, codec_fixture.codec,
-        secure_cookie("__Host-laurel"))
+        secure_cookie("__Host-laurel"), "laurel.test")
         || start_manager(?manager) != STORE_OK || !manager_active(?manager)) {
         ret 8;
     }

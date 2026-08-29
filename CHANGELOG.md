@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A request-level session boundary, completing #4. `session.Binder` is
+  application middleware that loads lazily, so a handler reaches its session
+  through `session.from_context` and never drives `cookie.parse_request`, the
+  codec, or the store itself. `create_request`, `write_request`,
+  `regenerate_request`, and `destroy_request` record intent; the binder commits
+  once on the way out, before the response is committed, emitting one
+  `Set-Cookie` from the assembled `CookiePolicy`.
+- Absence is a state rather than a nil that reads as a value: `request_state`
+  distinguishes idle, absent, present, dirty, and destroyed, and a rejected
+  token is distinguishable from a missing one.
+- `context.Context.session` returns, now set by the binder and read through an
+  accessor, which is what its removal in #36 anticipated.
+
+### Changed
+
+- `session.Manager` carries the authenticated context the codec binds each token
+  to, so `init_manager` takes it. It is application-scoped, not per-request.
+- `session.Codec` gains a `regenerate` slot, so identity replacement is
+  reachable behind the manager rather than only on a concrete `ProtectedCodec`.
+
 ### Fixed
 
 - Replaced all thirty-five uses of the `T{}` empty record literal, a construct
