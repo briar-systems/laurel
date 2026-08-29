@@ -147,7 +147,8 @@ fun clear_fields(storage: Storage, count: usize) {
     if (storage.fields == nil) { ret; }
     var i: usize = 0;
     for (i < count && i < storage.field_capacity) {
-        storage.fields[i] = Field{};
+        storage.fields[i] = Field{name: view.view(nil, 0),
+            value: view.view(nil, 0)};
         i = i + 1;
     }
 }
@@ -189,7 +190,7 @@ fun operation(decoder: *UrlEncoded, status: Status,
 fun pending(token: u64) Operation {
     ret Operation{status: PENDING, token: token,
         form: Form{fields: nil, len: 0, bytes: 0},
-        app_error: error.AppError{}};
+        app_error: error.no_error()};
 }
 
 fun invalid_operation(detail: str) Operation {
@@ -456,7 +457,7 @@ pub fun feed_urlencoded(decoder: *UrlEncoded, input: *u8,
         }
         i = i + 1;
     }
-    ret operation(decoder, MORE, error.AppError{});
+    ret operation(decoder, MORE, error.no_error());
 }
 
 pub fun finish_urlencoded(decoder: *UrlEncoded) Operation {
@@ -479,14 +480,14 @@ pub fun finish_urlencoded(decoder: *UrlEncoded) Operation {
         }
     }
     decoder.state = COMPLETE_STATE;
-    ret operation(decoder, COMPLETE, error.AppError{});
+    ret operation(decoder, COMPLETE, error.no_error());
 }
 
 pub fun result(decoder: *UrlEncoded) Operation {
     if (!decoder_valid(decoder) || decoder.state != COMPLETE_STATE) {
         ret invalid_operation("form result is not complete");
     }
-    ret operation(decoder, COMPLETE, error.AppError{});
+    ret operation(decoder, COMPLETE, error.no_error());
 }
 
 fun parser_components_valid(owner: *u8, decoder: *UrlEncoded,
@@ -909,7 +910,7 @@ test "laurel.form: body state cannot overlap result storage" {
             fields: (?parser)::*Field, field_capacity: 1,
             bytes: ?bytes[0], byte_capacity: 32}, limits)) { ret 1; }
     var scope: cancel.Scope;
-    if (!cancel.make_root(?scope, false, time.Time{})) { ret 2; }
+    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
     var state: TestBody = TestBody{input: view.view("a=b", 3)};
@@ -933,7 +934,7 @@ test "laurel.form: body polling retains pending buffers across fragmentation" {
         ret 1;
     }
     var scope: cancel.Scope;
-    if (!cancel.make_root(?scope, false, time.Time{})) { ret 2; }
+    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
     var state: TestBody = TestBody{
@@ -975,7 +976,7 @@ test "laurel.form: parse failure settles the body exactly once" {
         ret 1;
     }
     var scope: cancel.Scope;
-    if (!cancel.make_root(?scope, false, time.Time{})) { ret 2; }
+    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
     var state: TestBody = TestBody{input: view.view("a=1234567", 9),
@@ -1010,7 +1011,7 @@ test "laurel.form: body cancellation never publishes fields" {
         ret 1;
     }
     var scope: cancel.Scope;
-    if (!cancel.make_root(?scope, false, time.Time{}) ||
+    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0}) ||
         !cancel.cancel(?scope)) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));

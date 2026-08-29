@@ -207,7 +207,7 @@ fun outcome(status: ExecutionStatus, action: u8,
 }
 
 fun empty_render_failure() error.RenderFailure {
-    ret error.RenderFailure{};
+    ret error.render_failure(nil);
 }
 
 fun unmapped(app_error: error.AppError, detail: str) Outcome {
@@ -275,10 +275,10 @@ fun execute_claimed(source_items: *Middleware, source_len: usize,
     if (!R.is_err[u8, error.AppError](result)) {
         val action: u8 = R.unwrap_ok[u8, error.AppError](result);
         if (action == handler.RESPOND) {
-            ret outcome(EXECUTION_RESPOND, action, error.AppError{},
+            ret outcome(EXECUTION_RESPOND, action, error.no_error(),
                 empty_render_failure());
         }
-        ret outcome(EXECUTION_NEXT, action, error.AppError{},
+        ret outcome(EXECUTION_NEXT, action, error.no_error(),
             empty_render_failure());
     }
     ret map_error(R.unwrap_err[u8, error.AppError](result), mapper,

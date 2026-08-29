@@ -344,7 +344,12 @@ pub fun parse_request(input: view.View, jar: *Jar, limits: Limits,
                 jar.items[existing].value = pair.value;
             }
         } or {
-            jar.items[written] = Cookie{};
+            jar.items[written] = Cookie{name: view.view(nil, 0),
+                value: view.view(nil, 0), path: view.view(nil, 0),
+                domain: view.view(nil, 0), has_max_age: false, max_age_s: 0,
+                has_expires: false, expires_unix: 0, secure: false,
+                http_only: false, partitioned: false, same_site: 0,
+                attributes: nil, attribute_len: 0};
             jar.items[written].name = pair.name;
             jar.items[written].value = pair.value;
             jar.items[written].same_site = SAME_SITE_DEFAULT;

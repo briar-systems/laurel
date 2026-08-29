@@ -765,7 +765,6 @@ rec PolicyFixture {
 fun init_policy_fixture(fixture: *PolicyFixture, request_method: method.Method,
     secure: bool, response_capacity: usize) bool {
     if (fixture == nil || response_capacity > 8) { ret false; }
-    fixture.request = message.Request{};
     fixture.request.method = request_method;
     fixture.request.target = target.origin(view.view("/", 1),
         view.view("/", 1), view.view(nil, 0));
@@ -777,12 +776,24 @@ fun init_policy_fixture(fixture: *PolicyFixture, request_method: method.Method,
         deadline: time.Time{sec: 0, nsec: 0}, request_index: 1};
     fixture.request.fields = field.init(?fixture.request_items[0], 8,
         field.limits(8, 8192, 64, 2048));
+    fixture.request.trailers = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    fixture.request.body = nil;
     fixture.request.generation = 7;
-    fixture.response = message.Response{};
     fixture.response.status = status.OK;
     fixture.response.fields = field.init(?fixture.response_items[0],
         response_capacity, field.limits(8, 8192, 64, 4096));
+    fixture.response.trailers = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    fixture.response.body_kind = message.BODY_NONE;
+    fixture.response.body_reader = nil;
+    fixture.response.body_writer = nil;
     fixture.response.generation = 7;
+    fixture.response.committed = false;
+    fixture.response.committed_status = 0;
+    fixture.response.committed_field_len = 0;
+    fixture.response.committed_field_bytes = 0;
+    fixture.response.committed_body_kind = message.BODY_NONE;
+    fixture.response.committed_body_reader = nil;
+    fixture.response.committed_body_writer = nil;
     ret true;
 }
 

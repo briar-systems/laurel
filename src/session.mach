@@ -776,7 +776,10 @@ fun memory_stop(ctx: ptr) StoreStatus {
 }
 
 pub fun memory_store(store: *MemoryStore) Store {
-    if (!memory_store_shape_valid(store)) { ret Store{}; }
+    if (!memory_store_shape_valid(store)) {
+        ret Store{ctx: nil, aliases: nil, start: nil, stop: nil, load: nil,
+        save: nil, delete: nil, replace: nil, reap: nil};
+    }
     ret Store{ctx: store::ptr, aliases: memory_store_aliases,
         start: memory_start, stop: memory_stop, load: memory_load,
         save: memory_save, delete: memory_delete, replace: memory_replace,
@@ -935,11 +938,13 @@ fun memory_guard_forget(ctx: ptr, key_id: u32, token: *u8,
 }
 
 pub fun memory_guard(guard: *MemoryGuard) Guard {
-    if (!memory_guard_shape_valid(guard)) { ret Guard{}; }
+    if (!memory_guard_shape_valid(guard)) { ret Guard{ctx: nil, domain: nil, aliases: nil, overlaps: nil,
+        claim: nil, forget: nil}; }
     mutex.lock(?guard.lock);
     val active: bool = guard.active;
     mutex.unlock(?guard.lock);
-    if (!active) { ret Guard{}; }
+    if (!active) { ret Guard{ctx: nil, domain: nil, aliases: nil, overlaps: nil,
+        claim: nil, forget: nil}; }
     ret Guard{ctx: guard::ptr, domain: guard::ptr,
         aliases: memory_guard_aliases, overlaps: memory_guard_overlaps,
         claim: memory_guard_claim, forget: memory_guard_forget};
@@ -1700,7 +1705,7 @@ fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
 }
 
 pub fun protected_codec(codec: *ProtectedCodec) Codec {
-    if (!protected_valid(codec)) { ret Codec{}; }
+    if (!protected_valid(codec)) { ret Codec{ctx: nil, encode: nil, decode: nil}; }
     ret Codec{ctx: codec::ptr, encode: encode_protected,
         decode: decode_protected};
 }
@@ -1709,9 +1714,11 @@ pub fun release_protected_codec(codec: *ProtectedCodec) bool {
     if (codec == nil || !range_valid(codec::*u8, $size_of(ProtectedCodec))
         || !codec.active) { ret false; }
     codec.ring = nil;
-    codec.entropy = Entropy{};
-    codec.nonce_guard = Guard{};
-    codec.replay_guard = Guard{};
+    codec.entropy = Entropy{ctx: nil, aliases: nil, fill: nil};
+    codec.nonce_guard = Guard{ctx: nil, domain: nil, aliases: nil, overlaps: nil,
+        claim: nil, forget: nil};
+    codec.replay_guard = Guard{ctx: nil, domain: nil, aliases: nil, overlaps: nil,
+        claim: nil, forget: nil};
     codec.replay_policy = 0;
     codec.algorithm = 0;
     codec.clock_skew_s = 0;
@@ -2005,7 +2012,8 @@ fun mutating_guard_overlaps(ctx: ptr, other_ctx: ptr,
 
 fun mutating_guard(state: *MutatingGuardState) Guard {
     if (state == nil || !guard_valid(state.inner)) {
-        ret Guard{};
+        ret Guard{ctx: nil, domain: nil, aliases: nil, overlaps: nil,
+        claim: nil, forget: nil};
     }
     ret Guard{ctx: state::ptr, domain: state.inner.domain,
         aliases: mutating_guard_aliases, overlaps: mutating_guard_overlaps,
@@ -2159,6 +2167,28 @@ fun sample_session() Session {
         data: view.view("authenticated state", 19),
         issued_at_unix: 100, not_before_unix: 100,
         expires_at_unix: 2000, version: 7, generation: 11};
+}
+
+# these constructors hand back a provider record on failure, and a caller that
+# detects the failure by testing a callback against nil must not get one
+test "laurel.session: invalid provider records carry no callable pointer" {
+    var store: MemoryStore;
+    val absent_store: Store = memory_store(?store);
+    if (absent_store.ctx != nil || absent_store.aliases != nil
+        || absent_store.start != nil || absent_store.stop != nil
+        || absent_store.load != nil || absent_store.save != nil
+        || absent_store.delete != nil || absent_store.replace != nil
+        || absent_store.reap != nil) { ret 1; }
+    var guard: MemoryGuard;
+    val absent_guard: Guard = memory_guard(?guard);
+    if (absent_guard.ctx != nil || absent_guard.domain != nil
+        || absent_guard.aliases != nil || absent_guard.overlaps != nil
+        || absent_guard.claim != nil || absent_guard.forget != nil) { ret 2; }
+    var codec: ProtectedCodec;
+    val absent_codec: Codec = protected_codec(?codec);
+    if (absent_codec.ctx != nil || absent_codec.encode != nil
+        || absent_codec.decode != nil) { ret 3; }
+    ret 0;
 }
 
 test "laurel.session: authenticated codecs reject hostile tokens transactionally" {
@@ -2593,7 +2623,9 @@ test "laurel.session: codec ownership and replay claims fail closed" {
             REPLAY_REJECT, memory_guard(?fixture.replay_guard),
             CHACHA20_POLY1305, 5, 3600, MAX_CONTEXT_BYTES)
         || init_protected_codec(?candidate, ?fixture.ring, entropy,
-            memory_guard(?fixture.replay_guard), REPLAY_ALLOW, Guard{},
+            memory_guard(?fixture.replay_guard), REPLAY_ALLOW,
+            Guard{ctx: nil, domain: nil, aliases: nil, overlaps: nil,
+                claim: nil, forget: nil},
             AES_256_GCM, 5, 3600, MAX_CONTEXT_BYTES)
         || candidate.active || candidate.algorithm != 77) { ret 3; }
     if (!release_protected_codec(?fixture.protected)) { ret 4; }
@@ -2737,7 +2769,7 @@ rec UpdateAttempt {
 
 fun concurrent_update(arg: *u8) {
     val attempt: *UpdateAttempt = arg::*UpdateAttempt;
-    attempt.result = SaveResult{};
+    attempt.result = SaveResult{version: 0, generation: 0};
     attempt.status = memory_save(attempt.store::ptr, ?attempt.value, 1, 1,
         ?attempt.result, nil);
 }
@@ -2846,7 +2878,8 @@ fun durable_delete(ctx: ptr, id: view.View, expected_version: u64,
 }
 
 fun durable_store(probe: *DurableProbe) Store {
-    if (probe == nil) { ret Store{}; }
+    if (probe == nil) { ret Store{ctx: nil, aliases: nil, start: nil, stop: nil, load: nil,
+        save: nil, delete: nil, replace: nil, reap: nil}; }
     ret Store{ctx: probe::ptr, aliases: durable_aliases,
         start: durable_start, stop: durable_stop, load: durable_load,
         save: durable_save, delete: durable_delete,
@@ -3232,10 +3265,10 @@ test "laurel.session: concurrent updates conflict and durable stores inject clea
     if (store.load(store.ctx, initial.id, 1, ?loaded_data[0], 2048,
         ?loaded, nil) != STORE_OK) { ret 3; }
     var first: UpdateAttempt = UpdateAttempt{store: ?memory, value: loaded,
-        status: STORE_INVALID, result: SaveResult{}};
+        status: STORE_INVALID, result: SaveResult{version: 0, generation: 0}};
     first.value.data = view.view("first", 5);
     var second: UpdateAttempt = UpdateAttempt{store: ?memory, value: loaded,
-        status: STORE_INVALID, result: SaveResult{}};
+        status: STORE_INVALID, result: SaveResult{version: 0, generation: 0}};
     second.value.data = view.view("second", 6);
     var first_thread: thread.Thread;
     var second_thread: thread.Thread;
@@ -3266,7 +3299,7 @@ test "laurel.session: concurrent updates conflict and durable stores inject clea
         || start_manager(?manager) != STORE_OK || !manager_active(?manager)) {
         ret 8;
     }
-    saved = SaveResult{};
+    saved = SaveResult{version: 0, generation: 0};
     if (manager.store.save(manager.store.ctx, ?initial, 0, 1, ?saved, nil)
         != STORE_OK || saved.version != 1 || saved.generation != 77
         || manager.store.load(manager.store.ctx, initial.id, 1,
