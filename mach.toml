@@ -1,6 +1,6 @@
 [project]
 id = "laurel"
-version = "0.8.0"
+version = "0.8.1"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
