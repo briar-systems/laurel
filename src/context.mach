@@ -64,6 +64,7 @@ pub rec Context {
     principal:        ptr;
     principal_state:  PrincipalState;
     session:          ptr;
+    recorder:         ptr;
     request_id:       view.View;
     request_id_limit: usize;
     execution_state:  ptr;
@@ -135,6 +136,7 @@ fun clear(context: *Context) {
     context.principal = nil;
     context.principal_state = PRINCIPAL_NONE;
     context.session = nil;
+    context.recorder = nil;
     context.request_id = view.view(nil, 0);
     context.request_id_limit = 0;
     context.execution_state = nil;
@@ -174,6 +176,7 @@ pub fun bind(context: *Context, exchange_ptr: *exchange.Exchange, params: Params
     context.principal = nil;
     context.principal_state = PRINCIPAL_NONE;
     context.session = nil;
+    context.recorder = nil;
     context.request_id = request_id;
     context.request_id_limit = request_id_limit;
     context.execution_state = nil;

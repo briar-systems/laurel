@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-29
+
+### Fixed
+
+- Connected request events to the assembled observer. `app.App` stored an
+  observer that nothing read, so every event reached the in-process harness and
+  no production host. `app.bind_context` now emits the start event as it admits
+  a request and `app.release_context` emits the one terminal event as it
+  releases it, both over the observer the application already holds.
+- Masked the whole low nibble in the urlencoded decoder invariant. `!=` binds
+  tighter than `&` in Mach, so the check inspected bit 0 alone and accepted
+  seven of the fifteen dirty nibbles it was written to reject.
+
+### Changed
+
+- `app.Assembly` takes the label `vocabulary` and the `event_policy` alongside
+  the observer, because an application cannot build a recorder without them.
+- `app.bind_context` takes caller-owned recorder storage and an `app.Admission`;
+  `app.release_context` takes an `app.Termination` carrying the middleware
+  outcome, cancellation reason, status, transfer counters, and finish time. A
+  nil recorder fails the bind rather than skipping the events.
+- `app.request_recorder` exposes the live recorder to middleware and handlers,
+  which is how an application labels an event it does not own.
+- `observability.begin` takes the matched route name, so the start event is
+  complete when it is emitted. `set_route` still renames a live event.
+- `observability.init_recorder` prepares released storage for another request
+  and keeps the sequence counting across a recorder's whole lifetime.
+- `testing.init` no longer takes a recorder. The harness owns recorder storage
+  and drives the ordinary application path, so its suites exercise the
+  production event path.
+
 ## [0.6.0] - 2026-08-28
 
 ### Changed

@@ -9,7 +9,35 @@ One `observability.Recorder` covers one request. It emits exactly one start
 event and exactly one terminal event. The terminal event is `error` when the
 request failed with an `error.AppError`, and `finish` otherwise. A second start,
 a second terminal, or any mutation after the terminal is refused with
-`RECORD_STATE` rather than emitting a second event.
+`RECORD_STATE` rather than emitting a second event. Recorder storage is
+reusable: `init_recorder` prepares released storage for the next request and the
+sequence number keeps counting, so a host that serves requests from a fixed slot
+allocates one recorder per slot rather than one per request.
+
+### Who drives the recorder
+
+The application does. `app.Assembly` takes the `observability.Observer`, the
+label `Vocabulary`, and the event `Policy`, and `app.App` drives a recorder over
+them for every admitted request. A host never calls `init_recorder`, `begin`,
+`observe_execution`, or `release`.
+
+`app.bind_context` admits the request and emits the start event in one step, and
+`app.release_context` emits the terminal event and returns the admission slot in
+one step. They are one step each on purpose: a host that reaches the request path
+at all cannot reach it without producing the pair, so an application that
+supplied an observer is never silently unobserved.
+
+The host owns the storage and supplies the facts only it measures. `app.Admission`
+carries the exchange, route parameters, allocator, request identity, matched route
+name, and start time; `app.Termination` carries the middleware outcome, the
+cancellation reason, the response status, the exchange completion counters, and
+the finish time. The recorder itself is caller-owned memory passed to
+`bind_context`, exactly like the request context beside it, and a nil recorder
+fails the bind rather than skipping the events.
+
+Middleware and handlers reach the live recorder through
+`app.request_recorder`, which is how an application attaches labels to an event
+it does not own. Everything else about the event is settled by the framework.
 
 `observability.RequestEvent` carries the request identity, method, target, route
 name, status, error kind, start time, duration, bytes in, bytes out, phase,
@@ -22,7 +50,8 @@ distinguishable from an ordinary finish without a separate callback.
 cancellation reason onto exactly one terminal event, and
 `observability.observe_completion` takes the authoritative transfer counters from
 one `http.core.exchange.Completion`. An integration therefore cannot report a
-duration or byte count it did not measure.
+duration or byte count it did not measure. `app.release_context` calls both from
+the `Termination` it is given.
 
 Every text field is copied into the event, so an event stays valid after the
 request context is released and never borrows request memory.
@@ -70,15 +99,20 @@ One `testing.invoke` performs the sequence a server would:
 3. initialize the request, response, and exchange for one generation
 4. make the request allocator over the caller's arena
 5. dispatch the route, allocating parameters from that arena
-6. admit and bind the request context through `app.bind_context`
-7. begin the request event and record the matched route name
-8. execute the application middleware with a terminal that calls
+6. admit and bind the request context through `app.bind_context`, which emits the
+   start event carrying the matched route name
+7. execute the application middleware with a terminal that calls
    `router.invoke`, the application fallback, or the dispatch error
-9. commit the response, or settle cancellation when the scope is not active
-10. read the response body to completion into the capture buffer
-11. drain the request body and finish the exchange
-12. record the transfer counters and the one terminal event
-13. release the context, the recorder, and the scope
+8. commit the response, or settle cancellation when the scope is not active
+9. read the response body to completion into the capture buffer
+10. drain the request body and finish the exchange
+11. release the context through `app.release_context`, which emits the one
+    terminal event from the measured outcome and counters
+12. destroy the scope
+
+The harness is an ordinary host. It owns one `observability.Recorder` as storage
+and drives the same two application calls a server does, so a harness suite
+proves the production event path rather than a path of its own.
 
 Admission is real: an application that has not reached readiness, or that is
 draining, refuses the invocation with `INVOKE_REJECTED` and no event is emitted.

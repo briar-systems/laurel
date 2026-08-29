@@ -293,7 +293,7 @@ fun decoder_valid(decoder: *UrlEncoded) bool {
         decoder.field_start + decoder.name_len + decoder.value_len !=
             decoder.stored_bytes || decoder.percent_phase > 2 ||
         decoder.percent_phase == 1 && decoder.percent_high != 0 ||
-        decoder.percent_phase == 2 && decoder.percent_high & 0x0f != 0 ||
+        decoder.percent_phase == 2 && (decoder.percent_high & 0x0f) != 0 ||
         !stored_fields_valid(decoder)) { ret false; }
     if (decoder.state == COMPLETE_STATE || decoder.state == FAILED_STATE) {
         ret !decoder.field_active && !decoder.in_value &&
@@ -783,6 +783,28 @@ test "laurel.form: corrupted counters fail without unsafe cleanup" {
         rejected.form.fields != nil || rejected.form.len != 0 ||
         rejected.form.bytes != 0 || bytes[0] != 'a' || bytes[1] != 'b' ||
         decoder.state != ACTIVE) { ret 2; }
+    ret 0;
+}
+
+test "laurel.form: a dirty percent nibble fails the decoder invariant" {
+    var fields: [1]Field;
+    var bytes: [8]u8;
+    var decoder: UrlEncoded;
+    val limits: Limits = Limits{max_bytes: 8, max_fields: 1,
+        max_name_bytes: 4, max_value_bytes: 4, max_temporary_bytes: 8};
+    if (!init_urlencoded(?decoder, Storage{fields: ?fields[0],
+            field_capacity: 1, bytes: ?bytes[0], byte_capacity: 8}, limits) ||
+        feed_urlencoded(?decoder, "a=%1"::*u8, 4).status != MORE ||
+        decoder.percent_phase != 2 || decoder.percent_high != 0x10) { ret 1; }
+    var low: u8 = 1;
+    for (low < 0x10) {
+        decoder.percent_high = 0x10 | low;
+        if (feed_urlencoded(?decoder, nil, 0).status != INVALID ||
+            decoder.state != ACTIVE) { ret 2; }
+        low = low + 1;
+    }
+    decoder.percent_high = 0x10;
+    if (feed_urlencoded(?decoder, nil, 0).status != MORE) { ret 3; }
     ret 0;
 }
 

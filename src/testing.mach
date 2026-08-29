@@ -144,7 +144,7 @@ rec RouteTerminal {
 pub rec Harness {
     application:     *app.App;
     routes:          *router.Router;
-    recorder:        *observability.Recorder;
+    recorder:        observability.Recorder;
     storage:         Storage;
     limits:          message.Limits;
     max_body_polls:  usize;
@@ -293,8 +293,7 @@ fun terminal_call(ctx: ptr,
 }
 
 pub fun init(harness: *Harness, application: *app.App, routes: *router.Router,
-    recorder: *observability.Recorder, storage: Storage, limits: message.Limits,
-    max_body_polls: usize) bool {
+    storage: Storage, limits: message.Limits, max_body_polls: usize) bool {
     if (harness == nil || harness.initialized || application == nil
         || !application.valid || routes == nil || !routes.initialized
         || max_body_polls == 0 || !storage_valid(storage)
@@ -303,7 +302,6 @@ pub fun init(harness: *Harness, application: *app.App, routes: *router.Router,
         || storage.informational_cap > limits.max_informational) { ret false; }
     harness.application = application;
     harness.routes = routes;
-    harness.recorder = recorder;
     harness.storage = storage;
     harness.limits = limits;
     harness.max_body_polls = max_body_polls;
@@ -468,24 +466,18 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
     if (harness.terminal.matched.status == router.DISPATCH_MATCH) {
         params = harness.terminal.matched.params;
     }
+    var route_name: view.View = view.view(nil, 0);
+    if (harness.terminal.matched.status == router.DISPATCH_MATCH) {
+        val name: str = harness.routes.routes[harness.terminal.matched.route].name;
+        if (name != nil) { route_name = view.view(name, str_len(name)); }
+    }
     if (!app.bind_context(harness.application, ?harness.request_context,
-        ?harness.exchange, params, ?harness.allocator, one.request_id)) {
+        ?harness.recorder, app.Admission{exchange: ?harness.exchange, params: params,
+            allocator: ?harness.allocator, request_id: one.request_id,
+            route_name: route_name, started_ns: harness.clock_ns})) {
         harness.active = false;
         cancel.destroy(?harness.scope);
         ret failure(result, INVOKE_REJECTED);
-    }
-    val started_ns: i64 = harness.clock_ns;
-    var recorded: bool = false;
-    if (harness.recorder != nil) {
-        recorded = observability.begin(harness.recorder, ?harness.request_context,
-            started_ns) == observability.RECORD_OK;
-        if (recorded && harness.terminal.matched.status == router.DISPATCH_MATCH) {
-            val name: str = harness.routes.routes[harness.terminal.matched.route].name;
-            if (name != nil) {
-                observability.set_route(harness.recorder,
-                    view.view(name, str_len(name)));
-            }
-        }
     }
     val outcome: middleware.Outcome = app.execute(harness.application,
         handler.Handler{ctx: (?harness.terminal)::ptr, call: terminal_call},
@@ -540,16 +532,10 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
     result.response.outcome = harness.exchange.completion.outcome;
     result.response.bytes_in = harness.exchange.completion.bytes_in;
     result.response.bytes_out = harness.exchange.completion.bytes_out;
-    if (recorded) {
-        observability.observe_completion(harness.recorder,
-            harness.exchange.completion);
-        observability.observe_execution(harness.recorder, outcome, reason,
-            harness.response.status, harness.clock_ns);
-    }
-    if (!app.release_context(harness.application, ?harness.request_context)) {
-        status_value = INVOKE_INVALID;
-    }
-    if (recorded && !observability.release(harness.recorder)) {
+    if (!app.release_context(harness.application, ?harness.request_context,
+        app.Termination{outcome: outcome, reason: reason,
+            status: harness.response.status, transfer: harness.exchange.completion,
+            now_ns: harness.clock_ns})) {
         status_value = INVOKE_INVALID;
     }
     harness.active = false;
@@ -1012,7 +998,6 @@ rec AppFixture {
     label_specs:     [1]observability.LabelSpec;
     vocabulary:      observability.Vocabulary;
     observer:        observability.Observer;
-    recorder:        observability.Recorder;
     handlers:        HandlerState;
     application:     app.App;
 }
@@ -1142,8 +1127,6 @@ fun init_application(fixture: *AppFixture, limits: message.Limits) bool {
     }
     fixture.observer = observability.Observer{ctx: (?fixture.sink)::ptr,
         start: sink_start, finish: sink_finish, error: sink_error};
-    if (!observability.init_recorder(?fixture.recorder, fixture.observer,
-        ?fixture.vocabulary, observability.policy_default())) { ret false; }
     val assembly: app.Assembly = app.Assembly{
         config: app.Config{limits: app.Limits{max_body_bytes: 65536,
             max_form_fields: 16, max_upload_bytes: 65536, max_route_params: 4,
@@ -1165,6 +1148,8 @@ fun init_application(fixture: *AppFixture, limits: message.Limits) bool {
         authenticator: nil,
         renderer: nil,
         observer: ?fixture.observer,
+        vocabulary: ?fixture.vocabulary,
+        event_policy: observability.policy_default(),
         app_state: nil,
     };
     ret app.assemble(?fixture.application, assembly);
@@ -1224,7 +1209,7 @@ test "laurel.testing: the harness drives a whole application without a socket" {
     var storage: HarnessStorage;
     var harness: Harness;
     if (!init_application(?fixture, limits)) { ret 1; }
-    if (!init(?harness, ?fixture.application, ?fixture.matcher, ?fixture.recorder,
+    if (!init(?harness, ?fixture.application, ?fixture.matcher,
         harness_storage(?storage), limits, DEFAULT_BODY_POLLS)) { ret 2; }
     if (start(?harness).status != lifecycle.TRANSITION_OK
         || ready(?harness).status != lifecycle.TRANSITION_OK
@@ -1291,7 +1276,7 @@ test "laurel.testing: streaming request and response bodies flow in process" {
     var storage: HarnessStorage;
     var harness: Harness;
     if (!init_application(?fixture, limits)) { ret 1; }
-    if (!init(?harness, ?fixture.application, ?fixture.matcher, ?fixture.recorder,
+    if (!init(?harness, ?fixture.application, ?fixture.matcher,
         harness_storage(?storage), limits, DEFAULT_BODY_POLLS)
         || start(?harness).status != lifecycle.TRANSITION_OK
         || ready(?harness).status != lifecycle.TRANSITION_OK) { ret 2; }
@@ -1349,7 +1334,7 @@ test "laurel.testing: the security corpus runs against every http version" {
     var storage: HarnessStorage;
     var harness: Harness;
     if (!init_application(?fixture, limits)) { ret 1; }
-    if (!init(?harness, ?fixture.application, ?fixture.matcher, ?fixture.recorder,
+    if (!init(?harness, ?fixture.application, ?fixture.matcher,
         harness_storage(?storage), limits, DEFAULT_BODY_POLLS)
         || start(?harness).status != lifecycle.TRANSITION_OK
         || ready(?harness).status != lifecycle.TRANSITION_OK) { ret 2; }
@@ -1431,7 +1416,7 @@ test "laurel.testing: admission follows the driven application lifecycle" {
     var storage: HarnessStorage;
     var harness: Harness;
     if (!init_application(?fixture, limits)) { ret 1; }
-    if (!init(?harness, ?fixture.application, ?fixture.matcher, ?fixture.recorder,
+    if (!init(?harness, ?fixture.application, ?fixture.matcher,
         harness_storage(?storage), limits, DEFAULT_BODY_POLLS)) { ret 2; }
     var items: [4]field.Field;
     var fields: field.Fields;
@@ -1456,7 +1441,7 @@ test "laurel.testing: admission follows the driven application lifecycle" {
     invalid.captured = invalid.arena;
     var refused: Harness;
     if (storage_valid(invalid)
-        || init(?refused, ?fixture.application, ?fixture.matcher, nil, invalid,
+        || init(?refused, ?fixture.application, ?fixture.matcher, invalid,
             limits, DEFAULT_BODY_POLLS)) { ret 9; }
     if (!release_application(?fixture)) { ret 10; }
     ret 0;
