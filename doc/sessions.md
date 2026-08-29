@@ -197,6 +197,22 @@ without a manager mutex held. A failed start restores stopped state, and a
 failed stop restores active state. Use `manager_active` instead of reading
 lifecycle storage directly.
 
+## What a request does
+
+`context.Context` does not carry a session. There is no request-level session
+operation: `session` exports construction and lifecycle only, and nothing in the
+framework turns a request into a loaded session. An application drives the
+sequence itself — `cookie.parse_request` over the request's `Cookie` field, the
+codec decode over the resulting value, then `Store.load` — and drives the save
+and the `Set-Cookie` on the way out.
+
+`Context` previously declared a `session: ptr` field that was assigned nil on
+every path and read nowhere. It was removed rather than wired, because wiring it
+means first designing the request-level session boundary: who owns the
+`Session`, when it loads and saves, how the cookie is emitted, what a request
+with no session holds, and how long the views inside `Session` must outlive the
+request. When that boundary exists the field returns designed against it.
+
 ## Lifecycle order
 
 Initialize nonce and replay guards, key generations and the algorithm and

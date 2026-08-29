@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- `context.Context.session`. It was assigned nil on every path and read nowhere,
+  so a host reading `Context` to find what a request carries got a silent wrong
+  answer instead of a compile error. Wiring it would mean first designing the
+  request-level session boundary, which does not exist yet; `doc/sessions.md`
+  now says so plainly and says what an application drives instead.
+
 ## [0.7.1] - 2026-08-29
 
 ### Fixed
