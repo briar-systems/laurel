@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Replaced all thirty-five uses of the `T{}` empty record literal, a construct
+  briar-systems/mach#3108 calls unreliable. The sites that mattered were
+  `memory_store`, `memory_guard`, and `protected_codec`, whose failure paths
+  hand back function-pointer tables: a caller detecting the failure by testing a
+  callback against nil, the way `app.valid_observer` does, could have received a
+  garbage pointer and called it. Latent rather than live — a probe of all three
+  passed in both profiles before the change — and fixed because the construct is
+  documented as unreliable and the failure would land on a security provider.
+
+### Added
+
+- `error.no_error`, the absence of a failure for outcomes carrying an `AppError`
+  slot they do not use. `AppError` and `RenderFailure` hold byte arrays, so
+  neither can take a named-field literal; both now clear their bytes explicitly,
+  matching what `error.make_view` already did.
+- A test pinning that the three provider constructors return no callable pointer
+  when handed invalid storage.
+
 ### Removed
 
 - `context.Context.session`. It was assigned nil on every path and read nowhere,

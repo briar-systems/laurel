@@ -2731,7 +2731,7 @@ test "laurel.multipart: body adapter spans reader and storage pending work" {
     if (!init(?decoder, view.view("r", 1), storage, test_limits(),
             test_store(?store_state), ?uploader)) { ret 1; }
     var scope: cancel.Scope;
-    if (!cancel.make_root(?scope, false, time.Time{})) { ret 2; }
+    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
     val text: str = "--r\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n\r\ndata\r\n--r--\r\n";
@@ -2775,7 +2775,7 @@ test "laurel.multipart: body rejection settles exactly once" {
     if (!init(?decoder, view.view("r", 1), storage, test_limits(),
             test_store(?store_state), ?uploader)) { ret 1; }
     var scope: cancel.Scope;
-    if (!cancel.make_root(?scope, false, time.Time{})) { ret 2; }
+    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
     val text: str = "not-a-boundary";

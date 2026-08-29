@@ -90,6 +90,20 @@ pub fun make_view(kind: Kind, status_code: u16, public_msg: view.View,
     ret result;
 }
 
+# the absence of a failure, for outcomes that carry an AppError slot they do
+# not use; the bytes are cleared rather than left to whatever the stack held
+pub fun no_error() AppError {
+    var result: AppError;
+    result.kind = 0;
+    result.status = 0;
+    clear_bytes(?result.public_bytes[0], MAX_PUBLIC_BYTES);
+    clear_bytes(?result.detail_bytes[0], MAX_DETAIL_BYTES);
+    result.public_len = 0;
+    result.detail_len = 0;
+    result.retryable = false;
+    ret result;
+}
+
 pub fun make(kind: Kind, status_code: u16, public_msg: str,
     detail: str, retryable: bool) AppError {
     var public_value: view.View = view.view(nil, 0);
