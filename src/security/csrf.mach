@@ -977,10 +977,14 @@ fun init_fixture(fixture: *Fixture, binding: BindingMode,
             ?fixture.allocator, (?fixture.owner)::ptr, generation, nil,
             request_id, MAX_BINDING_BYTES)) { ret false; }
     fixture.entropy = TestEntropy{seed: 1, calls: 0, fail: false};
-    fixture.keys[0] = KeyGeneration{id: 1, activated_at: 0,
-        issue_until: 200, verify_until: 400};
-    fixture.keys[1] = KeyGeneration{id: 2, activated_at: 50,
-        issue_until: 300, verify_until: 500};
+    fixture.keys[0].id = 1;
+    fixture.keys[0].activated_at = 0;
+    fixture.keys[0].issue_until = 200;
+    fixture.keys[0].verify_until = 400;
+    fixture.keys[1].id = 2;
+    fixture.keys[1].activated_at = 50;
+    fixture.keys[1].issue_until = 300;
+    fixture.keys[1].verify_until = 500;
     var i: usize = 0;
     for (i < KEY_BYTES) {
         val first: u8 = 0x10 + i::u8;
@@ -1144,10 +1148,14 @@ test "laurel.security.csrf: provider mutation and invalid rings are rejected" {
         ret 4;
     }
     var duplicate: [2]KeyGeneration;
-    duplicate[0] = KeyGeneration{id: 1, activated_at: 0,
-        issue_until: 100, verify_until: 200};
-    duplicate[1] = KeyGeneration{id: 1, activated_at: 0,
-        issue_until: 100, verify_until: 200};
+    duplicate[0].id = 1;
+    duplicate[0].activated_at = 0;
+    duplicate[0].issue_until = 100;
+    duplicate[0].verify_until = 200;
+    duplicate[1].id = 1;
+    duplicate[1].activated_at = 0;
+    duplicate[1].issue_until = 100;
+    duplicate[1].verify_until = 200;
     var i: usize = 0;
     for (i < KEY_BYTES) {
         duplicate[0].key[i] = i::u8;
@@ -1176,10 +1184,14 @@ rec RegistryCase {
 
 fun init_registry_case(item: *RegistryCase, tag: u8) bool {
     item.entropy = TestEntropy{seed: 1, calls: 0, fail: false};
-    item.keys[0] = KeyGeneration{id: 1, activated_at: 0,
-        issue_until: 200, verify_until: 400};
-    item.keys[1] = KeyGeneration{id: 2, activated_at: 50,
-        issue_until: 300, verify_until: 500};
+    item.keys[0].id = 1;
+    item.keys[0].activated_at = 0;
+    item.keys[0].issue_until = 200;
+    item.keys[0].verify_until = 400;
+    item.keys[1].id = 2;
+    item.keys[1].activated_at = 50;
+    item.keys[1].issue_until = 300;
+    item.keys[1].verify_until = 500;
     var i: usize = 0;
     for (i < KEY_BYTES) {
         val first: u8 = tag + i::u8;

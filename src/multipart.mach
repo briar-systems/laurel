@@ -2383,9 +2383,12 @@ test "laurel.multipart: asynchronous storage preserves retained input" {
     var parts: [8]Part;
     var bytes: [2048]u8;
     var work: [512]u8;
-    var state: TestStore = TestStore{pending_batch_begin: true,
-        pending_file_begin: true, pending_write: true,
-        pending_file_seal: true, pending_batch_commit: true};
+    var state: TestStore;
+    state.pending_batch_begin = true;
+    state.pending_file_begin = true;
+    state.pending_write = true;
+    state.pending_file_seal = true;
+    state.pending_batch_commit = true;
     var uploader: upload.Upload;
     var parser: Parser;
     val storage: Storage = Storage{parts: ?parts[0], part_capacity: 8,
@@ -2413,8 +2416,9 @@ test "laurel.multipart: cancellation waits for storage then aborts once" {
     var parts: [8]Part;
     var bytes: [2048]u8;
     var work: [512]u8;
-    var state: TestStore = TestStore{pending_write: true,
-        pending_batch_abort: true};
+    var state: TestStore;
+    state.pending_write = true;
+    state.pending_batch_abort = true;
     var uploader: upload.Upload;
     var parser: Parser;
     val storage: Storage = Storage{parts: ?parts[0], part_capacity: 8,
@@ -2524,7 +2528,8 @@ test "laurel.multipart: ambiguous batch commit reconciles explicitly" {
     var parts: [8]Part;
     var bytes: [2048]u8;
     var work: [512]u8;
-    var state: TestStore = TestStore{unknown_commit: true};
+    var state: TestStore;
+    state.unknown_commit = true;
     var uploader: upload.Upload;
     var parser: Parser;
     val storage: Storage = Storage{parts: ?parts[0], part_capacity: 8,
@@ -2551,7 +2556,8 @@ test "laurel.multipart: ambiguous batch abort reconciles explicitly" {
     var parts: [8]Part;
     var bytes: [2048]u8;
     var work: [512]u8;
-    var state: TestStore = TestStore{unknown_abort: true};
+    var state: TestStore;
+    state.unknown_abort = true;
     var uploader: upload.Upload;
     var parser: Parser;
     val storage: Storage = Storage{parts: ?parts[0], part_capacity: 8,
@@ -2720,9 +2726,12 @@ test "laurel.multipart: body adapter spans reader and storage pending work" {
     var bytes: [2048]u8;
     var work: [512]u8;
     var read_buffer: [5]u8;
-    var store_state: TestStore = TestStore{pending_batch_begin: true,
-        pending_file_begin: true, pending_write: true,
-        pending_file_seal: true, pending_batch_commit: true};
+    var store_state: TestStore;
+    store_state.pending_batch_begin = true;
+    store_state.pending_file_begin = true;
+    store_state.pending_write = true;
+    store_state.pending_file_seal = true;
+    store_state.pending_batch_commit = true;
     var uploader: upload.Upload;
     var decoder: Parser;
     val storage: Storage = Storage{parts: ?parts[0], part_capacity: 8,
@@ -2736,7 +2745,7 @@ test "laurel.multipart: body adapter spans reader and storage pending work" {
         field.limits(0, 0, 0, 0));
     val text: str = "--r\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n\r\ndata\r\n--r--\r\n";
     var body_state: TestBody = TestBody{
-        input: view.view(text, str_len(text)), pending_read: true};
+        input: view.view(text, str_len(text)), pending_read: true, offset: 0, pending_output: nil, pending_capacity: 0, pending_mode: 0, pending_finish: false, finish_calls: 0, release_calls: 0};
     var reader: body.Reader = test_reader(?body_state, ?scope, ?trailers,
         4096);
     var parser: BodyParser;
@@ -2780,7 +2789,7 @@ test "laurel.multipart: body rejection settles exactly once" {
         field.limits(0, 0, 0, 0));
     val text: str = "not-a-boundary";
     var body_state: TestBody = TestBody{
-        input: view.view(text, str_len(text)), pending_finish: true};
+        input: view.view(text, str_len(text)), pending_finish: true, offset: 0, pending_output: nil, pending_capacity: 0, pending_mode: 0, pending_read: false, finish_calls: 0, release_calls: 0};
     var reader: body.Reader = test_reader(?body_state, ?scope, ?trailers,
         4096);
     var parser: BodyParser;

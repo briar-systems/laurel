@@ -77,6 +77,16 @@ construct briar-systems/mach#3108 calls unreliable. The constructors clear their
 byte arrays explicitly for that reason. `error.no_error` is the zero-valued
 failure for an outcome that carries an `AppError` slot it does not use.
 
+This is one case of a rule that holds across the framework. A record literal
+leaves every field it does not name holding the previous stack frame's contents,
+not zero, so a literal must name every field of its record. A record containing
+an array cannot satisfy that, because an array field cannot be named in a
+literal at all, so those are built the other way: declare `var value: T;`, which
+does zero the whole record including its arrays, then assign each field.
+`error.AppError`, `error.RenderFailure`, `csrf.KeyGeneration`, and
+`session.KeyGeneration` are the types that force the second form.
+`tools/partial_literal_sweep.py` enumerates any literal that breaks the rule.
+
 The default mapper uses canonical status codes. It emits public text only when
 it is nonempty, within the configured bound, valid RFC 3629 UTF-8, and contains
 no C0, DEL, or C1 control code point. It never reads private detail. Internal

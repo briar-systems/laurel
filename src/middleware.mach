@@ -884,7 +884,7 @@ test "laurel.middleware: next retention and reentrancy fail closed" {
     var reentrant: Reentrant = Reentrant{trace: ?reentrant_trace,
         stack: ?reentrant_stack,
         terminal: handler.Handler{ctx: ?reentrant_trace,
-            call: traced_terminal}, mapper: reentrant_mapper};
+            call: traced_terminal}, mapper: reentrant_mapper, calls: 0, inner_status: 0};
     var reentrant_item: Middleware = Middleware{ctx: ?reentrant,
         call: reentrant_middleware};
     reentrant_stack = Stack{items: ?reentrant_item, len: 1};
@@ -972,7 +972,7 @@ test "laurel.middleware: mapper failures are value owned" {
     var reentrant_stack: Stack = Stack{items: nil, len: 0};
     var mapper_state: ReentrantMapper = ReentrantMapper{
         stack: ?reentrant_stack,
-        terminal: handler.Handler{ctx: nil, call: private_error_terminal}};
+        terminal: handler.Handler{ctx: nil, call: private_error_terminal}, calls: 0, inner_status: 0};
     val reentrant: Outcome = execute(?reentrant_stack, mapper_state.terminal,
         error.Mapper{ctx: ?mapper_state, render: reentrant_mapper},
         ?reentrant_fixture.request_context, policy_default());
