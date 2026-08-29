@@ -16,7 +16,9 @@ The framework has no global application registry, hidden allocator, mandatory te
 - `router` compiles typed framework routes into caller-owned `mach-http` matcher storage and decodes parameters from the request scope.
 - `middleware` snapshots and executes an application-owned chain with value-typed, single-use next handlers.
 - `error` owns bounded failure text and maps strict UTF-8 public messages to fail-closed HTTP responses.
-- `session` separates session lifecycle, protected cookie encoding, and durable storage.
+- `session` separates session lifecycle, protected cookie encoding, and durable
+  storage, and reaches a request through `session.Binder` middleware that loads
+  lazily and commits one `Set-Cookie` from the assembled policy.
 - `security` defines bounded response headers, origin enforcement,
   HMAC-protected CSRF tokens addressed by an opaque handle so key material
   never reaches a public type, authentication ownership, and redirect policy.

@@ -580,7 +580,9 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     var controller: lifecycle.Controller;
     if (!lifecycle.init(?controller, ?lifecycle_item, 1, 1)) { ret 2; }
     var routes: router.Router;
-    if (router.compile(?routes, nil, 0, router.Storage{},
+    if (router.compile(?routes, nil, 0, router.Storage{specifications: nil, specification_cap: 0,
+            compiled_routes: nil, compiled_route_cap: 0, segments: nil,
+            segment_cap: 0},
         router.limits_default()).status != router.COMPILE_OK) { ret 2; }
     var middlewares: middleware.Stack = middleware.Stack{items: nil, len: 0};
     var headers: security.HeadersPolicy;
@@ -819,7 +821,9 @@ test "laurel.app: an admitted request reaches the assembled observer" {
     var controller: lifecycle.Controller;
     if (!lifecycle.init(?controller, ?lifecycle_item, 1, 1)) { ret 2; }
     var routes: router.Router;
-    if (router.compile(?routes, nil, 0, router.Storage{},
+    if (router.compile(?routes, nil, 0, router.Storage{specifications: nil, specification_cap: 0,
+            compiled_routes: nil, compiled_route_cap: 0, segments: nil,
+            segment_cap: 0},
         router.limits_default()).status != router.COMPILE_OK) { ret 2; }
     var middlewares: middleware.Stack = middleware.Stack{items: nil, len: 0};
     var headers: security.HeadersPolicy;
