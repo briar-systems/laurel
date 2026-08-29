@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Set every field of every record literal. A partial literal leaves the fields it
+  does not name holding the previous stack frame's contents, not zero
+  (briar-systems/mach#3108). The exposure was the public contract rather than
+  laurel's own code: `cookie.serialize_set_cookie` returns a two-field
+  `Operation` and left `written` unset on all thirty-two failure paths, so an
+  application reading a length without checking the status would have got stack
+  contents, and a length is a bound. No caller inside laurel read an unnamed
+  field.
+
+### Added
+
+- `tools/partial_literal_sweep.py`, which enumerates partial literals from
+  record definitions with module qualifiers resolved, and a test pinning that a
+  refused `serialize_set_cookie` reports `written == 0` even when the stack it
+  builds on is dirty.
+
 ## [0.8.0] - 2026-08-29
 
 ### Added

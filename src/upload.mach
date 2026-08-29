@@ -1291,7 +1291,8 @@ fun test_open(state: *TestStore, upload: *Upload,
 }
 
 test "laurel.upload: files stage until one atomic batch commit" {
-    var state: TestStore = TestStore{partial: 2};
+    var state: TestStore;
+    state.partial = 2;
     var upload: Upload;
     if (!test_open(?state, ?upload, 16) ||
         start_file(?upload,
@@ -1319,9 +1320,12 @@ test "laurel.upload: files stage until one atomic batch commit" {
 }
 
 test "laurel.upload: every asynchronous stage retains ownership" {
-    var state: TestStore = TestStore{pending_batch_begin: true,
-        pending_file_begin: true, pending_write: true,
-        pending_file_seal: true, pending_batch_commit: true};
+    var state: TestStore;
+    state.pending_batch_begin = true;
+    state.pending_file_begin = true;
+    state.pending_write = true;
+    state.pending_file_seal = true;
+    state.pending_batch_commit = true;
     var upload: Upload;
     if (!init(?upload, test_store(?state), 16)) { ret 1; }
     var current: Operation = begin_batch(?upload);
@@ -1376,8 +1380,9 @@ test "laurel.upload: invalid files never enter provider storage" {
 }
 
 test "laurel.upload: storage failure has one batch abort path" {
-    var state: TestStore = TestStore{fail_write: true,
-        pending_batch_abort: true};
+    var state: TestStore;
+    state.fail_write = true;
+    state.pending_batch_abort = true;
     var upload: Upload;
     if (!test_open(?state, ?upload, 8) ||
         start_file(?upload,
@@ -1395,7 +1400,8 @@ test "laurel.upload: storage failure has one batch abort path" {
 }
 
 test "laurel.upload: unknown batch commit requires reconciliation" {
-    var state: TestStore = TestStore{unknown_commit: true};
+    var state: TestStore;
+    state.unknown_commit = true;
     var upload: Upload;
     if (!test_open(?state, ?upload, 8) ||
         start_file(?upload,
@@ -1416,7 +1422,7 @@ test "laurel.upload: aliases and callback mutation poison the batch" {
     if (!test_open(?state, ?upload, 8)) { ret 1; }
     val alias_metadata: Metadata = Metadata{
         field_name: view.view(?state.bytes[0], 1),
-        file_name: view.view("a.txt", 5)};
+        file_name: view.view("a.txt", 5), content_type: view.view(nil, 0), declared_len: 0, has_length: false};
     if (start_file(?upload, alias_metadata).status != INVALID ||
         state.file_begin_calls != 0 || upload.state != BATCH_ACTIVE) { ret 2; }
     if (start_file(?upload,
@@ -1434,7 +1440,8 @@ test "laurel.upload: aliases and callback mutation poison the batch" {
 }
 
 test "laurel.upload: release preserves completion generations" {
-    var state: TestStore = TestStore{pending_batch_begin: true};
+    var state: TestStore;
+    state.pending_batch_begin = true;
     var upload: Upload;
     val store: Store = test_store(?state);
     if (!init(?upload, store, 8)) { ret 1; }

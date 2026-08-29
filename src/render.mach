@@ -928,7 +928,7 @@ fun test_settle(ctx: ptr, mode: body.Mode) bool {
 test "laurel.render: streamed bodies suspend, resume, and cancel" {
     var state: Fixture;
     if (!init_fixture(?state, 41)) { ret 1; }
-    var source_state: TestSource = TestSource{pending: true, total: 3};
+    var source_state: TestSource = TestSource{pending: true, total: 3, produces: 0, resumes: 0, settles: 0, settle_mode: 0, emitted: 0};
     val source: Source = Source{ctx: ?source_state, produce: test_produce,
         resume: test_resume, settle: test_settle};
     var stream: Stream;
@@ -968,7 +968,7 @@ test "laurel.render: a renderer installs its own body with no engine coupling" {
     if (!text_html(?media) || !init_fixed(?content, view.view("<p>ok</p>", 9), 51,
         fixture_limits(), ?state.response.trailers, ?state.scope)) { ret 2; }
     var provider: TemplateFree = TemplateFree{media: ?media, content: ?content,
-        generation: 51};
+        generation: 51, calls: 0, fail: false};
     val renderer: Renderer = Renderer{ctx: ?provider, render: test_render};
     if (!renderer_valid(?renderer)) { ret 3; }
     val installed: R.Result[u8, error.AppError] = render_into(?renderer,

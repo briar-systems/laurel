@@ -587,15 +587,23 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     var middlewares: middleware.Stack = middleware.Stack{items: nil, len: 0};
     var headers: security.HeadersPolicy;
     if (!security.secure_headers(?headers)) { ret 2; }
-    var sink: EventSink = EventSink{start_calls: 0, finish_calls: 0, error_calls: 0,
-        status: 0, outcome: 0, kind: 0, sequence: 0, route_len: 0, label_len: 0};
+    var sink: EventSink;
+    sink.start_calls = 0;
+    sink.finish_calls = 0;
+    sink.error_calls = 0;
+    sink.status = 0;
+    sink.outcome = 0;
+    sink.kind = 0;
+    sink.sequence = 0;
+    sink.route_len = 0;
+    sink.label_len = 0;
     var observer: observability.Observer = observability.Observer{ctx: (?sink)::ptr,
         start: test_observer_start, finish: test_observer_finish,
         error: test_observer_error};
     var label_specs: [1]observability.LabelSpec;
     var vocabulary: observability.Vocabulary;
     if (!test_vocabulary(?vocabulary, ?label_specs[0])) { ret 2; }
-    var auth_state: TestAuthenticator = TestAuthenticator{principal: 7};
+    var auth_state: TestAuthenticator = TestAuthenticator{principal: 7, authenticate_calls: 0, release_calls: 0, owned: false, fail_authenticate: false, empty_principal: false, fail_release: false};
     var authenticator: security.Authenticator = security.Authenticator{
         ctx: ?auth_state, context_size: $size_of(TestAuthenticator),
         aliases_state: test_auth_aliases, authenticate: test_authenticate,
@@ -828,8 +836,16 @@ test "laurel.app: an admitted request reaches the assembled observer" {
     var middlewares: middleware.Stack = middleware.Stack{items: nil, len: 0};
     var headers: security.HeadersPolicy;
     if (!security.secure_headers(?headers)) { ret 2; }
-    var sink: EventSink = EventSink{start_calls: 0, finish_calls: 0, error_calls: 0,
-        status: 0, outcome: 0, kind: 0, sequence: 0, route_len: 0, label_len: 0};
+    var sink: EventSink;
+    sink.start_calls = 0;
+    sink.finish_calls = 0;
+    sink.error_calls = 0;
+    sink.status = 0;
+    sink.outcome = 0;
+    sink.kind = 0;
+    sink.sequence = 0;
+    sink.route_len = 0;
+    sink.label_len = 0;
     var observer: observability.Observer = observability.Observer{ctx: (?sink)::ptr,
         start: test_observer_start, finish: test_observer_finish,
         error: test_observer_error};
