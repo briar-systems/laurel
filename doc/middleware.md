@@ -69,6 +69,14 @@ through `error.RenderFailure`. Custom mappers construct failures with
 `error.render_failure` or `error.render_failure_from_view` and read them with
 `error.render_failure_view`.
 
+Always build both through those constructors, never through a record literal.
+Holding their bytes inline means both types contain arrays, and an array field
+cannot be named in a record literal, so there is no correct literal form to
+write — `error.AppError{}` is the only one that compiles and it is exactly the
+construct briar-systems/mach#3108 calls unreliable. The constructors clear their
+byte arrays explicitly for that reason. `error.no_error` is the zero-valued
+failure for an outcome that carries an `AppError` slot it does not use.
+
 The default mapper uses canonical status codes. It emits public text only when
 it is nonempty, within the configured bound, valid RFC 3629 UTF-8, and contains
 no C0, DEL, or C1 control code point. It never reads private detail. Internal
