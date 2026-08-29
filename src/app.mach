@@ -334,8 +334,12 @@ pub fun release_context(app: *App, request_context: *context.Context,
                 != observability.RECORD_OK
             || observability.observe_execution(recorder, termination.outcome,
                 termination.reason, termination.status, termination.now_ns)
-                != observability.RECORD_OK
-            || !observability.release(recorder)) { settled = false; }
+                != observability.RECORD_OK) {
+            settled = false;
+            observability.unreported(recorder,
+                "request termination could not be described");
+        }
+        if (!observability.release(recorder)) { settled = false; }
     }
     if (!release_reservation(app)) { ret false; }
     ret settled;
@@ -908,13 +912,38 @@ test "laurel.app: an admitted request reaches the assembled observer" {
         || sink.status != 408
         || sink.outcome != observability.OUTCOME_CANCELLED) { ret 16; }
 
-    # a terminal the recorder refuses still returns the admission slot
+    # a termination the recorder refuses is still exactly one terminal event
+    var undescribed: RequestFixture;
+    var undescribed_recorder: observability.Recorder;
+    if (!request_fixture(?undescribed, 200, view.view("/orders", 7))) { ret 17; }
+    if (!bind_context(?app, ?undescribed.request_context, ?undescribed_recorder,
+        Admission{exchange: ?undescribed.exchange,
+            params: context.Params{items: nil, len: 0, generation: 200},
+            allocator: ?undescribed.allocator,
+            request_id: view.view("request-200", 11),
+            route_name: view.view(nil, 0), started_ns: 10})
+        || sink.start_calls != 4) { ret 17; }
+    val undescribed_out: middleware.Outcome = execute(?app,
+        handler.Handler{ctx: nil, call: test_handler},
+        ?undescribed.request_context);
+    # a host clock that goes backwards cannot describe the request it served
+    if (release_context(?app, ?undescribed.request_context,
+            Termination{outcome: undescribed_out, reason: cancel.ACTIVE,
+                status: 200, transfer: undescribed.exchange.completion,
+                now_ns: 5})
+        || sink.finish_calls != 2 || sink.error_calls != 2
+        || sink.outcome != observability.OUTCOME_UNREPORTED
+        || sink.kind != error.INTERNAL
+        || active_request_count(?app) != 0 || !can_accept(?app)
+        || !cancel.destroy(?undescribed.scope)) { ret 18; }
+
+    # an outcome outside the execution vocabulary cannot be described either
     var unsettled: RequestFixture;
     var spare: observability.Recorder;
-    if (!request_fixture(?unsettled, 104, view.view("/orders", 7))) { ret 17; }
+    if (!request_fixture(?unsettled, 104, view.view("/orders", 7))) { ret 19; }
     if (!bind_context(?app, ?unsettled.request_context, ?spare,
         fixture_admission(?unsettled, 104, view.view("request-104", 11),
-            view.view(nil, 0))) || sink.start_calls != 4) { ret 17; }
+            view.view(nil, 0))) || sink.start_calls != 5) { ret 19; }
     if (release_context(?app, ?unsettled.request_context,
             Termination{outcome: middleware.Outcome{status: 0, action: 0,
                 app_error: error.make(error.INTERNAL, 500, "internal server error",
@@ -922,13 +951,14 @@ test "laurel.app: an admitted request reaches the assembled observer" {
                 render_error: error.render_failure("unmeasured")},
                 reason: cancel.ACTIVE, status: 0,
                 transfer: unsettled.exchange.completion, now_ns: 3})
-        || sink.finish_calls != 2 || sink.error_calls != 1
+        || sink.finish_calls != 2 || sink.error_calls != 3
+        || sink.outcome != observability.OUTCOME_UNREPORTED
         || active_request_count(?app) != 0 || !can_accept(?app)
-        || !cancel.destroy(?unsettled.scope)) { ret 18; }
+        || !cancel.destroy(?unsettled.scope)) { ret 20; }
 
     if (drain(?app, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_OK
         || stop(?app).status != lifecycle.TRANSITION_OK || !release(?app)) {
-        ret 19;
+        ret 21;
     }
     ret 0;
 }
