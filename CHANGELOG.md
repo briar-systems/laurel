@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Closed every admitted request with a terminal event. When the `app.Termination`
+  handed to `release_context` was one the recorder refused — a `now_ns` below the
+  start time, or an outcome outside the middleware execution vocabulary — the
+  request was released with a start event and no terminal, which reads as a
+  request still in flight.
+
+### Added
+
+- `observability.OUTCOME_UNREPORTED` and `observability.unreported`, which close a
+  started recorder the host could not describe. A distinct outcome rather than
+  `OUTCOME_FAILED`, so a consumer does not count failures that never happened.
+- Compile-time erasure probes for `app.Admission` and `app.Termination`, beside
+  the ones added for the key-handle work.
+
 ## [0.7.0] - 2026-08-29
 
 ### Fixed

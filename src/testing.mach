@@ -1483,6 +1483,8 @@ fun erase_render_stream(value: *render.Stream) ptr { ret value::ptr; }
 fun erase_renderer(value: *render.Renderer) ptr { ret value::ptr; }
 fun erase_realtime_stream(value: *realtime.Stream) ptr { ret value::ptr; }
 fun erase_socket(value: *realtime.Socket) ptr { ret value::ptr; }
+fun erase_admission(value: *app.Admission) ptr { ret value::ptr; }
+fun erase_termination(value: *app.Termination) ptr { ret value::ptr; }
 fun erase_recorder(value: *observability.Recorder) ptr { ret value::ptr; }
 fun erase_observer(value: *observability.Observer) ptr { ret value::ptr; }
 fun erase_harness(value: *Harness) ptr { ret value::ptr; }
@@ -1505,6 +1507,7 @@ test "laurel.testing: every public type erases to the untyped ptr" {
         || erase_render_stream(nil) != nil || erase_renderer(nil) != nil
         || erase_realtime_stream(nil) != nil || erase_socket(nil) != nil) { ret 4; }
     if (erase_recorder(nil) != nil || erase_observer(nil) != nil
-        || erase_harness(nil) != nil || erase_result(nil) != nil) { ret 5; }
+        || erase_harness(nil) != nil || erase_result(nil) != nil
+        || erase_admission(nil) != nil || erase_termination(nil) != nil) { ret 5; }
     ret 0;
 }
