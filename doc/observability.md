@@ -43,8 +43,35 @@ it does not own. Everything else about the event is settled by the framework.
 name, status, error kind, start time, duration, bytes in, bytes out, phase,
 outcome, the request generation, a per-recorder sequence number, and the label
 set. Outcome is one of `OUTCOME_PENDING`, `OUTCOME_COMPLETED`, `OUTCOME_FAILED`,
-`OUTCOME_CANCELLED`, or `OUTCOME_TIMED_OUT`, so cancellation and timeout are
-distinguishable from an ordinary finish without a separate callback.
+`OUTCOME_CANCELLED`, `OUTCOME_TIMED_OUT`, or `OUTCOME_UNREPORTED`, so
+cancellation and timeout are distinguishable from an ordinary finish without a
+separate callback.
+
+### Every start has a terminal
+
+`OUTCOME_UNREPORTED` is what closes a request the host could not describe. If the
+`app.Termination` handed to `release_context` is one the recorder refuses — a
+`now_ns` below the start time, or an outcome outside the middleware execution
+vocabulary — the framework emits a terminal event carrying `PHASE_ERROR`,
+`error.INTERNAL`, a zero status, and a zero duration, and `release_context`
+returns false so the host learns its termination was rejected. The admission slot
+is returned either way.
+
+Refusing to release would be the wrong repair: a host with a non-monotonic clock
+would never release a request and would deadlock its own admission. And reporting
+an unknown outcome as `OUTCOME_FAILED` would be the same defect moved, because a
+consumer would count failures that never happened. A start with no terminal is
+the one thing that must not happen, since it reads as a request still in flight
+and shows up as a leak that is not there.
+
+The remaining ways a request can end without a terminal event are outside the
+framework. A Mach panic terminates the process, so there is no half-reported
+request left in it; see [`doc/middleware.md`](middleware.md). A handler that
+never returns never reaches `release_context` at all, and a host that binds a
+context and never releases it holds its admission slot open — both show as
+`active_request_count` above zero and as `TRANSITION_PENDING` from `drain` and
+`stop`, so the gap is visible in admission state rather than only in the event
+stream.
 
 `observability.observe_execution` maps one `middleware.Outcome` and the request
 cancellation reason onto exactly one terminal event, and
