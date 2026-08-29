@@ -428,9 +428,14 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
     }
     if (!cancel.make_root(?harness.scope, has_deadline, deadline)) { ret INVOKE_INVALID; }
     harness.active = true;
-    harness.request_body = RequestBody{content: one.body, offset: 0,
-        fragment: one.fragment, suspend: one.suspend, suspended: false,
-        pending_output: nil, pending_capacity: 0, token: 0};
+    harness.request_body.content = one.body;
+    harness.request_body.offset = 0;
+    harness.request_body.fragment = one.fragment;
+    harness.request_body.suspend = one.suspend;
+    harness.request_body.suspended = false;
+    harness.request_body.pending_output = nil;
+    harness.request_body.pending_capacity = 0;
+    harness.request_body.token = 0;
     harness.request_body.reader = body.init_reader(?harness.request_body, body_read,
         body_finish, body_complete, body_release, body.OWNER_APPLICATION, generation,
         true, one.body.len::u64, harness.limits.request_body, nil, ?harness.scope);
@@ -1091,8 +1096,11 @@ fun init_sessions(fixture: *AppFixture) bool {
         || !session.init_memory_guard(?fixture.replay_guard, ?fixture.replay_slots[0], 4)) {
         ret false;
     }
-    fixture.keys[0] = session.KeyGeneration{id: 1, key_len: 32, activated_at: 0,
-        encode_until: 100000, decode_until: 200000};
+    fixture.keys[0].id = 1;
+    fixture.keys[0].key_len = 32;
+    fixture.keys[0].activated_at = 0;
+    fixture.keys[0].encode_until = 100000;
+    fixture.keys[0].decode_until = 200000;
     var i: usize = 0;
     for (i < 32) {
         fixture.keys[0].key[i] = 0x20 + i::u8;

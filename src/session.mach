@@ -2072,10 +2072,16 @@ fun init_codec_fixture(fixture: *CodecFixture, algorithm: Algorithm,
     fixture.protected.active = false;
     fixture.entropy = TestEntropyState{seed: 1, calls: 0,
         fail: false, repeat: false};
-    fixture.keys[0] = KeyGeneration{id: 1, key_len: 32,
-        activated_at: 0, encode_until: 2000, decode_until: 3000};
-    fixture.keys[1] = KeyGeneration{id: 2, key_len: 32,
-        activated_at: 1000, encode_until: 4000, decode_until: 5000};
+    fixture.keys[0].id = 1;
+    fixture.keys[0].key_len = 32;
+    fixture.keys[0].activated_at = 0;
+    fixture.keys[0].encode_until = 2000;
+    fixture.keys[0].decode_until = 3000;
+    fixture.keys[1].id = 2;
+    fixture.keys[1].key_len = 32;
+    fixture.keys[1].activated_at = 1000;
+    fixture.keys[1].encode_until = 4000;
+    fixture.keys[1].decode_until = 5000;
     var i: usize = 0;
     for (i < 32) {
         fixture.keys[0].key[i] = 0x10 + i::u8;
@@ -2108,10 +2114,16 @@ fun release_codec_fixture(fixture: *CodecFixture) bool {
 
 fun duplicate_generation_rejected(algorithm: Algorithm) bool {
     var items: [2]KeyGeneration;
-    items[0] = KeyGeneration{id: 1, key_len: 32,
-        activated_at: 0, encode_until: 100, decode_until: 200};
-    items[1] = KeyGeneration{id: 2, key_len: 32,
-        activated_at: 50, encode_until: 200, decode_until: 300};
+    items[0].id = 1;
+    items[0].key_len = 32;
+    items[0].activated_at = 0;
+    items[0].encode_until = 100;
+    items[0].decode_until = 200;
+    items[1].id = 2;
+    items[1].key_len = 32;
+    items[1].activated_at = 50;
+    items[1].encode_until = 200;
+    items[1].decode_until = 300;
     var seed: u8 = 0x10;
     if (algorithm == CHACHA20_POLY1305) { seed = 0x80; }
     var i: usize = 0;
@@ -3356,7 +3368,7 @@ test "laurel.session: guard horizons and regeneration ownership fail closed" {
     var source: Session = sample_session();
     var regenerated_id: [64]u8;
     regenerated_id[0] = 0xa5;
-    var regenerated: Session = Session{version: 91};
+    var regenerated: Session = Session{version: 91, id: view.view(nil, 0), data: view.view(nil, 0), issued_at_unix: 0, not_before_unix: 0, expires_at_unix: 0, generation: 0};
     val calls: usize = fixture.entropy.calls;
     if (regenerate_id(?fixture.protected, ?source, source.data.data, 64,
             ?regenerated) != CODEC_INVALID
@@ -3528,7 +3540,7 @@ test "laurel.session: codec ownership and replay claims fail closed" {
     if (encoded.status != CODEC_OK) { ret 6; }
     var id_output: [64]u8;
     var data_output: [2048]u8;
-    var decoded: Session = Session{version: 99};
+    var decoded: Session = Session{version: 99, id: view.view(nil, 0), data: view.view(nil, 0), issued_at_unix: 0, not_before_unix: 0, expires_at_unix: 0, generation: 0};
     if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
             view.view("binding", 7), 100, ?id_output[0], 64,
             ?data_output[0], 2048, ?decoded).status != CODEC_INVALID
@@ -3564,8 +3576,12 @@ test "laurel.session: every public range and array product is checked" {
         ret 3;
     }
 
-    var one_key: KeyGeneration = KeyGeneration{id: 1, key_len: 32,
-        activated_at: 0, encode_until: 100, decode_until: 200};
+    var one_key: KeyGeneration;
+    one_key.id = 1;
+    one_key.key_len = 32;
+    one_key.activated_at = 0;
+    one_key.encode_until = 100;
+    one_key.decode_until = 200;
     var key_index: usize = 0;
     for (key_index < 32) {
         one_key.key[key_index] = 0x20 + key_index::u8;
@@ -3582,7 +3598,7 @@ test "laurel.session: every public range and array product is checked" {
     val store: Store = memory_store(?memory);
     if (store.start(store.ctx) != STORE_OK) { ret 5; }
     var data_output: [2048]u8;
-    var loaded: Session = Session{version: 99};
+    var loaded: Session = Session{version: 99, id: view.view(nil, 0), data: view.view(nil, 0), issued_at_unix: 0, not_before_unix: 0, expires_at_unix: 0, generation: 0};
     val invalid_id: view.View = view.view(near_end, 4);
     if (store.load(store.ctx, invalid_id, 1, ?data_output[0], 2048,
             ?loaded, nil) != STORE_INVALID
@@ -4177,7 +4193,7 @@ test "laurel.session: concurrent updates conflict and durable stores inject clea
     }
     var probe: DurableProbe = DurableProbe{starts: 0, stops: 0,
         loads: 0, saves: 0, deletes: 0, replaces: 0, reaps: 0,
-        active: false};
+        active: false, manager: nil, reenter: false, fail_start: false, fail_stop: false, start_reentry: 0, stop_reentry: 0};
     val durable: Store = durable_store(?probe);
     var manager: Manager;
     manager.state = MANAGER_EMPTY;

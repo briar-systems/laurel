@@ -913,7 +913,7 @@ test "laurel.form: body state cannot overlap result storage" {
     if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
-    var state: TestBody = TestBody{input: view.view("a=b", 3)};
+    var state: TestBody = TestBody{input: view.view("a=b", 3), offset: 0, pending_output: nil, pending_capacity: 0, read_pending_once: false, finish_pending_once: false, pending_mode: 0, finish_calls: 0, release_calls: 0};
     var reader: body.Reader = make_reader(?state, ?scope, ?trailers, 8);
     var read_buffer: [2]u8;
     val accepted: bool = init_body(?parser, ?decoder, ?reader,
@@ -939,7 +939,7 @@ test "laurel.form: body polling retains pending buffers across fragmentation" {
         field.limits(0, 0, 0, 0));
     var state: TestBody = TestBody{
         input: view.view("name=alice&tag=a%2Fb", 20),
-        read_pending_once: true};
+        read_pending_once: true, offset: 0, pending_output: nil, pending_capacity: 0, finish_pending_once: false, pending_mode: 0, finish_calls: 0, release_calls: 0};
     var reader: body.Reader = make_reader(?state, ?scope, ?trailers, 64);
     var read_buffer: [3]u8;
     var parser: BodyParser;
@@ -980,7 +980,7 @@ test "laurel.form: parse failure settles the body exactly once" {
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
     var state: TestBody = TestBody{input: view.view("a=1234567", 9),
-        finish_pending_once: true};
+        finish_pending_once: true, offset: 0, pending_output: nil, pending_capacity: 0, read_pending_once: false, pending_mode: 0, finish_calls: 0, release_calls: 0};
     var reader: body.Reader = make_reader(?state, ?scope, ?trailers, 32);
     var read_buffer: [2]u8;
     var parser: BodyParser;
@@ -1015,7 +1015,7 @@ test "laurel.form: body cancellation never publishes fields" {
         !cancel.cancel(?scope)) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
-    var state: TestBody = TestBody{input: view.view("a=b", 3)};
+    var state: TestBody = TestBody{input: view.view("a=b", 3), offset: 0, pending_output: nil, pending_capacity: 0, read_pending_once: false, finish_pending_once: false, pending_mode: 0, finish_calls: 0, release_calls: 0};
     var reader: body.Reader = make_reader(?state, ?scope, ?trailers, 16);
     var read_buffer: [2]u8;
     var parser: BodyParser;

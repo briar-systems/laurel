@@ -334,10 +334,12 @@ test "laurel.context: one binding borrows the exact exchange generation" {
     var fixture: Fixture;
     if (!init_fixture(?fixture, 41, false, time.Time{sec: 0, nsec: 0})) { ret 1; }
     var items: [2]Param;
-    items[0] = Param{name: view.view("id", 2), value: view.view("42", 2),
-        kind: PARAM_TEXT};
-    items[1] = Param{name: view.view("slug", 4), value: view.view("news", 4),
-        kind: PARAM_TEXT};
+    items[0].name = view.view("id", 2);
+    items[0].value = view.view("42", 2);
+    items[0].kind = PARAM_TEXT;
+    items[1].name = view.view("slug", 4);
+    items[1].value = view.view("news", 4);
+    items[1].kind = PARAM_TEXT;
     val params: Params = Params{items: ?items[0], len: 2, generation: 41};
     var owner: i64 = 7;
     var context: Context;
@@ -379,10 +381,12 @@ test "laurel.context: capture and identity bounds are transactional" {
     var fixture: Fixture;
     if (!init_fixture(?fixture, 61, false, time.Time{sec: 0, nsec: 0})) { ret 1; }
     var duplicate: [2]Param;
-    duplicate[0] = Param{name: view.view("id", 2), value: view.view("1", 1),
-        kind: PARAM_TEXT};
-    duplicate[1] = Param{name: view.view("id", 2), value: view.view("2", 1),
-        kind: PARAM_TEXT};
+    duplicate[0].name = view.view("id", 2);
+    duplicate[0].value = view.view("1", 1);
+    duplicate[0].kind = PARAM_TEXT;
+    duplicate[1].name = view.view("id", 2);
+    duplicate[1].value = view.view("2", 1);
+    duplicate[1].kind = PARAM_TEXT;
     var owner: i64 = 1;
     var context: Context;
     if (bind(?context, ?fixture.exchange,
