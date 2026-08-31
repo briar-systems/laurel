@@ -276,6 +276,15 @@ pub fun stop(controller: *Controller) Transition {
     ret transition(TRANSITION_OK, controller, NO_COMPONENT, view.view(nil, 0));
 }
 
+pub fun cleanup_failure(controller: *Controller) Transition {
+    if (!validate(controller)) { ret invalid(controller); }
+    if (controller.cleanup_component == NO_COMPONENT) {
+        ret transition(TRANSITION_OK, controller, NO_COMPONENT, view.view(nil, 0));
+    }
+    ret transition(TRANSITION_FAILED, controller, controller.cleanup_component,
+        controller.cleanup_error);
+}
+
 pub fun accepting(controller: *Controller) bool {
     ret validate(controller) && controller.state == READY;
 }
@@ -423,13 +432,21 @@ test "laurel.lifecycle: failures preserve the primary cause and cleanup ownershi
     init(?controller, ?items[0], 2, 2);
     val failed: Transition = start(?controller);
     if (failed.status != TRANSITION_FAILED || failed.component != 1 || controller.state != FAILED
-        || controller.active != 2 || controller.failure_phase != STARTING) { ret 1; }
+        || failed.error.len != 12 || controller.active != 2
+        || controller.failure_phase != STARTING) { ret 1; }
+    val no_cleanup: Transition = cleanup_failure(?controller);
+    if (no_cleanup.status != TRANSITION_OK || no_cleanup.component != NO_COMPONENT
+        || no_cleanup.error.len != 0) { ret 2; }
     states[1].fail_stop = true;
     val cleanup_failed: Transition = stop(?controller);
     if (cleanup_failed.status != TRANSITION_FAILED || controller.active != 2
-        || controller.cleanup_component != 1 || controller.failure_component != 1) { ret 2; }
+        || cleanup_failed.error.len != 11 || controller.failure_component != 1) { ret 3; }
+    val cleanup: Transition = cleanup_failure(?controller);
+    if (cleanup.status != TRANSITION_FAILED || cleanup.component != 1
+        || cleanup.error.len != 11) { ret 4; }
     val cleaned: Transition = stop(?controller);
     if (cleaned.status != TRANSITION_FAILED || controller.active != 0 || controller.state != FAILED
-        || trace[1] != 202 || trace[2] != 201 || !terminal(?controller)) { ret 3; }
+        || cleaned.component != 1 || cleaned.error.len != 12
+        || trace[1] != 202 || trace[2] != 201 || !terminal(?controller)) { ret 5; }
     ret 0;
 }

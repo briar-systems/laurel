@@ -399,6 +399,14 @@ pub fun stop(app: *App) lifecycle.Transition {
     ret lifecycle.stop(app.lifecycle);
 }
 
+pub fun cleanup_failure(app: *App) lifecycle.Transition {
+    if (app == nil || !app.valid) {
+        ret lifecycle.Transition{status: lifecycle.TRANSITION_INVALID, state: lifecycle.FAILED,
+            component: lifecycle.NO_COMPONENT, error: view.view("invalid application", 19)};
+    }
+    ret lifecycle.cleanup_failure(app.lifecycle);
+}
+
 pub fun can_accept(app: *App) bool {
     if (app == nil || !app.valid) { ret false; }
     val admission: i64 = atomic.load(?app.admission);
@@ -444,6 +452,28 @@ fun test_lifecycle_drain(context: ptr, deadline_ns: i64) R.Result[lifecycle.Call
 }
 
 fun test_lifecycle_stop(context: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
+    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+}
+
+rec TestLifecycleFailure {
+    fail_start: bool;
+    fail_stop:  bool;
+}
+
+fun test_failed_lifecycle_start(context: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
+    val state: *TestLifecycleFailure = context::*TestLifecycleFailure;
+    if (state != nil && state.fail_start) {
+        ret R.err[lifecycle.CallbackStatus, view.View](view.view("start failed", 12));
+    }
+    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+}
+
+fun test_failed_lifecycle_stop(context: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
+    val state: *TestLifecycleFailure = context::*TestLifecycleFailure;
+    if (state != nil && state.fail_stop) {
+        state.fail_stop = false;
+        ret R.err[lifecycle.CallbackStatus, view.View](view.view("stop failed", 11));
+    }
     ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
 }
 
@@ -736,6 +766,64 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
         || sink.route_len != 11) { ret 12; }
     if (stop(?app).status != lifecycle.TRANSITION_OK || !lifecycle.terminal(?controller)) { ret 13; }
     if (!release(?app) || app.valid || app.app_state != nil || !cancel.destroy(?scope)) { ret 14; }
+    ret 0;
+}
+
+test "laurel.app: cleanup failure remains observable after primary failure" {
+    var providers: provider.Set;
+    if (!provider.init(?providers, nil, 0, 0, 32)) { ret 1; }
+    var failures: TestLifecycleFailure;
+    failures.fail_start = true;
+    failures.fail_stop = false;
+    var lifecycle_item: lifecycle.Lifecycle = lifecycle.Lifecycle{
+        ctx: (?failures)::ptr, start: test_failed_lifecycle_start,
+        ready: test_lifecycle_ready, drain: test_lifecycle_drain,
+        stop: test_failed_lifecycle_stop};
+    var controller: lifecycle.Controller;
+    if (!lifecycle.init(?controller, ?lifecycle_item, 1, 1)) { ret 2; }
+    var routes: router.Router;
+    if (router.compile(?routes, nil, 0, router.Storage{specifications: nil, specification_cap: 0,
+            compiled_routes: nil, compiled_route_cap: 0, segments: nil,
+            segment_cap: 0},
+        router.limits_default()).status != router.COMPILE_OK) { ret 2; }
+    var middlewares: middleware.Stack = middleware.Stack{items: nil, len: 0};
+    var headers: security.HeadersPolicy;
+    if (!security.secure_headers(?headers)) { ret 2; }
+    var sink: EventSink;
+    sink.start_calls = 0;
+    sink.finish_calls = 0;
+    sink.error_calls = 0;
+    sink.status = 0;
+    sink.outcome = 0;
+    sink.kind = 0;
+    sink.sequence = 0;
+    sink.route_len = 0;
+    sink.label_len = 0;
+    var observer: observability.Observer = observability.Observer{ctx: (?sink)::ptr,
+        start: test_observer_start, finish: test_observer_finish,
+        error: test_observer_error};
+    var label_specs: [1]observability.LabelSpec;
+    var vocabulary: observability.Vocabulary;
+    if (!test_vocabulary(?vocabulary, ?label_specs[0])) { ret 2; }
+    var application: App;
+    if (!observed_app(?application, ?providers, ?controller, ?routes, ?middlewares,
+            ?headers, ?observer, ?vocabulary)) { ret 3; }
+    val primary: lifecycle.Transition = start(?application);
+    val no_cleanup: lifecycle.Transition = cleanup_failure(?application);
+    if (primary.status != lifecycle.TRANSITION_FAILED || primary.component != 0
+        || primary.error.len != 12 || no_cleanup.status != lifecycle.TRANSITION_OK
+        || no_cleanup.component != lifecycle.NO_COMPONENT || no_cleanup.error.len != 0) {
+        ret 4;
+    }
+    failures.fail_stop = true;
+    if (stop(?application).status != lifecycle.TRANSITION_FAILED) { ret 5; }
+    val cleanup: lifecycle.Transition = cleanup_failure(?application);
+    if (cleanup.status != lifecycle.TRANSITION_FAILED || cleanup.component != 0
+        || cleanup.error.len != 11) { ret 6; }
+    val retained: lifecycle.Transition = stop(?application);
+    if (retained.status != lifecycle.TRANSITION_FAILED || retained.component != 0
+        || retained.error.len != 12 || !lifecycle.terminal(?controller)) { ret 7; }
+    if (!release(?application) || !lifecycle.destroy(?controller)) { ret 8; }
     ret 0;
 }
 
