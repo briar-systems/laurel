@@ -34,7 +34,9 @@ The framework has no global application registry, hidden allocator, mandatory te
   client, across every wire version the HTTP dependency exposes.
 - `cookie` defines bounded request and response cookie storage.
 - `provider` injects application services without a global container.
-- `lifecycle` owns application startup, readiness, drain, and shutdown.
+- `lifecycle` owns application startup, readiness, drain, and shutdown. It
+  preserves the primary failure while exposing any later shutdown cleanup
+  failure through `app.cleanup_failure`.
 - `realtime` covers streaming responses, server-sent events, and WebSockets over
   one bounded queue with explicit backpressure, heartbeat, and close policy.
 
@@ -64,4 +66,5 @@ Security-sensitive operations have no fallback implementation. See
 [`doc/routing.md`](doc/routing.md), [`doc/middleware.md`](doc/middleware.md),
 [`doc/sessions.md`](doc/sessions.md), [`doc/security.md`](doc/security.md),
 [`doc/input.md`](doc/input.md), [`doc/output.md`](doc/output.md), and
-[`doc/observability.md`](doc/observability.md) for the ownership contracts.
+[`doc/observability.md`](doc/observability.md), and
+[`doc/lifecycle.md`](doc/lifecycle.md) for the ownership contracts.
