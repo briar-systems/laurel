@@ -7,8 +7,8 @@ commit = "d2f08352acaac3169e823335ab4ef1e8ce632abb"
 
 [dep.mach-http]
 url = "https://github.com/briar-systems/mach-http"
-ref = "tag/v0.7.1"
-commit = "f654ddca536eceb95ed645ec08f184b99c6f9a08"
+ref = "tag/v0.7.2"
+commit = "6a4b97a12eedc5f73e5a66978f53c5a8f84da28e"
 
 [dep.mach-crypto]
 url = "https://github.com/briar-systems/mach-crypto"
