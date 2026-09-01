@@ -32,12 +32,23 @@ files = sorted(glob.glob(ROOT + '/src/**/*.mach', recursive=True)) + \
 # fully-qualified record definitions: "laurel.cookie.Operation" -> [fields]
 defs = {}
 texts = {}
+
+def record_definitions(text):
+    for match in re.finditer(r'^(?:pub )?rec (\w+)\s*\{', text, re.M):
+        depth, i = 1, match.end()
+        while i < len(text) and depth:
+            if text[i] == '{': depth += 1
+            elif text[i] == '}': depth -= 1
+            i += 1
+        if depth == 0:
+            yield match.group(1), text[match.end():i - 1]
+
 for f in files:
     mod = module_of(f)
     if mod is None: continue
     texts[f] = (mod, open(f).read())
-    for m in re.finditer(r'^(?:pub )?rec (\w+) \{(.*?)^\}', texts[f][1], re.S | re.M):
-        defs[mod + '.' + m.group(1)] = re.findall(r'^\s+(\w+)\s*:', m.group(2), re.M)
+    for name, body in record_definitions(texts[f][1]):
+        defs[mod + '.' + name] = re.findall(r'^\s+(\w+)\s*:', body, re.M)
 
 def aliases(mod, text):
     # `use a.b.c;` binds `c`; `use X: a.b;` binds `X`
