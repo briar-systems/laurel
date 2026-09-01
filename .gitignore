@@ -6,3 +6,4 @@ doc/api/
 *.swp
 *.swo
 *~
+.wt/
