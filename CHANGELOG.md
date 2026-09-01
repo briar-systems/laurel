@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Aligned the standard library and cryptography dependencies with the current
-  transport release family.
+- `mach-std` advances to `v0.34.0`, `mach-http` to `v0.7.3`, and `mach-crypto`
+  to `v0.8.1`, aligning on the released typed secret-storage stack.
 
 ## [0.8.4] - 2026-09-01
 
