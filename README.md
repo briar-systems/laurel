@@ -42,7 +42,7 @@ The framework has no global application registry, hidden allocator, mandatory te
 
 ## Local dependencies
 
-The manifest uses pinned Git tags for `mach-std` v0.34.0, `mach-http` v0.7.3,
+The manifest uses pinned Git tags for `mach-std` v0.34.0, `mach-http` v0.7.4,
 and `mach-crypto` v0.8.1. Build output uses Mach's default `out/` directory.
 
 ## Status
