@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- `tools/partial_literal_sweep.py`. It enumerated record literals naming fewer
+  fields than their record declares, which is a workaround for
+  briar-systems/mach#3108; that defect is being fixed in the compiler. The rule
+  itself still holds, and `doc/middleware.md` still states it.
+
 ## [0.8.8] - 2026-09-02
 
 ### Changed
