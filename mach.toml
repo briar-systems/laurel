@@ -1,6 +1,6 @@
 [project]
 id = "laurel"
-version = "0.8.8"
+version = "0.8.9"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
@@ -58,8 +58,8 @@ ref = "tag/v0.34.0"
 
 [dep.mach-http]
 git = "https://github.com/briar-systems/mach-http"
-ref = "tag/v0.7.5"
+ref = "tag/v0.7.6"
 
 [dep.mach-crypto]
 git = "https://github.com/briar-systems/mach-crypto"
-ref = "tag/v0.8.1"
+ref = "tag/v0.8.2"

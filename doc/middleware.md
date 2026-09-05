@@ -85,7 +85,10 @@ literal at all, so those are built the other way: declare `var value: T;`, which
 does zero the whole record including its arrays, then assign each field.
 `error.AppError`, `error.RenderFailure`, `csrf.KeyGeneration`, and
 `session.KeyGeneration` are the types that force the second form.
-`tools/partial_literal_sweep.py` enumerates any literal that breaks the rule.
+
+Nothing enforces this automatically. Enumerating the violations was a
+workaround for briar-systems/mach#3108, and that defect is being fixed in the
+compiler, so the constructors named above are what keep the rule.
 
 The default mapper uses canonical status codes. It emits public text only when
 it is nonempty, within the configured bound, valid RFC 3629 UTF-8, and contains

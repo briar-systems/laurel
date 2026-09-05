@@ -40,6 +40,20 @@ The framework has no global application registry, hidden allocator, mandatory te
 - `realtime` covers streaming responses, server-sent events, and WebSockets over
   one bounded queue with explicit backpressure, heartbeat, and close policy.
 
+## Demo
+
+[`demo/`](demo/) is a small but complete application: a JSON route, a typed path
+parameter, a CSRF-protected form, a session cookie, a static file, middleware,
+and an observer. It builds and serves in about a minute, and its README explains
+how a Laurel application is hosted, since Laurel owns no listener of its own.
+
+## Benchmarks
+
+[`doc/bench/`](doc/bench/) measures the same three-route service written in
+Laurel, in Go on `net/http`, and in Rust on axum, and publishes the measured
+results. [`doc/bench/COMPARISON.md`](doc/bench/COMPARISON.md) sets the three
+side by side on performance and on ergonomics, including where Laurel loses.
+
 ## Local dependencies
 
 The manifest uses pinned Git tags for `mach-std` v0.34.0, `mach-http` v0.7.5,

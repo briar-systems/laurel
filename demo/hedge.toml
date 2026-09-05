@@ -1,0 +1,50 @@
+# hedge configuration for the laurel demo
+#
+# the service kind "laurel" tells hedge that this service is a Mach application
+# rather than files or an upstream. `application` is the name the executable
+# registers the assembled laurel app under, so the two strings must agree.
+
+[server]
+name = "laurel-demo"
+
+[server.limits]
+max_connections = 256
+max_connections_per_peer = 256
+
+[[listener]]
+name = "public"
+address = "127.0.0.1:8080"
+transport = "tcp"
+protocols = ["http/1.1"]
+backlog = 256
+accept_depth = 8
+
+[host.site]
+listener = "public"
+names = ["localhost", "127.0.0.1"]
+
+[service.app]
+kind = "laurel"
+application = "site"
+
+# a plain file service on the same listener, to show that a laurel application
+# is one service among several rather than the whole server
+# hedge's static service maps the whole request path under the root, so a
+# request for /static/index.html reads public/static/index.html
+[service.assets]
+kind = "static"
+root = "public"
+
+# a literal segment outranks the catch-all, so /static/... reaches the files
+# and everything else reaches the application
+[[route]]
+name = "assets"
+host = "site"
+path = "/static/**"
+service = "assets"
+
+[[route]]
+name = "app"
+host = "site"
+path = "/**"
+service = "app"

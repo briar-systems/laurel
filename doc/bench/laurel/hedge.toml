@@ -1,0 +1,33 @@
+# hedge configuration for the laurel benchmark server
+#
+# plaintext HTTP/1.1 on loopback, one laurel service, no TLS and no telemetry,
+# so the measurement is of the request path and nothing else
+
+[server]
+name = "laurel-bench"
+
+[server.limits]
+max_connections = 512
+max_connections_per_peer = 512
+
+[[listener]]
+name = "public"
+address = "127.0.0.1:8081"
+transport = "tcp"
+protocols = ["http/1.1"]
+backlog = 1024
+accept_depth = 32
+
+[host.site]
+listener = "public"
+names = ["localhost", "127.0.0.1"]
+
+[service.app]
+kind = "laurel"
+application = "site"
+
+[[route]]
+name = "app"
+host = "site"
+path = "/**"
+service = "app"

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [dev, main]
+  # release branches also build on push. a pull_request trigger is selected from
+  # the base branch, so adding `main` above cannot take effect for the very PR
+  # that adds it -- the first release PR would still land untested.
+  push:
+    branches:
+      - 'chore/release-*'
+      - 'hotfix/*'
+
+jobs:
+  linux-x86_64:
+    name: linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Seed mach
+        uses: ./.github/actions/seed-mach
+
+      - name: Report the seed
+        run: mach info
+
+      - name: Resolve dependencies
+        run: mach dep pull .
+
+      - name: Build
+        run: mach build .
+
+      - name: Test
+        run: mach test .
+
+      - name: Test (release)
+        run: mach test . --profile release
+
+      - name: Verify IR across every target
+        run: mach build . --all-targets --verify-ir --profile release
