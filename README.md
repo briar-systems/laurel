@@ -40,6 +40,13 @@ The framework has no global application registry, hidden allocator, mandatory te
 - `realtime` covers streaming responses, server-sent events, and WebSockets over
   one bounded queue with explicit backpressure, heartbeat, and close policy.
 
+## Benchmarks
+
+[`doc/bench/`](doc/bench/) measures the same three-route service written in
+Laurel, in Go on `net/http`, and in Rust on axum, and publishes the measured
+results. [`doc/bench/COMPARISON.md`](doc/bench/COMPARISON.md) sets the three
+side by side on performance and on ergonomics, including where Laurel loses.
+
 ## Local dependencies
 
 The manifest uses pinned Git tags for `mach-std` v0.34.0, `mach-http` v0.7.5,

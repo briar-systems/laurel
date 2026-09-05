@@ -1,0 +1,18 @@
+[package]
+name = "axum-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# pinned so the published numbers name an exact dependency set
+[dependencies]
+axum = { version = "=0.7.9", default-features = false, features = ["http1", "tokio", "form", "query"] }
+tokio = { version = "=1.42.0", features = ["rt", "rt-multi-thread", "net", "macros", "signal"] }
+serde = { version = "=1.0.216", features = ["derive"] }
+http = "=1.2.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
