@@ -1,0 +1,420 @@
+# the demo application: assembly, routes, middleware, and observability
+#
+# everything the application owns lives in one Application record. laurel has no
+# global registry and allocates nothing on its own, so the caller decides where
+# every component lives and how long it lives. here that is one heap allocation
+# made before the server starts and released after it stops.
+
+use R: std.types.result;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.view;
+use std.print;
+use std.chrono.time;
+use http.core.message;
+use http.core.method;
+use http.core.status;
+use http_router: http.router.router;
+use laurel.app;
+use laurel.context;
+use laurel.error;
+use laurel.handler;
+use laurel.lifecycle;
+use laurel.middleware;
+use laurel.observability;
+use laurel.provider;
+use laurel.router;
+use laurel.security;
+use laurel.session;
+use csrf: laurel.security.csrf;
+use crypto_rand: std.crypto.rand;
+use secret: std.system.os.secret;
+use std.memory;
+use demo.handlers;
+
+pub val ROUTE_COUNT: usize = 4;
+val SEGMENT_COUNT: usize = 16;
+val MIDDLEWARE_COUNT: usize = 2;
+val SESSION_SLOTS: usize = 1024;
+val GUARD_SLOTS: usize = 2048;
+
+# how many requests may be in flight at once. hedge admits connections up to its
+# own pool, and every admitted request reserves one laurel slot, so this bounds
+# the framework the same way the listener bounds the socket layer.
+pub val MAX_ACTIVE_REQUESTS: usize = 256;
+
+pub rec Application {
+    parameters:     [1]router.Parameter;
+    routes:         [ROUTE_COUNT]router.Route;
+    specifications: [ROUTE_COUNT]http_router.Route;
+    compiled:       [ROUTE_COUNT]http_router.CompiledRoute;
+    segments:       [SEGMENT_COUNT]http_router.Segment;
+    matcher:        router.Router;
+    middlewares:    [MIDDLEWARE_COUNT]middleware.Middleware;
+    stack:          middleware.Stack;
+    providers:      provider.Set;
+    services:       [1]lifecycle.Lifecycle;
+    controller:     lifecycle.Controller;
+    headers:        security.HeadersPolicy;
+    errors:         error.Default;
+    label_values:   [2]observability.Term;
+    label_specs:    [1]observability.LabelSpec;
+    vocabulary:     observability.Vocabulary;
+    observer:       observability.Observer;
+    counters:       Counters;
+    entropy:        EntropyState;
+    state:          handlers.State;
+    # sessions: an in-memory store, an AEAD codec over a rotating key ring, and
+    # the binder middleware that opens and commits one session per request
+    store_slots:    [SESSION_SLOTS]session.MemorySlot;
+    memory:         session.MemoryStore;
+    keys:           [1]session.KeyGeneration;
+    ring:           session.KeyRing;
+    nonce_slots:    [GUARD_SLOTS]session.GuardSlot;
+    nonce_guard:    session.MemoryGuard;
+    replay_slots:   [GUARD_SLOTS]session.GuardSlot;
+    replay_guard:   session.MemoryGuard;
+    codec:          session.ProtectedCodec;
+    manager:        session.Manager;
+    binder:         session.Binder;
+    # csrf: only the protector lives here. its key ring is secret-welded, and a
+    # secret value cannot sit inside a record that is later erased to `ptr`, so
+    # the ring is owned by main and reached through a typed pointer instead.
+    protector:      csrf.Protector;
+    application:    app.App;
+}
+
+# the observer is where the application learns what happened to a request.
+# laurel calls start exactly once per admitted request and exactly one of
+# finish or error per request, both from inside the framework.
+# both entropy contracts require a real context that can report whether a byte
+# range aliases its own storage, so the framework can refuse a source that
+# shares memory with the keys it is being asked to protect
+pub rec EntropyState {
+    calls: u64;
+}
+
+pub rec Counters {
+    started:  u64;
+    finished: u64;
+    failed:   u64;
+    quiet:    bool;
+}
+
+fun observer_start(ctx: ptr, event: *observability.RequestEvent) {
+    val state: *Counters = ctx::*Counters;
+    state.started = state.started + 1;
+}
+
+fun observer_finish(ctx: ptr, event: *observability.RequestEvent) {
+    val state: *Counters = ctx::*Counters;
+    state.finished = state.finished + 1;
+    if (state.quiet) { ret; }
+    print.printlnf("demo: {} {} -> {}",
+        observability.event_route_name(event).len::u64, event.sequence,
+        event.status::u64);
+}
+
+# the private detail never reaches the wire; the observer is where it surfaces
+fun observer_error(ctx: ptr, event: *observability.RequestEvent,
+    failure: error.AppError) {
+    val state: *Counters = ctx::*Counters;
+    state.failed = state.failed + 1;
+    if (state.quiet) { ret; }
+    var copy: error.AppError = failure;
+    val detail: view.View = error.private_detail(?copy);
+    var text: [256]u8;
+    var i: usize = 0;
+    for (i < detail.len && i < 255) {
+        text[i] = detail.data[i]::u8;
+        i = i + 1;
+    }
+    text[i] = 0;
+    print.eprintlnf("demo: request failed: kind {} status {}: {}",
+        failure.kind::u64, event.status::u64, (?text[0])::str);
+}
+
+# both entropy contracts want the same thing: fill these bytes from a source the
+# application trusts. laurel ships no default, on purpose.
+fun entropy_fill(ctx: ptr, output: *u8, length: usize) i64 {
+    val state: *EntropyState = ctx::*EntropyState;
+    if (state != nil) { state.calls = state.calls + 1; }
+    ret crypto_rand.fill(output, length);
+}
+
+fun entropy_aliases(ctx: ptr, data: *u8, length: usize) bool {
+    ret memory.ranges_overlap(ctx::*u8, $size_of(EntropyState), data, length);
+}
+
+fun clock_now(ctx: ptr) i64 {
+    ret time.time_unix_sec(time.now());
+}
+
+fun init_sessions(demo: *Application) bool {
+    demo.memory.active = false;
+    if (!session.init_memory_store(?demo.memory, ?demo.store_slots[0],
+            SESSION_SLOTS)
+        || !session.init_memory_guard(?demo.nonce_guard, ?demo.nonce_slots[0],
+            GUARD_SLOTS)
+        || !session.init_memory_guard(?demo.replay_guard, ?demo.replay_slots[0],
+            GUARD_SLOTS)) { ret false; }
+    demo.keys[0].id = 1;
+    demo.keys[0].key_len = 32;
+    demo.keys[0].activated_at = 0;
+    demo.keys[0].encode_until = 4102444800;
+    demo.keys[0].decode_until = 4102444800;
+    if (crypto_rand.fill(?demo.keys[0].key[0], 32) != 0) { ret false; }
+    val nonce: session.Guard = session.memory_guard(?demo.nonce_guard);
+    val replay: session.Guard = session.memory_guard(?demo.replay_guard);
+    if (!session.init_key_ring(?demo.ring, ?demo.keys[0], 1, 1, 0,
+        session.AES_256_GCM, nonce.domain)) { ret false; }
+    val entropy: session.Entropy = session.Entropy{ctx: (?demo.entropy)::ptr,
+        aliases: entropy_aliases, fill: entropy_fill};
+    if (!session.init_protected_codec(?demo.codec, ?demo.ring, entropy, nonce,
+        session.REPLAY_ALLOW, replay, session.AES_256_GCM, 60,
+        handlers.SESSION_LIFETIME_S, session.MAX_CONTEXT_BYTES)) { ret false; }
+    # secure_cookie leaves max_age at 0, and a Set-Cookie carrying Max-Age=0
+    # tells the client to delete the cookie, so the policy gets a real lifetime
+    var cookie_policy: session.CookiePolicy =
+        session.secure_cookie("laurel_demo_session");
+    cookie_policy.max_age = handlers.SESSION_LIFETIME_S;
+    # laurel refuses a session cookie that is not Secure and HttpOnly, so the
+    # demo's cookie keeps both. browsers treat http://localhost as a trustworthy
+    # origin and accept it; curl will not send a Secure cookie over http, which
+    # is why the README passes the cookie back explicitly with -b.
+    if (!session.init_manager(?demo.manager, session.memory_store(?demo.memory),
+        session.protected_codec(?demo.codec),
+        cookie_policy, "laurel.demo")
+        || session.start_manager(?demo.manager) != session.STORE_OK) {
+        ret false;
+    }
+    # every one of these buffers is taken from the host's per-request arena,
+    # which hedge fixes at 12 KiB, so the session's request-scoped storage is
+    # sized against that budget rather than against laurel's defaults
+    ret session.init_binder(?demo.binder, ?demo.manager,
+        session.Clock{ctx: nil, now: clock_now},
+        session.RequestLimits{max_cookies: 4, max_data_bytes: 256,
+            max_token_bytes: 512, max_header_bytes: 512});
+}
+
+# the caller owns the key ring and its generations, because both are secret and
+# secret memory is only ever reached through a secrecy-typed pointer
+pub fun init_csrf(demo: *Application, ring: *csrf.KeyRing,
+    keys: *csrf.KeyGeneration) bool {
+    if (demo == nil || ring == nil || keys == nil) { ret false; }
+    keys[0].id = 1;
+    keys[0].activated_at = 0;
+    keys[0].issue_until = 4102444800;
+    keys[0].verify_until = 4102444800;
+    if (secret.random_fill(?keys[0].key[0], 32) != 0) { ret false; }
+    if (!csrf.init_ring(ring, keys, 1, 1, 0)) { ret false; }
+    ret csrf.init(?demo.protector, ring,
+        csrf.Entropy{ctx: (?demo.entropy)::ptr,
+            context_size: $size_of(EntropyState),
+            aliases_state: entropy_aliases, fill: entropy_fill},
+        csrf.Policy{binding: csrf.BIND_SESSION, max_age_s: 3600,
+            clock_skew_s: 30, require_unsafe: false});
+}
+
+fun service_start(ctx: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
+    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+}
+
+fun service_ready(ctx: ptr) lifecycle.Readiness {
+    ret lifecycle.READY_NOW;
+}
+
+fun service_drain(ctx: ptr, deadline_ns: i64)
+    R.Result[lifecycle.CallbackStatus, view.View] {
+    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+}
+
+fun service_stop(ctx: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
+    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+}
+
+# one middleware, wrapping every request: it runs before the handler, calls the
+# rest of the chain exactly once, and applies laurel's secure response headers
+# to whatever the handler produced.
+fun secure_headers_middleware(ctx: ptr, next: middleware.Next,
+    request_context: *context.Context) R.Result[u8, error.AppError] {
+    val policy: *security.HeadersPolicy = ctx::*security.HeadersPolicy;
+    val result: R.Result[u8, error.AppError] =
+        middleware.call(next, request_context);
+    if (!R.is_err[u8, error.AppError](result) && context.active(request_context)) {
+        security.apply_headers(policy, context.request(request_context),
+            context.response(request_context));
+    }
+    ret result;
+}
+
+fun not_found(ctx: ptr, request_context: *context.Context)
+    R.Result[u8, error.AppError] {
+    ret R.err[u8, error.AppError](error.make(error.NOT_FOUND, 404, "not found",
+        "no route matched the request target", false));
+}
+
+# the handler laurel runs when dispatch matched no route
+pub fun fallback_handler() handler.Handler {
+    ret handler.Handler{ctx: nil, call: not_found};
+}
+
+fun route(method_rule: router.Method, pattern: view.View, name: str,
+    parameters: *router.Parameter, parameter_len: usize,
+    call: handler.HandlerFun, ctx: ptr) router.Route {
+    ret router.Route{method: method_rule, host: router.any_host(),
+        path: router.path(pattern), name: name, parameters: parameters,
+        parameter_len: parameter_len,
+        handler: handler.Handler{ctx: ctx, call: call}};
+}
+
+# the host decides the message limits every exchange is committed under, so the
+# application is assembled against those rather than against its own defaults.
+# laurel's default error mapper builds its body under exactly these limits, and a
+# mapper configured more loosely than the host renders an error the host refuses.
+pub fun assemble(demo: *Application, limits: message.Limits, quiet: bool) bool {
+    if (demo == nil) { ret false; }
+    demo.state.requests = 0;
+    demo.counters.quiet = quiet;
+    if (!security.secure_headers(?demo.headers) || !init_sessions(demo)) {
+        ret false;
+    }
+    if (!csrf.valid(?demo.protector)) { ret false; }
+    demo.state.protector = ?demo.protector;
+
+    demo.parameters[0] = router.Parameter{name: handlers.text("id"),
+        wildcard: false, decoder: router.u64_decoder()};
+    demo.routes[0] = route(
+        router.exact_method(method.from_kind(method.GET)),
+        handlers.text("/api/hello"), "api.hello", nil, 0,
+        handlers.hello, (?demo.state)::ptr);
+    demo.routes[1] = route(
+        router.exact_method(method.from_kind(method.GET)),
+        handlers.text("/api/echo/:id"), "api.echo",
+        ?demo.parameters[0], 1, handlers.echo, (?demo.state)::ptr);
+    demo.routes[2] = route(
+        router.exact_method(method.from_kind(method.GET)),
+        handlers.text("/form"), "form.show", nil, 0,
+        handlers.form_page, (?demo.state)::ptr);
+    demo.routes[3] = route(
+        router.exact_method(method.from_kind(method.POST)),
+        handlers.text("/form"), "form.submit", nil, 0,
+        handlers.form_submit, (?demo.state)::ptr);
+
+    val storage: router.Storage = router.Storage{
+        specifications: ?demo.specifications[0], specification_cap: ROUTE_COUNT,
+        compiled_routes: ?demo.compiled[0], compiled_route_cap: ROUTE_COUNT,
+        segments: ?demo.segments[0], segment_cap: SEGMENT_COUNT};
+    if (router.compile(?demo.matcher, ?demo.routes[0], ROUTE_COUNT, storage,
+        router.limits_default()).status != router.COMPILE_OK) { ret false; }
+
+    demo.middlewares[0] = middleware.Middleware{ctx: (?demo.headers)::ptr,
+        call: secure_headers_middleware};
+    demo.middlewares[1] = session.binder_middleware(?demo.binder);
+    demo.stack = middleware.Stack{items: ?demo.middlewares[0],
+        len: MIDDLEWARE_COUNT};
+
+    if (!provider.init(?demo.providers, nil, 0, 0, 32)) { ret false; }
+    demo.services[0] = lifecycle.Lifecycle{ctx: nil, start: service_start,
+        ready: service_ready, drain: service_drain, stop: service_stop};
+    if (!lifecycle.init(?demo.controller, ?demo.services[0], 1, 1)) { ret false; }
+    if (!error.initialize_default(?demo.errors, limits, 512)) { ret false; }
+
+    if (!observability.term(?demo.label_specs[0].name, handlers.text("kind"))) {
+        ret false;
+    }
+    demo.label_specs[0].values = nil;
+    demo.label_specs[0].value_count = 0;
+    demo.label_specs[0].max_value_bytes = 16;
+    if (!observability.init_vocabulary(?demo.vocabulary, ?demo.label_specs[0], 1)) {
+        ret false;
+    }
+    demo.observer = observability.Observer{ctx: (?demo.counters)::ptr,
+        start: observer_start, finish: observer_finish, error: observer_error};
+
+    val assembly: app.Assembly = app.Assembly{
+        config: app.Config{
+            limits: app.Limits{
+                max_body_bytes: 65536,
+                max_form_fields: 16,
+                max_upload_bytes: 65536,
+                max_route_params: 4,
+                max_request_id_bytes: 64,
+                max_active_requests: MAX_ACTIVE_REQUESTS,
+                max_middleware_depth: 8,
+                handler_deadline_ns: lifecycle.NO_DEADLINE,
+                max_providers: 0,
+                max_provider_key_bytes: 32,
+                max_background_services: 1},
+            trust_proxy: false,
+            panic_policy: middleware.PANIC_ABORT},
+        router: ?demo.matcher,
+        middleware: ?demo.stack,
+        fallback: handler.Handler{ctx: nil, call: not_found},
+        errors: error.default_mapper(?demo.errors),
+        providers: ?demo.providers,
+        lifecycle: ?demo.controller,
+        sessions: ?demo.manager,
+        security: ?demo.headers,
+        csrf: ?demo.protector,
+        origins: nil,
+        authenticator: nil,
+        renderer: nil,
+        observer: ?demo.observer,
+        vocabulary: ?demo.vocabulary,
+        event_policy: observability.policy_default(),
+        app_state: nil,
+    };
+    ret app.assemble(?demo.application, assembly);
+}
+
+# start and readiness are separate: admission only opens once every background
+# service reports ready, so a half-started application never takes traffic.
+pub fun start(demo: *Application) bool {
+    if (app.start(?demo.application).status != lifecycle.TRANSITION_OK) {
+        ret false;
+    }
+    var polls: usize = 0;
+    for (polls < 64) {
+        val ready: lifecycle.Transition = app.poll_ready(?demo.application);
+        if (ready.status == lifecycle.TRANSITION_OK) {
+            ret app.can_accept(?demo.application);
+        }
+        if (ready.status != lifecycle.TRANSITION_PENDING) { ret false; }
+        polls = polls + 1;
+    }
+    ret false;
+}
+
+pub fun shutdown(demo: *Application) bool {
+    var drained: bool = false;
+    var polls: usize = 0;
+    for (polls < 64 && !drained) {
+        val moved: lifecycle.Transition =
+            app.drain(?demo.application, lifecycle.NO_DEADLINE);
+        drained = moved.status == lifecycle.TRANSITION_OK;
+        if (moved.status != lifecycle.TRANSITION_PENDING && !drained) { ret false; }
+        polls = polls + 1;
+    }
+    var stopped: bool = false;
+    polls = 0;
+    for (polls < 64 && !stopped) {
+        val moved: lifecycle.Transition = app.stop(?demo.application);
+        stopped = moved.status == lifecycle.TRANSITION_OK;
+        if (moved.status != lifecycle.TRANSITION_PENDING && !stopped) { ret false; }
+        polls = polls + 1;
+    }
+    if (!app.release(?demo.application)) { ret false; }
+    if (session.stop_manager(?demo.manager) != session.STORE_OK) { ret false; }
+    if (!session.release_protected_codec(?demo.codec)
+        || !session.release_key_ring(?demo.ring)
+        || !session.release_memory_guard(?demo.nonce_guard)
+        || !session.release_memory_guard(?demo.replay_guard)
+        || !csrf.release(?demo.protector)) {
+        ret false;
+    }
+    ret lifecycle.destroy(?demo.controller);
+}
