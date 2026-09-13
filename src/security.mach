@@ -1,6 +1,6 @@
 # fail-closed application security policy
 
-use R: std.types.result;
+use std.types.result.res;
 use std.chrono.time;
 use std.types.bool.bool;
 use std.types.bool.false;
@@ -81,7 +81,7 @@ pub rec RedirectPolicy {
 
 pub def AliasesStateFun: fun(ptr, *u8, usize) bool;
 pub def AuthenticateFun: fun(ptr, *message.Request)
-    R.Result[ptr, error.AppError];
+    res[ptr, error.AppError];
 pub def ReleasePrincipalFun: fun(ptr, ptr) bool;
 
 pub rec Authenticator {
@@ -660,14 +660,14 @@ fun authentication_error(kind: error.Kind, public_text: *u8,
 }
 
 pub fun authenticate(authenticator: *Authenticator,
-    request_context: *context.Context) R.Result[ptr, error.AppError] {
+    request_context: *context.Context) res[ptr, error.AppError] {
     if (!authenticator_valid(authenticator) ||
         !context.active(request_context) ||
         request_context.principal_state != context.PRINCIPAL_NONE ||
         request_context.principal != nil) {
-        ret R.err[ptr, error.AppError](authentication_error(error.INTERNAL,
+        ret res[ptr, error.AppError].err{authentication_error(error.INTERNAL,
             "internal server error"::*u8, 21,
-            "invalid authentication ownership"::*u8, 32));
+            "invalid authentication ownership"::*u8, 32)};
     }
     val request: *message.Request = context.request(request_context);
     val snapshot: Authenticator = @authenticator;
@@ -675,19 +675,19 @@ pub fun authenticate(authenticator: *Authenticator,
             request::*u8, $size_of(message.Request)) ||
         !authentication_input_valid(authenticator, snapshot,
             request_context::*u8, $size_of(context.Context))) {
-        ret R.err[ptr, error.AppError](authentication_error(error.INTERNAL,
+        ret res[ptr, error.AppError].err{authentication_error(error.INTERNAL,
             "internal server error"::*u8, 21,
-            "authentication state overlaps request"::*u8, 37));
+            "authentication state overlaps request"::*u8, 37)};
     }
     request_context.principal_state = context.PRINCIPAL_AUTHENTICATING;
-    val result: R.Result[ptr, error.AppError] =
+    val result: res[ptr, error.AppError] =
         snapshot.authenticate(snapshot.ctx, request);
     if (!authenticator_equal(snapshot, @authenticator) ||
         !context.active(request_context) ||
         request_context.principal_state != context.PRINCIPAL_AUTHENTICATING ||
         request_context.principal != nil) {
-        if (!R.is_err[ptr, error.AppError](result)) {
-            val leaked: ptr = R.unwrap_ok[ptr, error.AppError](result);
+        if (sel result.ok) {
+            val leaked: ptr = result.ok;
             if (leaked != nil && !snapshot.release(snapshot.ctx, leaked) &&
                 request_context.principal_state ==
                     context.PRINCIPAL_AUTHENTICATING &&
@@ -699,24 +699,24 @@ pub fun authenticate(authenticator: *Authenticator,
         if (request_context.principal_state == context.PRINCIPAL_AUTHENTICATING) {
             request_context.principal_state = context.PRINCIPAL_NONE;
         }
-        ret R.err[ptr, error.AppError](authentication_error(error.INTERNAL,
+        ret res[ptr, error.AppError].err{authentication_error(error.INTERNAL,
             "internal server error"::*u8, 21,
-            "authentication callback violated ownership"::*u8, 42));
+            "authentication callback violated ownership"::*u8, 42)};
     }
-    if (R.is_err[ptr, error.AppError](result)) {
+    if (sel result.err) {
         request_context.principal_state = context.PRINCIPAL_NONE;
         ret result;
     }
-    val principal: ptr = R.unwrap_ok[ptr, error.AppError](result);
+    val principal: ptr = result.ok;
     if (principal == nil) {
         request_context.principal_state = context.PRINCIPAL_NONE;
-        ret R.err[ptr, error.AppError](authentication_error(error.UNAUTHORIZED,
+        ret res[ptr, error.AppError].err{authentication_error(error.UNAUTHORIZED,
             "authentication required"::*u8, 23,
-            "authenticator returned no principal"::*u8, 35));
+            "authenticator returned no principal"::*u8, 35)};
     }
     request_context.principal = principal;
     request_context.principal_state = context.PRINCIPAL_OWNED;
-    ret R.ok[ptr, error.AppError](principal);
+    ret res[ptr, error.AppError].ok{principal};
 }
 
 pub fun release_principal(authenticator: *Authenticator,

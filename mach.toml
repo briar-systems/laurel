@@ -5,6 +5,7 @@ src = "src"
 out = "out/{target.name}/{profile.name}"
 
 [target.linux-x86_64]
+default = true
 isa = "x86_64"
 os = "linux"
 abi = "sysv64"
@@ -35,14 +36,19 @@ os = "windows"
 abi = "win64"
 
 [profile.debug]
+default = true
 opt = 0
-debug = true
+debug = false
 simd = "scalarize"
+vectorize = true
+float_reassoc = false
 
 [profile.release]
 opt = 2
 debug = false
 simd = "scalarize"
+vectorize = true
+float_reassoc = false
 
 [artifact.laurel]
 kind = "static"
@@ -52,14 +58,14 @@ targets = ["*"]
 link = []
 need = []
 
-[dep.mach-std]
+[dep.std]
 git = "https://github.com/briar-systems/mach-std"
-ref = "tag/v0.34.0"
+ref = "tag/v2.0.0"
 
-[dep.mach-http]
-git = "https://github.com/briar-systems/mach-http"
-ref = "tag/v0.7.6"
-
-[dep.mach-crypto]
+[dep.crypto]
 git = "https://github.com/briar-systems/mach-crypto"
-ref = "tag/v0.8.2"
+ref = "branch/feat/51"
+
+[dep.http]
+git = "https://github.com/briar-systems/mach-http"
+ref = "branch/feat/75"

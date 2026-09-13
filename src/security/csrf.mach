@@ -1,7 +1,8 @@
 # bounded csrf tokens with explicit binding and key rotation
 
 use A: std.allocator;
-use O: std.types.option;
+use std.types.error.err;
+use std.types.option.opt;
 use std.allocator.fixed;
 use std.chrono.time;
 use std.crypto.ct;
@@ -23,7 +24,15 @@ use http.core.method;
 use http.core.target;
 use laurel.context;
 
-pub val KEY_BYTES: usize = 32;
+
+
+
+fun fixed_ok(outcome: err[A.Error]) bool {
+    ret sel outcome.ok;
+}
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}pub val KEY_BYTES: usize = 32;
 pub val NONCE_BYTES: usize = 16;
 pub val TAG_BYTES: usize = 32;
 pub val MAX_BINDING_BYTES: usize = 256;
@@ -236,7 +245,7 @@ fun ring_aliases(ring: *KeyRing, data: *u8, len: usize) bool {
 fun key_equal(first: *KeyGeneration, second: *KeyGeneration) bool {
     ct.begin();
     val equal: ^u8 = ct.eq_bytes(?first.key[0], ?second.key[0], KEY_BYTES);
-    if (equal:^ == 1) {
+    if (equal:>u8 == 1) {
         ct.end();
         ret true;
     }
@@ -720,7 +729,7 @@ fun constant_tag_equal(first: *u8, second: *u8) bool {
     val equal: ^u8 = ct.eq_bytes(?left[0], ?right[0], TAG_BYTES);
     ct.zeroize(?left[0], TAG_BYTES);
     ct.zeroize(?right[0], TAG_BYTES);
-    if (equal:^ == 1) {
+    if (equal:>u8 == 1) {
         ct.end();
         ret true;
     }
@@ -951,8 +960,8 @@ fun init_fixture(fixture: *Fixture, binding: BindingMode,
     request_method: method.Kind, generation: u64,
     request_id: view.View) bool {
     if (fixture == nil || generation == 0 ||
-        !cancel.make_root(?fixture.scope, false, time.Time{sec: 0, nsec: 0})) { ret false; }
-    if (O.is_some[*u8](fixed.make(?fixture.allocator,
+        !operation_ok(cancel.make_root(?fixture.scope, false, time.Time{sec: 0, nsec: 0}))) { ret false; }
+    if (!fixed_ok(fixed.make(?fixture.allocator,
             ?fixture.allocation_state, ?fixture.allocation_bytes[0], 4096))) {
         ret false;
     }
@@ -1010,7 +1019,7 @@ fun release_fixture(fixture: *Fixture) bool {
         !release(?fixture.protector) || !release_ring(?fixture.ring)) {
         ret false;
     }
-    ret cancel.destroy(?fixture.scope);
+    ret operation_ok(cancel.destroy(?fixture.scope));
 }
 
 test "laurel.security.csrf: session tokens are bounded authenticated and rotated" {
@@ -1144,7 +1153,7 @@ test "laurel.security.csrf: provider mutation and invalid rings are rejected" {
     fixture.protector.policy.max_age_s = 60;
     if (!release(?fixture.protector) || !context.unbind(
             ?fixture.request_context, (?fixture.owner)::ptr, fixture.owner) ||
-        !release_ring(?fixture.ring) || !cancel.destroy(?fixture.scope)) {
+        !release_ring(?fixture.ring) || !operation_ok(cancel.destroy(?fixture.scope))) {
         ret 4;
     }
     var duplicate: [2]KeyGeneration;

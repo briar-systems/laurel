@@ -1,5 +1,4 @@
 out/
-dep/
 .DS_Store
 .claude/
 doc/api/
@@ -8,3 +7,4 @@ doc/api/
 *~
 .wt/
 .mach-seed/
+.mach-txn-lock

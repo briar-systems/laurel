@@ -14,6 +14,14 @@ use http.core.body;
 use http.core.field;
 use laurel.error;
 
+
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}
+
+fun transition_ok(outcome: cancel.Transition) bool {
+    ret (sel outcome.ok) && outcome.ok;
+}
 pub def Status: u8;
 pub def State: u8;
 
@@ -910,7 +918,7 @@ test "laurel.form: body state cannot overlap result storage" {
             fields: (?parser)::*Field, field_capacity: 1,
             bytes: ?bytes[0], byte_capacity: 32}, limits)) { ret 1; }
     var scope: cancel.Scope;
-    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) { ret 2; }
+    if (!operation_ok(cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0}))) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
     var state: TestBody = TestBody{input: view.view("a=b", 3), offset: 0, pending_output: nil, pending_capacity: 0, read_pending_once: false, finish_pending_once: false, pending_mode: 0, finish_calls: 0, release_calls: 0};
@@ -918,7 +926,7 @@ test "laurel.form: body state cannot overlap result storage" {
     var read_buffer: [2]u8;
     val accepted: bool = init_body(?parser, ?decoder, ?reader,
         ?read_buffer[0], 2);
-    val destroyed: bool = cancel.destroy(?scope);
+    val destroyed: bool = operation_ok(cancel.destroy(?scope));
     if (accepted || !destroyed) { ret 3; }
     ret 0;
 }
@@ -934,7 +942,7 @@ test "laurel.form: body polling retains pending buffers across fragmentation" {
         ret 1;
     }
     var scope: cancel.Scope;
-    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) { ret 2; }
+    if (!operation_ok(cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0}))) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
     var state: TestBody = TestBody{
@@ -961,7 +969,7 @@ test "laurel.form: body polling retains pending buffers across fragmentation" {
         !view_equal(current.form.fields[0].value, "alice") ||
         !view_equal(current.form.fields[1].value, "a/b") ||
         state.release_calls != 1 || !body.reader_terminal_state(?reader) ||
-        !cancel.destroy(?scope)) { ret 6; }
+        !operation_ok(cancel.destroy(?scope))) { ret 6; }
     ret 0;
 }
 
@@ -976,7 +984,7 @@ test "laurel.form: parse failure settles the body exactly once" {
         ret 1;
     }
     var scope: cancel.Scope;
-    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) { ret 2; }
+    if (!operation_ok(cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0}))) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
     var state: TestBody = TestBody{input: view.view("a=1234567", 9),
@@ -996,7 +1004,7 @@ test "laurel.form: parse failure settles the body exactly once" {
     current = complete_body(?parser, current.token);
     if (current.status != LIMIT || state.finish_calls != 1 ||
         state.release_calls != 1 || !body.reader_terminal_state(?reader) ||
-        !cancel.destroy(?scope)) { ret 6; }
+        !operation_ok(cancel.destroy(?scope))) { ret 6; }
     ret 0;
 }
 
@@ -1011,8 +1019,8 @@ test "laurel.form: body cancellation never publishes fields" {
         ret 1;
     }
     var scope: cancel.Scope;
-    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0}) ||
-        !cancel.cancel(?scope)) { ret 2; }
+    if (!operation_ok(cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) ||
+        !transition_ok(cancel.cancel(?scope))) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
     var state: TestBody = TestBody{input: view.view("a=b", 3), offset: 0, pending_output: nil, pending_capacity: 0, read_pending_once: false, finish_pending_once: false, pending_mode: 0, finish_calls: 0, release_calls: 0};
@@ -1023,6 +1031,6 @@ test "laurel.form: body cancellation never publishes fields" {
     val stopped: Operation = poll_body(?parser);
     if (stopped.status != CANCELLED || stopped.form.len != 0 ||
         state.finish_calls != 1 || state.release_calls != 1 ||
-        !cancel.destroy(?scope)) { ret 4; }
+        !operation_ok(cancel.destroy(?scope))) { ret 4; }
     ret 0;
 }

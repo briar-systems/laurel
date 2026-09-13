@@ -1,8 +1,9 @@
 # explicit application assembly and lifecycle ownership
 
 use A: std.allocator;
-use O: std.types.option;
-use R: std.types.result;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.error.err;
 use std.allocator.fixed;
 use std.chrono.time;
 use std.sync.atomic;
@@ -32,6 +33,22 @@ use laurel.security;
 use laurel.security.csrf;
 use laurel.session;
 
+
+
+
+fun fixed_ok(outcome: err[A.Error]) bool {
+    ret sel outcome.ok;
+}
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}
+
+fun transition_ok(outcome: cancel.Transition) bool {
+    ret (sel outcome.ok) && outcome.ok;
+}
+fun is_ok_ptr_error_apperror(outcome: res[ptr, error.AppError]) bool {
+    ret sel outcome.ok;
+}
 val ADMISSION_CLOSED: i64 = -1;
 
 fun app_identity(app: *App) ptr {
@@ -439,20 +456,20 @@ pub fun release(app: *App) bool {
     ret true;
 }
 
-fun test_lifecycle_start(context: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+fun test_lifecycle_start(context: ptr) res[lifecycle.CallbackStatus, view.View] {
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
 fun test_lifecycle_ready(context: ptr) lifecycle.Readiness {
     ret lifecycle.READY_NOW;
 }
 
-fun test_lifecycle_drain(context: ptr, deadline_ns: i64) R.Result[lifecycle.CallbackStatus, view.View] {
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+fun test_lifecycle_drain(context: ptr, deadline_ns: i64) res[lifecycle.CallbackStatus, view.View] {
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
-fun test_lifecycle_stop(context: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+fun test_lifecycle_stop(context: ptr) res[lifecycle.CallbackStatus, view.View] {
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
 rec TestLifecycleFailure {
@@ -460,36 +477,36 @@ rec TestLifecycleFailure {
     fail_stop:  bool;
 }
 
-fun test_failed_lifecycle_start(context: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
+fun test_failed_lifecycle_start(context: ptr) res[lifecycle.CallbackStatus, view.View] {
     val state: *TestLifecycleFailure = context::*TestLifecycleFailure;
     if (state != nil && state.fail_start) {
-        ret R.err[lifecycle.CallbackStatus, view.View](view.view("start failed", 12));
+        ret res[lifecycle.CallbackStatus, view.View].err{view.view("start failed", 12)};
     }
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
-fun test_failed_lifecycle_stop(context: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
+fun test_failed_lifecycle_stop(context: ptr) res[lifecycle.CallbackStatus, view.View] {
     val state: *TestLifecycleFailure = context::*TestLifecycleFailure;
     if (state != nil && state.fail_stop) {
         state.fail_stop = false;
-        ret R.err[lifecycle.CallbackStatus, view.View](view.view("stop failed", 11));
+        ret res[lifecycle.CallbackStatus, view.View].err{view.view("stop failed", 11)};
     }
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
-fun test_handler(context_ptr: ptr, request_context: *context.Context) R.Result[u8, error.AppError] {
-    ret R.ok[u8, error.AppError](handler.RESPOND);
+fun test_handler(context_ptr: ptr, request_context: *context.Context) res[u8, error.AppError] {
+    ret res[u8, error.AppError].ok{handler.RESPOND};
 }
 
 fun test_failing_handler(context_ptr: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
-    ret R.err[u8, error.AppError](error.make(error.NOT_FOUND, 404, "not found",
-        "no matching resource", false));
+    request_context: *context.Context) res[u8, error.AppError] {
+    ret res[u8, error.AppError].err{error.make(error.NOT_FOUND, 404, "not found",
+        "no matching resource", false)};
 }
 
 fun test_error(context_ptr: ptr, app_error: error.AppError,
-    request_context: *context.Context) R.Result[u8, error.RenderFailure] {
-    ret R.ok[u8, error.RenderFailure](1);
+    request_context: *context.Context) res[u8, error.RenderFailure] {
+    ret res[u8, error.RenderFailure].ok{1};
 }
 
 rec EventSink {
@@ -575,22 +592,22 @@ fun test_auth_aliases(context_ptr: ptr, data: *u8, len: usize) bool {
 }
 
 fun test_authenticate(context_ptr: ptr, request: *message.Request)
-    R.Result[ptr, error.AppError] {
+    res[ptr, error.AppError] {
     val state: *TestAuthenticator = context_ptr::*TestAuthenticator;
     if (request == nil || state.owned) {
-        ret R.err[ptr, error.AppError](error.make(error.INTERNAL, 500,
-            "internal server error", "invalid test authentication", false));
+        ret res[ptr, error.AppError].err{error.make(error.INTERNAL, 500,
+            "internal server error", "invalid test authentication", false)};
     }
     state.authenticate_calls = state.authenticate_calls + 1;
     if (state.fail_authenticate) {
-        ret R.err[ptr, error.AppError](error.make(error.UNAUTHORIZED, 401,
-            "authentication required", "test authentication rejected", false));
+        ret res[ptr, error.AppError].err{error.make(error.UNAUTHORIZED, 401,
+            "authentication required", "test authentication rejected", false)};
     }
     if (state.empty_principal) {
-        ret R.ok[ptr, error.AppError](nil);
+        ret res[ptr, error.AppError].ok{nil};
     }
     state.owned = true;
-    ret R.ok[ptr, error.AppError](?state.principal);
+    ret res[ptr, error.AppError].ok{?state.principal};
 }
 
 fun test_release_principal(context_ptr: ptr, principal: ptr) bool {
@@ -669,7 +686,7 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
 
     val configured: message.Limits = message.limits_default();
     var scope: cancel.Scope;
-    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) { ret 6; }
+    if (!operation_ok(cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0}))) { ret 6; }
     var request_fields: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
     var request_trailers: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
     var request_body: body.Reader = body.empty_reader(101);
@@ -695,7 +712,7 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     var allocation_bytes: [4096]u8;
     var allocation_state: fixed.FixedState;
     var allocator: A.Allocator;
-    if (O.is_some[*u8](fixed.make(?allocator, ?allocation_state,
+    if (!fixed_ok(fixed.make(?allocator, ?allocation_state,
         ?allocation_bytes[0], 4096))) { ret 10; }
     var request_context: context.Context;
     var recorder: observability.Recorder;
@@ -708,29 +725,23 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
         || sink.route_len != 11
         || request_recorder(?app, ?request_context) != ?recorder) { ret 10; }
     auth_state.fail_authenticate = true;
-    if (!R.is_err[ptr, error.AppError](
-            security.authenticate(?authenticator, ?request_context)) ||
+    if (is_ok_ptr_error_apperror(security.authenticate(?authenticator, ?request_context)) ||
         request_context.principal_state != context.PRINCIPAL_NONE ||
         request_context.principal != nil || auth_state.authenticate_calls != 1) {
         ret 15;
     }
     auth_state.fail_authenticate = false;
     auth_state.empty_principal = true;
-    if (!R.is_err[ptr, error.AppError](
-            security.authenticate(?authenticator, ?request_context)) ||
+    if (is_ok_ptr_error_apperror(security.authenticate(?authenticator, ?request_context)) ||
         request_context.principal_state != context.PRINCIPAL_NONE ||
         request_context.principal != nil || auth_state.authenticate_calls != 2) {
         ret 15;
     }
     auth_state.empty_principal = false;
-    val authenticated: R.Result[ptr, error.AppError] =
+    val authenticated: res[ptr, error.AppError] =
         security.authenticate(?authenticator, ?request_context);
-    if (R.is_err[ptr, error.AppError](authenticated) ||
-        R.unwrap_ok[ptr, error.AppError](authenticated) != ?auth_state.principal ||
-        request_context.principal_state != context.PRINCIPAL_OWNED ||
-        auth_state.authenticate_calls != 3 ||
-        !R.is_err[ptr, error.AppError](
-            security.authenticate(?authenticator, ?request_context))) { ret 15; }
+    if (sel authenticated.err) { ret 15; }
+    if (authenticated.ok != ?auth_state.principal || request_context.principal_state != context.PRINCIPAL_OWNED || auth_state.authenticate_calls != 3 || is_ok_ptr_error_apperror(security.authenticate(?authenticator, ?request_context))) { ret 15; }
     val executed: middleware.Outcome = execute(?app,
         handler.Handler{ctx: nil, call: test_handler}, ?request_context);
     if (executed.status != middleware.EXECUTION_RESPOND
@@ -748,7 +759,7 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     if (drain(?app, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_PENDING
         || can_accept(?app) || stop(?app).status != lifecycle.TRANSITION_PENDING) { ret 11; }
     val termination: Termination = Termination{outcome: executed,
-        reason: cancel.ACTIVE, status: 200,
+        reason: cancel.Reason.active{}, status: 200,
         transfer: http_exchange.completion, now_ns: 1};
     auth_state.fail_release = true;
     if (release_context(?app, ?request_context, termination) ||
@@ -765,7 +776,7 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
         || sink.status != 200 || sink.outcome != observability.OUTCOME_COMPLETED
         || sink.route_len != 11) { ret 12; }
     if (stop(?app).status != lifecycle.TRANSITION_OK || !lifecycle.terminal(?controller)) { ret 13; }
-    if (!release(?app) || app.valid || app.app_state != nil || !cancel.destroy(?scope)) { ret 14; }
+    if (!release(?app) || app.valid || app.app_state != nil || !operation_ok(cancel.destroy(?scope))) { ret 14; }
     ret 0;
 }
 
@@ -844,10 +855,10 @@ rec RequestFixture {
 
 fun request_fixture(state: *RequestFixture, generation: u64, path: view.View) bool {
     if (state == nil
-        || !cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0})) {
+        || !operation_ok(cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0}))) {
         ret false;
     }
-    if (O.is_some[*u8](fixed.make(?state.allocator, ?state.allocation_state,
+    if (!fixed_ok(fixed.make(?state.allocator, ?state.allocation_state,
         ?state.allocation_bytes[0], 512))) { ret false; }
     val configured: message.Limits = message.limits_default();
     val request_fields: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
@@ -958,7 +969,7 @@ test "laurel.app: an admitted request reaches the assembled observer" {
                 view.view("orders index", 12)))
         || unstartable.request_context.bound || sink.start_calls != 0
         || active_request_count(?app) != 0 || !can_accept(?app)
-        || !cancel.destroy(?unstartable.scope)) { ret 4; }
+        || !operation_ok(cancel.destroy(?unstartable.scope))) { ret 4; }
 
     var completed: RequestFixture;
     if (!request_fixture(?completed, 101, view.view("/orders", 7))) { ret 4; }
@@ -975,9 +986,9 @@ test "laurel.app: an admitted request reaches the assembled observer" {
         ret 6;
     }
     if (!release_context(?app, ?completed.request_context,
-        Termination{outcome: responded, reason: cancel.ACTIVE, status: 200,
+        Termination{outcome: responded, reason: cancel.Reason.active{}, status: 200,
             transfer: completed.exchange.completion, now_ns: 3})
-        || !cancel.destroy(?completed.scope)) { ret 7; }
+        || !operation_ok(cancel.destroy(?completed.scope))) { ret 7; }
     if (sink.start_calls != 1 || sink.finish_calls != 1 || sink.error_calls != 0
         || sink.status != 200 || sink.outcome != observability.OUTCOME_COMPLETED
         || sink.route_len != 12 || sink.label_len != 1) { ret 7; }
@@ -995,9 +1006,9 @@ test "laurel.app: an admitted request reaches the assembled observer" {
         ?faulted.request_context);
     if (refused.status != middleware.EXECUTION_ERROR_RENDERED) { ret 10; }
     if (!release_context(?app, ?faulted.request_context,
-        Termination{outcome: refused, reason: cancel.ACTIVE, status: 404,
+        Termination{outcome: refused, reason: cancel.Reason.active{}, status: 404,
             transfer: faulted.exchange.completion, now_ns: 3})
-        || !cancel.destroy(?faulted.scope)) { ret 11; }
+        || !operation_ok(cancel.destroy(?faulted.scope))) { ret 11; }
     if (sink.start_calls != 2 || sink.finish_calls != 1 || sink.error_calls != 1
         || sink.status != 404 || sink.kind != error.NOT_FOUND
         || sink.outcome != observability.OUTCOME_FAILED) { ret 11; }
@@ -1008,14 +1019,14 @@ test "laurel.app: an admitted request reaches the assembled observer" {
         fixture_admission(?stopped, 103, view.view("request-103", 11),
             view.view(nil, 0)))
         || sink.start_calls != 3 || sink.sequence != 3) { ret 13; }
-    if (!cancel.cancel(?stopped.scope)) { ret 14; }
+    if (!transition_ok(cancel.cancel(?stopped.scope))) { ret 14; }
     val abandoned: middleware.Outcome = execute(?app,
         handler.Handler{ctx: nil, call: test_handler}, ?stopped.request_context);
     if (abandoned.status != middleware.EXECUTION_CANCELLED) { ret 15; }
     if (!release_context(?app, ?stopped.request_context,
         Termination{outcome: abandoned, reason: cancel.reason(?stopped.scope),
             status: 408, transfer: stopped.exchange.completion, now_ns: 3})
-        || !cancel.destroy(?stopped.scope)) { ret 16; }
+        || !operation_ok(cancel.destroy(?stopped.scope))) { ret 16; }
     if (sink.start_calls != 3 || sink.finish_calls != 2 || sink.error_calls != 1
         || sink.status != 408
         || sink.outcome != observability.OUTCOME_CANCELLED) { ret 16; }
@@ -1036,14 +1047,14 @@ test "laurel.app: an admitted request reaches the assembled observer" {
         ?undescribed.request_context);
     # a host clock that goes backwards cannot describe the request it served
     if (release_context(?app, ?undescribed.request_context,
-            Termination{outcome: undescribed_out, reason: cancel.ACTIVE,
+            Termination{outcome: undescribed_out, reason: cancel.Reason.active{},
                 status: 200, transfer: undescribed.exchange.completion,
                 now_ns: 5})
         || sink.finish_calls != 2 || sink.error_calls != 2
         || sink.outcome != observability.OUTCOME_UNREPORTED
         || sink.kind != error.INTERNAL
         || active_request_count(?app) != 0 || !can_accept(?app)
-        || !cancel.destroy(?undescribed.scope)) { ret 18; }
+        || !operation_ok(cancel.destroy(?undescribed.scope))) { ret 18; }
 
     # an outcome outside the execution vocabulary cannot be described either
     var unsettled: RequestFixture;
@@ -1057,12 +1068,12 @@ test "laurel.app: an admitted request reaches the assembled observer" {
                 app_error: error.make(error.INTERNAL, 500, "internal server error",
                     "unmeasured", false),
                 render_error: error.render_failure("unmeasured")},
-                reason: cancel.ACTIVE, status: 0,
+                reason: cancel.Reason.active{}, status: 0,
                 transfer: unsettled.exchange.completion, now_ns: 3})
         || sink.finish_calls != 2 || sink.error_calls != 3
         || sink.outcome != observability.OUTCOME_UNREPORTED
         || active_request_count(?app) != 0 || !can_accept(?app)
-        || !cancel.destroy(?unsettled.scope)) { ret 20; }
+        || !operation_ok(cancel.destroy(?unsettled.scope))) { ret 20; }
 
     if (drain(?app, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_OK
         || stop(?app).status != lifecycle.TRANSITION_OK || !release(?app)) {

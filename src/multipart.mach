@@ -15,6 +15,10 @@ use http.core.field;
 use laurel.error;
 use laurel.upload;
 
+
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}
 pub val MAX_BOUNDARY_BYTES: usize = 70;
 pub val MAX_NESTING: usize = 8;
 
@@ -2740,7 +2744,7 @@ test "laurel.multipart: body adapter spans reader and storage pending work" {
     if (!init(?decoder, view.view("r", 1), storage, test_limits(),
             test_store(?store_state), ?uploader)) { ret 1; }
     var scope: cancel.Scope;
-    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) { ret 2; }
+    if (!operation_ok(cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0}))) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
     val text: str = "--r\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n\r\ndata\r\n--r--\r\n";
@@ -2766,7 +2770,7 @@ test "laurel.multipart: body adapter spans reader and storage pending work" {
         store_state.len != 4) { ret 6; }
     if (body_state.release_calls != 1 ||
         !body.reader_terminal_state(?reader)) { ret 7; }
-    if (!cancel.destroy(?scope)) { ret 8; }
+    if (!operation_ok(cancel.destroy(?scope))) { ret 8; }
     ret 0;
 }
 
@@ -2784,7 +2788,7 @@ test "laurel.multipart: body rejection settles exactly once" {
     if (!init(?decoder, view.view("r", 1), storage, test_limits(),
             test_store(?store_state), ?uploader)) { ret 1; }
     var scope: cancel.Scope;
-    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) { ret 2; }
+    if (!operation_ok(cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0}))) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
     val text: str = "not-a-boundary";
@@ -2807,7 +2811,7 @@ test "laurel.multipart: body rejection settles exactly once" {
     }
     if (current.status != MALFORMED || body_state.finish_calls != 1 ||
         body_state.release_calls != 1 ||
-        !body.reader_terminal_state(?reader) || !cancel.destroy(?scope)) {
+        !body.reader_terminal_state(?reader) || !operation_ok(cancel.destroy(?scope))) {
         ret 5;
     }
     ret 0;

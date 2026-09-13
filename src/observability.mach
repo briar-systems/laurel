@@ -1,7 +1,8 @@
 # request logging and metrics event boundary
 
 use A: std.allocator;
-use O: std.types.option;
+use std.types.error.err;
+use std.types.option.opt;
 use fixed_allocator: std.allocator.fixed;
 use std.chrono.time;
 use std.sync.cancel;
@@ -21,7 +22,15 @@ use laurel.context;
 use laurel.error;
 use laurel.middleware;
 
-pub val MAX_REQUEST_ID_BYTES: usize = 64;
+
+
+
+fun fixed_ok(outcome: err[A.Error]) bool {
+    ret sel outcome.ok;
+}
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}pub val MAX_REQUEST_ID_BYTES: usize = 64;
 pub val MAX_METHOD_BYTES:     usize = 32;
 pub val MAX_TARGET_BYTES:     usize = 256;
 pub val MAX_ROUTE_NAME_BYTES: usize = 128;
@@ -498,8 +507,8 @@ pub fun cancelled(recorder: *Recorder, reason: cancel.Reason, status_code: u16,
     if (!recorder_ready(recorder)) { ret RECORD_INVALID; }
     if (!recorder.started || recorder.terminal) { ret RECORD_STATE; }
     var outcome: Outcome = OUTCOME_CANCELLED;
-    if (reason == cancel.TIMED_OUT) { outcome = OUTCOME_TIMED_OUT; }
-    or (reason != cancel.CANCELLED) { ret RECORD_INVALID; }
+    if (sel reason.timed_out) { outcome = OUTCOME_TIMED_OUT; }
+    or (!(sel reason.cancelled)) { ret RECORD_INVALID; }
     if (!settle(recorder, PHASE_FINISH, outcome, status_code, now_ns)) {
         ret RECORD_INVALID;
     }
@@ -597,10 +606,10 @@ rec Fixture {
 
 fun init_fixture(state: *Fixture, generation: u64, path: view.View,
     request_id: view.View) bool {
-    if (state == nil || !cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0})) {
+    if (state == nil || !operation_ok(cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0}))) {
         ret false;
     }
-    if (O.is_some[*u8](fixed_allocator.make(?state.allocator, ?state.allocation_state,
+    if (!fixed_ok(fixed_allocator.make(?state.allocator, ?state.allocation_state,
         ?state.allocation_bytes[0], 512))) { ret false; }
     val configured: message.Limits = message.limits_default();
     val request_fields: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
@@ -626,7 +635,7 @@ fun init_fixture(state: *Fixture, generation: u64, path: view.View,
 }
 
 fun release_fixture(state: *Fixture) bool {
-    ret context.unbind(?state.context, ?state.owner, 3) && cancel.destroy(?state.scope);
+    ret context.unbind(?state.context, ?state.owner, 3) && operation_ok(cancel.destroy(?state.scope));
 }
 
 rec Sink {
@@ -803,7 +812,7 @@ test "laurel.observability: one start and one terminal event per request" {
         status: middleware.EXECUTION_ERROR_RENDERED, action: 0,
         app_error: error.make(error.NOT_FOUND, 404, "not found", "absent", false),
         render_error: error.render_failure("none")};
-    if (observe_execution(?recorder, outcome, cancel.ACTIVE, 404, 6) != RECORD_OK
+    if (observe_execution(?recorder, outcome, cancel.Reason.active{}, 404, 6) != RECORD_OK
         || sink.errors != 1 || sink.last_phase != PHASE_ERROR
         || sink.last_outcome != OUTCOME_FAILED || sink.last_kind != error.NOT_FOUND
         || sink.last_status != 404 || sink.finishes != 1) { ret 11; }
@@ -817,7 +826,7 @@ test "laurel.observability: one start and one terminal event per request" {
         status: middleware.EXECUTION_CANCELLED, action: 0,
         app_error: error.make(error.CANCELLED, 408, "request cancelled", "stop", false),
         render_error: error.render_failure("none")};
-    if (observe_execution(?recorder, stopped, cancel.TIMED_OUT, 408, 3) != RECORD_OK
+    if (observe_execution(?recorder, stopped, cancel.Reason.timed_out{}, 408, 3) != RECORD_OK
         || sink.finishes != 2 || sink.last_outcome != OUTCOME_TIMED_OUT
         || sink.last_status != 408) { ret 15; }
     if (!release(?recorder) || !release_fixture(?cancelled_fixture)) { ret 16; }
@@ -889,6 +898,6 @@ test "laurel.observability: request fields have fixed size policies" {
     if (init_fixture(?wide, 32, view.view("/d", 2), view.view(?oversized_id[0], 80))) {
         ret 9;
     }
-    if (!cancel.destroy(?wide.scope) || !release_fixture(?state)) { ret 10; }
+    if (!operation_ok(cancel.destroy(?wide.scope)) || !release_fixture(?state)) { ret 10; }
     ret 0;
 }

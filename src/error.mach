@@ -1,8 +1,9 @@
 # application errors and fail-closed response mapping
 
 use A: std.allocator;
-use O: std.types.option;
-use R: std.types.result;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.error.err;
 use std.allocator.fixed;
 use std.chrono.time;
 use std.sync.cancel;
@@ -23,6 +24,28 @@ use http.core.status;
 use http.core.target;
 use laurel.context;
 
+
+
+
+
+fun fixed_ok(outcome: err[A.Error]) bool {
+    ret sel outcome.ok;
+}
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}
+
+fun transition_ok(outcome: cancel.Transition) bool {
+    ret (sel outcome.ok) && outcome.ok;
+}fun scope_active(scope: *cancel.Scope) bool {
+    val reason: cancel.Reason = cancel.reason(scope);
+    ret sel reason.active;
+}
+
+fun scope_cancelled(scope: *cancel.Scope) bool {
+    val reason: cancel.Reason = cancel.reason(scope);
+    ret sel reason.cancelled;
+}
 pub def Kind: u8;
 
 pub val BAD_REQUEST:  Kind = 1;
@@ -150,7 +173,7 @@ pub fun render_failure_view(failure: *RenderFailure) view.View {
 }
 
 pub def RenderFun: fun(ptr, AppError, *context.Context)
-    R.Result[u8, RenderFailure];
+    res[u8, RenderFailure];
 
 pub rec Mapper {
     ctx:    ptr;
@@ -342,20 +365,20 @@ pub fun initialize_default(renderer: *Default, limits: message.Limits,
 }
 
 fun render_default(ctx: ptr, app_error: AppError,
-    request_context: *context.Context) R.Result[u8, RenderFailure] {
+    request_context: *context.Context) res[u8, RenderFailure] {
     val renderer: *Default = ctx::*Default;
     if (!default_valid(renderer) || !context.active(request_context)
         || !context.allocator_valid(request_context.alloc)) {
-        ret R.err[u8, RenderFailure](render_failure(
-            "invalid default error renderer"));
+        ret res[u8, RenderFailure].err{render_failure(
+            "invalid default error renderer")};
     }
     val response: *message.Response = context.response(request_context);
     if (response == nil || response.committed
         || response.body_kind != message.BODY_NONE
         || response.body_reader != nil || response.body_writer != nil
         || response.fields.capacity < 2) {
-        ret R.err[u8, RenderFailure](render_failure(
-            "error response is unavailable"));
+        ret res[u8, RenderFailure].err{render_failure(
+            "error response is unavailable")};
     }
     val configured: message.Limits = renderer.limits;
     val max_public_bytes: usize = renderer.max_public_bytes;
@@ -365,42 +388,42 @@ fun render_default(ctx: ptr, app_error: AppError,
         status: response.status, fields: response.fields,
         trailers: response.trailers};
     if (!response_available(request_context, ?snapshot)) {
-        ret R.err[u8, RenderFailure](render_failure(
-            "error response changed before allocation"));
+        ret res[u8, RenderFailure].err{render_failure(
+            "error response changed before allocation")};
     }
     val selected_message: view.View = public_message(?app_error,
         max_public_bytes);
     if (!response_available(request_context, ?snapshot)) {
-        ret R.err[u8, RenderFailure](render_failure(
-            "error response changed before body allocation"));
+        ret res[u8, RenderFailure].err{render_failure(
+            "error response changed before body allocation")};
     }
-    val body_allocation: R.Result[*DefaultBody, *u8] =
+    val body_allocation: res[*DefaultBody, A.Error] =
         A.allocate[DefaultBody](snapshot.allocator, 1);
     if (!response_available(request_context, ?snapshot)) {
-        ret R.err[u8, RenderFailure](render_failure(
-            "error response changed during body allocation"));
+        ret res[u8, RenderFailure].err{render_failure(
+            "error response changed during body allocation")};
     }
-    if (R.is_err[*DefaultBody, *u8](body_allocation)) {
-        ret R.err[u8, RenderFailure](render_failure(
-            "default error body allocation failed"));
+    if (sel body_allocation.err) {
+        ret res[u8, RenderFailure].err{render_failure(
+            "default error body allocation failed")};
     }
-    val message_allocation: R.Result[*u8, *u8] =
+    val message_allocation: res[*u8, A.Error] =
         A.allocate[u8](snapshot.allocator, selected_message.len);
     if (!response_available(request_context, ?snapshot)) {
-        ret R.err[u8, RenderFailure](render_failure(
-            "error response changed during message allocation"));
+        ret res[u8, RenderFailure].err{render_failure(
+            "error response changed during message allocation")};
     }
-    if (R.is_err[*u8, *u8](message_allocation)) {
-        ret R.err[u8, RenderFailure](render_failure(
-            "default error message allocation failed"));
+    if (sel message_allocation.err) {
+        ret res[u8, RenderFailure].err{render_failure(
+            "default error message allocation failed")};
     }
-    val message_bytes: *u8 = R.unwrap_ok[*u8, *u8](message_allocation);
+    val message_bytes: *u8 = message_allocation.ok;
     var i: usize = 0;
     for (i < selected_message.len) {
         message_bytes[i] = selected_message.data[i];
         i = i + 1;
     }
-    val state: *DefaultBody = R.unwrap_ok[*DefaultBody, *u8](body_allocation);
+    val state: *DefaultBody = body_allocation.ok;
     state.message = view.view(message_bytes, selected_message.len);
     state.offset = 0;
     state.reader = body.init_reader(state::ptr, body_read, body_finish,
@@ -409,12 +432,12 @@ fun render_default(ctx: ptr, app_error: AppError,
         configured.response_body, ?response.trailers,
         snapshot.scope);
     if (!state.reader.valid) {
-        ret R.err[u8, RenderFailure](render_failure(
-            "default error body is invalid"));
+        ret res[u8, RenderFailure].err{render_failure(
+            "default error body is invalid")};
     }
     if (!response_available(request_context, ?snapshot)) {
-        ret R.err[u8, RenderFailure](render_failure(
-            "error response changed before initialization"));
+        ret res[u8, RenderFailure].err{render_failure(
+            "error response changed before initialization")};
     }
     if (!message.init_response(response, snapshot.fields.items,
         snapshot.fields.capacity, snapshot.trailers.items,
@@ -430,10 +453,10 @@ fun render_default(ctx: ptr, app_error: AppError,
             value: view.view("no-store", 8), sensitive: false}) != field.ADD_OK
         || message.set_body_reader(response, ?state.reader, configured)
             != message.RESPONSE_OK) {
-        ret R.err[u8, RenderFailure](render_failure(
-            "default error response initialization failed"));
+        ret res[u8, RenderFailure].err{render_failure(
+            "default error response initialization failed")};
     }
-    ret R.ok[u8, RenderFailure](1);
+    ret res[u8, RenderFailure].ok{1};
 }
 
 pub fun default_mapper(renderer: *Default) Mapper {
@@ -466,10 +489,10 @@ rec HostileAllocator {
     mode:               HostileMode;
 }
 
-fun hostile_allocate(ctx: ptr, size: usize, align: usize) O.Option[ptr] {
+fun hostile_allocate(ctx: ptr, size: usize, align: usize) opt[ptr] {
     val state: *HostileAllocator = ctx::*HostileAllocator;
-    if (state == nil) { ret O.none[ptr](); }
-    val allocated: O.Option[ptr] = state.backing.fn_allocate(
+    if (state == nil) { ret opt[ptr].none{}; }
+    val allocated: opt[ptr] = state.backing.fn_allocate(
         state.backing.ctx, size, align);
     state.calls = state.calls + 1;
     if (state.calls != state.mutate_call) { ret allocated; }
@@ -489,15 +512,15 @@ fun hostile_allocate(ctx: ptr, size: usize, align: usize) O.Option[ptr] {
         state.response.generation = state.response.generation + 1;
     } or (state.mode == HOSTILE_CANCEL_FAIL) {
         cancel.cancel(state.scope);
-        ret O.none[ptr]();
+        ret opt[ptr].none{};
     }
     ret allocated;
 }
 
 fun hostile_reallocate(ctx: ptr, allocation: ptr, old_size: usize,
-    new_size: usize, align: usize) O.Option[ptr] {
+    new_size: usize, align: usize) opt[ptr] {
     val state: *HostileAllocator = ctx::*HostileAllocator;
-    if (state == nil) { ret O.none[ptr](); }
+    if (state == nil) { ret opt[ptr].none{}; }
     ret state.backing.fn_reallocate(state.backing.ctx, allocation,
         old_size, new_size, align);
 }
@@ -555,8 +578,8 @@ fun hostile_fixture_init(fixture: *HostileFixture, generation: u64,
     mode: HostileMode, mutate_call: usize) bool {
     if (fixture == nil || generation == 0 || mutate_call == 0) { ret false; }
     fixture.limits = message.limits_default();
-    if (!cancel.make_root(?fixture.scope, false,
-        time.Time{sec: 0, nsec: 0})) { ret false; }
+    if (!operation_ok(cancel.make_root(?fixture.scope, false,
+        time.Time{sec: 0, nsec: 0}))) { ret false; }
     fixture.request_body = body.empty_reader(generation);
     val request_fields: field.Fields = field.init(?fixture.request_fields[0],
         1, fixture.limits.request_fields);
@@ -585,7 +608,7 @@ fun hostile_fixture_init(fixture: *HostileFixture, generation: u64,
             ?fixture.response, ?fixture.informationals[0], 4, ?fixture.scope,
             generation, fixture.limits)
         || !exchange.begin(?fixture.exchange)
-        || O.is_some[*u8](fixed.make(?fixture.backing_allocator,
+        || !fixed_ok(fixed.make(?fixture.backing_allocator,
             ?fixture.allocation_state, ?fixture.allocation_bytes[0], 4096))) {
         ret false;
     }
@@ -619,16 +642,16 @@ fun hostile_fixture_end(fixture: *HostileFixture) bool {
             && !context.unbind(?fixture.request_context, fixture::ptr, 1))) {
         ret false;
     }
-    if (cancel.reason(?fixture.scope) == cancel.ACTIVE
-        && !cancel.cancel(?fixture.scope)) { ret false; }
-    ret cancel.destroy(?fixture.scope);
+    if (scope_active(?fixture.scope)
+        && !transition_ok(cancel.cancel(?fixture.scope))) { ret false; }
+    ret operation_ok(cancel.destroy(?fixture.scope));
 }
 
 fun hostile_render(fixture: *HostileFixture,
-    renderer: *Default) R.Result[u8, RenderFailure] {
+    renderer: *Default) res[u8, RenderFailure] {
     if (fixture == nil || renderer == nil
         || !initialize_default(renderer, fixture.limits, 128)) {
-        ret R.err[u8, RenderFailure](render_failure("invalid hostile fixture"));
+        ret res[u8, RenderFailure].err{render_failure("invalid hostile fixture")};
     }
     val mapper: Mapper = default_mapper(renderer);
     ret mapper.render(mapper.ctx, make(CONFLICT, 409,
@@ -724,9 +747,9 @@ test "laurel.error: allocator callbacks cannot invalidate response mapping" {
     if (!hostile_fixture_init(?invalid_fixture, 101,
         HOSTILE_INVALIDATE, 1)) { ret 1; }
     var invalid_renderer: Default;
-    val invalidated: R.Result[u8, RenderFailure] = hostile_render(
+    val invalidated: res[u8, RenderFailure] = hostile_render(
         ?invalid_fixture, ?invalid_renderer);
-    if (!R.is_err[u8, RenderFailure](invalidated)
+    if ((sel invalidated.ok)
         || invalid_fixture.hostile.calls != 1
         || invalid_fixture.allocator.fn_allocate != nil
         || invalid_fixture.response.committed
@@ -738,9 +761,9 @@ test "laurel.error: allocator callbacks cannot invalidate response mapping" {
     if (!hostile_fixture_init(?committed_fixture, 102,
         HOSTILE_COMMIT, 2)) { ret 3; }
     var committed_renderer: Default;
-    val committed: R.Result[u8, RenderFailure] = hostile_render(
+    val committed: res[u8, RenderFailure] = hostile_render(
         ?committed_fixture, ?committed_renderer);
-    if (!R.is_err[u8, RenderFailure](committed)
+    if ((sel committed.ok)
         || committed_fixture.hostile.calls != 2
         || !committed_fixture.response.committed
         || committed_fixture.response.body_kind != message.BODY_NONE
@@ -751,9 +774,9 @@ test "laurel.error: allocator callbacks cannot invalidate response mapping" {
     if (!hostile_fixture_init(?body_fixture, 103,
         HOSTILE_BODY, 2)) { ret 5; }
     var body_renderer: Default;
-    val owned_body: R.Result[u8, RenderFailure] = hostile_render(
+    val owned_body: res[u8, RenderFailure] = hostile_render(
         ?body_fixture, ?body_renderer);
-    if (!R.is_err[u8, RenderFailure](owned_body)
+    if ((sel owned_body.ok)
         || body_fixture.hostile.calls != 2
         || body_fixture.response.committed
         || body_fixture.response.body_kind != message.BODY_READER
@@ -767,11 +790,11 @@ test "laurel.error: allocator callbacks cannot invalidate response mapping" {
     if (!hostile_fixture_init(?cancelled_fixture, 104,
         HOSTILE_CANCEL, 2)) { ret 7; }
     var cancelled_renderer: Default;
-    val cancelled: R.Result[u8, RenderFailure] = hostile_render(
+    val cancelled: res[u8, RenderFailure] = hostile_render(
         ?cancelled_fixture, ?cancelled_renderer);
-    if (!R.is_err[u8, RenderFailure](cancelled)
+    if ((sel cancelled.ok)
         || cancelled_fixture.hostile.calls != 2
-        || cancel.reason(?cancelled_fixture.scope) != cancel.CANCELLED
+        || !scope_cancelled(?cancelled_fixture.scope)
         || cancelled_fixture.response.committed
         || cancelled_fixture.response.body_kind != message.BODY_NONE
         || !hostile_sentinel_preserved(?cancelled_fixture)
@@ -781,14 +804,14 @@ test "laurel.error: allocator callbacks cannot invalidate response mapping" {
     if (!hostile_fixture_init(?failed_fixture, 108,
         HOSTILE_CANCEL_FAIL, 2)) { ret 15; }
     var failed_renderer: Default;
-    val failed: R.Result[u8, RenderFailure] = hostile_render(
+    val failed: res[u8, RenderFailure] = hostile_render(
         ?failed_fixture, ?failed_renderer);
-    if (!R.is_err[u8, RenderFailure](failed)) { ret 16; }
-    var failed_detail: RenderFailure = R.unwrap_err[u8, RenderFailure](failed);
+    if (sel failed.ok) { ret 16; }
+    var failed_detail: RenderFailure = failed.err;
     if (!view.view_eq_str(render_failure_view(?failed_detail),
             "error response changed during message allocation")
         || failed_fixture.hostile.calls != 2
-        || cancel.reason(?failed_fixture.scope) != cancel.CANCELLED
+        || !scope_cancelled(?failed_fixture.scope)
         || failed_fixture.response.committed
         || failed_fixture.response.body_kind != message.BODY_NONE
         || !hostile_sentinel_preserved(?failed_fixture)
@@ -798,9 +821,9 @@ test "laurel.error: allocator callbacks cannot invalidate response mapping" {
     if (!hostile_fixture_init(?fields_fixture, 105,
         HOSTILE_FIELDS, 2)) { ret 9; }
     var fields_renderer: Default;
-    val changed_fields: R.Result[u8, RenderFailure] = hostile_render(
+    val changed_fields: res[u8, RenderFailure] = hostile_render(
         ?fields_fixture, ?fields_renderer);
-    if (!R.is_err[u8, RenderFailure](changed_fields)
+    if ((sel changed_fields.ok)
         || fields_fixture.hostile.calls != 2
         || fields_fixture.response.fields.items
             != ?fields_fixture.replacement_fields[0]
@@ -812,9 +835,9 @@ test "laurel.error: allocator callbacks cannot invalidate response mapping" {
     if (!hostile_fixture_init(?identity_fixture, 106,
         HOSTILE_IDENTITY, 2)) { ret 11; }
     var identity_renderer: Default;
-    val changed_identity: R.Result[u8, RenderFailure] = hostile_render(
+    val changed_identity: res[u8, RenderFailure] = hostile_render(
         ?identity_fixture, ?identity_renderer);
-    if (!R.is_err[u8, RenderFailure](changed_identity)
+    if ((sel changed_identity.ok)
         || identity_fixture.hostile.calls != 2
         || identity_fixture.exchange.response
             != ?identity_fixture.alternate_response
@@ -826,9 +849,9 @@ test "laurel.error: allocator callbacks cannot invalidate response mapping" {
     if (!hostile_fixture_init(?generation_fixture, 107,
         HOSTILE_GENERATION, 2)) { ret 13; }
     var generation_renderer: Default;
-    val changed_generation: R.Result[u8, RenderFailure] = hostile_render(
+    val changed_generation: res[u8, RenderFailure] = hostile_render(
         ?generation_fixture, ?generation_renderer);
-    if (!R.is_err[u8, RenderFailure](changed_generation)
+    if ((sel changed_generation.ok)
         || generation_fixture.hostile.calls != 2
         || generation_fixture.response.generation != 108
         || generation_fixture.response.body_kind != message.BODY_NONE
