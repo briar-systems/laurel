@@ -6,7 +6,7 @@
 # be assembled without them. it has no sessions and no CSRF, so that it measures
 # the same work the Go and Rust programs do.
 
-use R: std.types.result;
+use std.types.result.res;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -80,8 +80,8 @@ fun observer_error(ctx: ptr, event: *observability.RequestEvent,
     state.failed = state.failed + 1;
 }
 
-fun service_start(ctx: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+fun service_start(ctx: ptr) res[lifecycle.CallbackStatus, view.View] {
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
 fun service_ready(ctx: ptr) lifecycle.Readiness {
@@ -89,23 +89,23 @@ fun service_ready(ctx: ptr) lifecycle.Readiness {
 }
 
 fun service_drain(ctx: ptr, deadline_ns: i64)
-    R.Result[lifecycle.CallbackStatus, view.View] {
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+    res[lifecycle.CallbackStatus, view.View] {
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
-fun service_stop(ctx: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+fun service_stop(ctx: ptr) res[lifecycle.CallbackStatus, view.View] {
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
 # one middleware that does the smallest real thing: it calls the rest of the
 # chain and then applies the framework's secure response headers. the Go and
 # Rust programs set the same headers by hand, so all three do equal work.
 fun secure_headers_middleware(ctx: ptr, next: middleware.Next,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
+    request_context: *context.Context) res[u8, error.AppError] {
     val policy: *security.HeadersPolicy = ctx::*security.HeadersPolicy;
-    val result: R.Result[u8, error.AppError] =
+    val result: res[u8, error.AppError] =
         middleware.call(next, request_context);
-    if (!R.is_err[u8, error.AppError](result) && context.active(request_context)) {
+    if ((sel result.ok) && context.active(request_context)) {
         security.apply_headers(policy, context.request(request_context),
             context.response(request_context));
     }
@@ -113,9 +113,9 @@ fun secure_headers_middleware(ctx: ptr, next: middleware.Next,
 }
 
 fun not_found(ctx: ptr, request_context: *context.Context)
-    R.Result[u8, error.AppError] {
-    ret R.err[u8, error.AppError](error.make(error.NOT_FOUND, 404, "not found",
-        "no route matched the request target", false));
+    res[u8, error.AppError] {
+    ret res[u8, error.AppError].err{error.make(error.NOT_FOUND, 404, "not found",
+        "no route matched the request target", false)};
 }
 
 pub fun fallback_handler() handler.Handler {
