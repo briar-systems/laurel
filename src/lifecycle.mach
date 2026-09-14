@@ -1,6 +1,6 @@
 # deterministic caller-driven application lifecycle
 
-use R: std.types.result;
+use std.types.result.res;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -36,10 +36,10 @@ pub val TRANSITION_FAILED:   TransitionStatus = 4;
 pub val NO_COMPONENT: usize = 18446744073709551615;
 pub val NO_DEADLINE: i64 = -1;
 
-pub def StartFun: fun(ptr) R.Result[CallbackStatus, view.View];
+pub def StartFun: fun(ptr) res[CallbackStatus, view.View];
 pub def ReadyFun: fun(ptr) Readiness;
-pub def DrainFun: fun(ptr, i64) R.Result[CallbackStatus, view.View];
-pub def StopFun: fun(ptr) R.Result[CallbackStatus, view.View];
+pub def DrainFun: fun(ptr, i64) res[CallbackStatus, view.View];
+pub def StopFun: fun(ptr) res[CallbackStatus, view.View];
 
 pub rec Lifecycle {
     ctx:   ptr;
@@ -145,14 +145,14 @@ fun record_failure(controller: *Controller, phase: State, component: usize, erro
 }
 
 fun callback_result(controller: *Controller, phase: State, component: usize,
-    result: R.Result[CallbackStatus, view.View]) Transition {
-    if (R.is_err[CallbackStatus, view.View](result)) {
-        val error: view.View = R.unwrap_err[CallbackStatus, view.View](result);
+    result: res[CallbackStatus, view.View]) Transition {
+    if (sel result.err) {
+        val error: view.View = result.err;
         record_failure(controller, phase, component, error);
         controller.state = FAILED;
         ret transition(TRANSITION_FAILED, controller, component, error);
     }
-    val status: CallbackStatus = R.unwrap_ok[CallbackStatus, view.View](result);
+    val status: CallbackStatus = result.ok;
     if (status == CALLBACK_DONE) {
         ret transition(TRANSITION_OK, controller, component, view.view(nil, 0));
     }
@@ -325,47 +325,47 @@ fun trace_push(value: usize) {
     trace_len = trace_len + 1;
 }
 
-fun test_start(context: ptr) R.Result[CallbackStatus, view.View] {
+fun test_start(context: ptr) res[CallbackStatus, view.View] {
     val service: *TestService = context::*TestService;
     service.start_calls = service.start_calls + 1;
-    if (service.fail_start) { ret R.err[CallbackStatus, view.View](view.view("start failed", 12)); }
+    if (service.fail_start) { ret res[CallbackStatus, view.View].err{view.view("start failed", 12)}; }
     if (service.start_pending > 0) {
         service.start_pending = service.start_pending - 1;
-        ret R.ok[CallbackStatus, view.View](CALLBACK_PENDING);
+        ret res[CallbackStatus, view.View].ok{CALLBACK_PENDING};
     }
     trace_push(service.id);
-    ret R.ok[CallbackStatus, view.View](CALLBACK_DONE);
+    ret res[CallbackStatus, view.View].ok{CALLBACK_DONE};
 }
 
 fun test_ready(context: ptr) Readiness {
     ret (context::*TestService).readiness;
 }
 
-fun test_drain(context: ptr, deadline_ns: i64) R.Result[CallbackStatus, view.View] {
+fun test_drain(context: ptr, deadline_ns: i64) res[CallbackStatus, view.View] {
     val service: *TestService = context::*TestService;
     service.drain_calls = service.drain_calls + 1;
-    if (service.fail_drain) { ret R.err[CallbackStatus, view.View](view.view("drain failed", 12)); }
+    if (service.fail_drain) { ret res[CallbackStatus, view.View].err{view.view("drain failed", 12)}; }
     if (service.drain_pending > 0) {
         service.drain_pending = service.drain_pending - 1;
-        ret R.ok[CallbackStatus, view.View](CALLBACK_PENDING);
+        ret res[CallbackStatus, view.View].ok{CALLBACK_PENDING};
     }
     trace_push(100 + service.id);
-    ret R.ok[CallbackStatus, view.View](CALLBACK_DONE);
+    ret res[CallbackStatus, view.View].ok{CALLBACK_DONE};
 }
 
-fun test_stop(context: ptr) R.Result[CallbackStatus, view.View] {
+fun test_stop(context: ptr) res[CallbackStatus, view.View] {
     val service: *TestService = context::*TestService;
     service.stop_calls = service.stop_calls + 1;
     if (service.fail_stop) {
         service.fail_stop = false;
-        ret R.err[CallbackStatus, view.View](view.view("stop failed", 11));
+        ret res[CallbackStatus, view.View].err{view.view("stop failed", 11)};
     }
     if (service.stop_pending > 0) {
         service.stop_pending = service.stop_pending - 1;
-        ret R.ok[CallbackStatus, view.View](CALLBACK_PENDING);
+        ret res[CallbackStatus, view.View].ok{CALLBACK_PENDING};
     }
     trace_push(200 + service.id);
-    ret R.ok[CallbackStatus, view.View](CALLBACK_DONE);
+    ret res[CallbackStatus, view.View].ok{CALLBACK_DONE};
 }
 
 fun test_items(states: *TestService, items: *Lifecycle, length: usize) {

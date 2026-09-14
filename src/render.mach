@@ -1,8 +1,9 @@
 # response rendering boundary
 
 use A: std.allocator;
-use O: std.types.option;
-use R: std.types.result;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.error.err;
 use fixed_allocator: std.allocator.fixed;
 use std.chrono.time;
 use std.sync.cancel;
@@ -22,7 +23,19 @@ use http.core.target;
 use laurel.context;
 use laurel.error;
 
-pub val MAX_MEDIA_TYPE_BYTES: usize = 96;
+
+
+
+fun fixed_ok(outcome: err[A.Error]) bool {
+    ret sel outcome.ok;
+}
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}
+
+fun transition_ok(outcome: cancel.Transition) bool {
+    ret (sel outcome.ok) && outcome.ok;
+}pub val MAX_MEDIA_TYPE_BYTES: usize = 96;
 pub val MAX_CHARSET_BYTES:    usize = 32;
 pub val MAX_CONTENT_TYPE_BYTES: usize = 138;
 
@@ -105,7 +118,7 @@ pub rec Rendered {
     generation: u64;
 }
 
-pub def RenderFun: fun(ptr, view.View, ptr) R.Result[Rendered, error.AppError];
+pub def RenderFun: fun(ptr, view.View, ptr) res[Rendered, error.AppError];
 
 pub rec Renderer {
     ctx:    ptr;
@@ -659,10 +672,10 @@ pub fun renderer_valid(renderer: *Renderer) bool {
 }
 
 pub fun render(renderer: *Renderer, name: view.View,
-    model: ptr) R.Result[Rendered, error.AppError] {
+    model: ptr) res[Rendered, error.AppError] {
     if (!renderer_valid(renderer) || name.len == 0 || !view_valid(name)) {
-        ret R.err[Rendered, error.AppError](error.make(error.INTERNAL, 500,
-            "internal server error", "invalid renderer invocation", false));
+        ret res[Rendered, error.AppError].err{error.make(error.INTERNAL, 500,
+            "internal server error", "invalid renderer invocation", false)};
     }
     ret renderer.render(renderer.ctx, name, model);
 }
@@ -670,27 +683,27 @@ pub fun render(renderer: *Renderer, name: view.View,
 # render a model and install the result, without requiring any template engine
 pub fun render_into(renderer: *Renderer, name: view.View, model: ptr,
     request_context: *context.Context,
-    configured: message.Limits) R.Result[u8, error.AppError] {
-    val rendered: R.Result[Rendered, error.AppError] = render(renderer, name, model);
-    if (R.is_err[Rendered, error.AppError](rendered)) {
-        ret R.err[u8, error.AppError](R.unwrap_err[Rendered, error.AppError](rendered));
+    configured: message.Limits) res[u8, error.AppError] {
+    val rendered: res[Rendered, error.AppError] = render(renderer, name, model);
+    if (sel rendered.err) {
+        ret res[u8, error.AppError].err{rendered.err};
     }
-    val output: Rendered = R.unwrap_ok[Rendered, error.AppError](rendered);
+    val output: Rendered = rendered.ok;
     if (output.body == nil || output.generation == 0
         || output.generation != request_context.generation
         || output.body.generation != output.generation) {
-        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-            "internal server error", "renderer returned a foreign generation", false));
+        ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+            "internal server error", "renderer returned a foreign generation", false)};
     }
     val installed: RespondStatus = respond(request_context, output.status, output.media,
         output.body, configured);
-    if (installed == RESPOND_OK) { ret R.ok[u8, error.AppError](1); }
+    if (installed == RESPOND_OK) { ret res[u8, error.AppError].ok{1}; }
     if (installed == RESPOND_CANCELLED) {
-        ret R.err[u8, error.AppError](error.make(error.CANCELLED, 408,
-            "request cancelled", "render cancelled before installation", false));
+        ret res[u8, error.AppError].err{error.make(error.CANCELLED, 408,
+            "request cancelled", "render cancelled before installation", false)};
     }
-    ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-        "internal server error", "render response installation failed", false));
+    ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+        "internal server error", "render response installation failed", false)};
 }
 
 rec Fixture {
@@ -717,10 +730,10 @@ fun fixture_limits() message.Limits {
 }
 
 fun init_fixture(state: *Fixture, generation: u64) bool {
-    if (state == nil || !cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0})) {
+    if (state == nil || !operation_ok(cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0}))) {
         ret false;
     }
-    if (O.is_some[*u8](fixed_allocator.make(?state.allocator, ?state.allocation_state,
+    if (!fixed_ok(fixed_allocator.make(?state.allocator, ?state.allocation_state,
         ?state.allocation_bytes[0], 1024))) { ret false; }
     val configured: message.Limits = fixture_limits();
     val request_fields: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
@@ -876,7 +889,7 @@ test "laurel.render: a bounded body reaches the wire without a template engine" 
     if (!body.reader_terminal_state(?content.reader)
         || content.reader.transferred != 26) { ret 8; }
     if (!context.unbind(?state.context, ?state.owner, 3)
-        || !cancel.destroy(?state.scope)) { ret 9; }
+        || !operation_ok(cancel.destroy(?state.scope))) { ret 9; }
     ret 0;
 }
 
@@ -948,7 +961,7 @@ test "laurel.render: streamed bodies suspend, resume, and cancel" {
     val second: body.Progress = body.read(?stream.reader, ?received[4], 16);
     if (second.status != body.DATA || second.count != 4
         || !same(?received[4], 4, view.view("ch1|", 4))) { ret 6; }
-    if (!cancel.cancel(?state.scope)) { ret 7; }
+    if (!transition_ok(cancel.cancel(?state.scope))) { ret 7; }
     val cancelled: body.Progress = body.read(?stream.reader, ?received[8], 16);
     if (cancelled.status != body.CANCELLED || source_state.settles != 1
         || source_state.settle_mode != body.CANCEL || source_state.produces != 2
@@ -956,7 +969,7 @@ test "laurel.render: streamed bodies suspend, resume, and cancel" {
     if (!body.reader_terminal_state(?stream.reader)) { ret 9; }
     if (context.active(?state.context)
         || !context.unbind(?state.context, ?state.owner, 3)
-        || !cancel.destroy(?state.scope)) { ret 10; }
+        || !operation_ok(cancel.destroy(?state.scope))) { ret 10; }
     ret 0;
 }
 
@@ -971,21 +984,20 @@ test "laurel.render: a renderer installs its own body with no engine coupling" {
         generation: 51, calls: 0, fail: false};
     val renderer: Renderer = Renderer{ctx: ?provider, render: test_render};
     if (!renderer_valid(?renderer)) { ret 3; }
-    val installed: R.Result[u8, error.AppError] = render_into(?renderer,
+    val installed: res[u8, error.AppError] = render_into(?renderer,
         view.view("page", 4), nil, ?state.context, fixture_limits());
-    if (R.is_err[u8, error.AppError](installed) || provider.calls != 1
-        || state.response.status != status.OK
-        || state.response.body_reader != ?content.reader) { ret 4; }
+    if (sel installed.err) { ret 4; }
+    if (provider.calls != 1 || state.response.status != status.OK || state.response.body_reader != ?content.reader) { ret 4; }
     provider.fail = true;
     var second: Fixture;
     if (!init_fixture(?second, 52)) { ret 5; }
-    val refused: R.Result[u8, error.AppError] = render_into(?renderer,
+    val refused: res[u8, error.AppError] = render_into(?renderer,
         view.view("page", 4), nil, ?second.context, fixture_limits());
-    if (!R.is_err[u8, error.AppError](refused)
+    if ((sel refused.ok)
         || second.response.fields.len != 0) { ret 6; }
     if (!context.unbind(?state.context, ?state.owner, 3)
         || !context.unbind(?second.context, ?second.owner, 3)
-        || !cancel.destroy(?state.scope) || !cancel.destroy(?second.scope)) { ret 7; }
+        || !operation_ok(cancel.destroy(?state.scope)) || !operation_ok(cancel.destroy(?second.scope))) { ret 7; }
     ret 0;
 }
 
@@ -997,13 +1009,13 @@ rec TemplateFree {
     fail:       bool;
 }
 
-fun test_render(ctx: ptr, name: view.View, model: ptr) R.Result[Rendered, error.AppError] {
+fun test_render(ctx: ptr, name: view.View, model: ptr) res[Rendered, error.AppError] {
     val state: *TemplateFree = ctx::*TemplateFree;
     state.calls = state.calls + 1;
     if (state.fail) {
-        ret R.err[Rendered, error.AppError](error.make(error.NOT_FOUND, 404,
-            "not found", "no view is registered for that name", false));
+        ret res[Rendered, error.AppError].err{error.make(error.NOT_FOUND, 404,
+            "not found", "no view is registered for that name", false)};
     }
-    ret R.ok[Rendered, error.AppError](Rendered{status: status.OK, media: state.media,
-        body: ?state.content.reader, generation: state.generation});
+    ret res[Rendered, error.AppError].ok{Rendered{status: status.OK, media: state.media,
+        body: ?state.content.reader, generation: state.generation}};
 }

@@ -18,7 +18,7 @@ use std.types.string.str;
 use std.types.string.str_len;
 use std.types.view;
 use A: std.allocator;
-use R: std.types.result;
+use std.types.result.res;
 use http.core.field;
 use http.core.message;
 use laurel.context;
@@ -27,6 +27,24 @@ use laurel.error;
 use laurel.handler;
 use laurel.middleware;
 
+
+
+
+
+fun thread_ok(outcome: thread.Operation) bool {
+    ret sel outcome.ok;
+}
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}
+
+fun transition_ok(outcome: cancel.Transition) bool {
+    ret (sel outcome.ok) && outcome.ok;
+}
+fun scope_active(scope: *cancel.Scope) bool {
+    val reason: cancel.Reason = cancel.reason(scope);
+    ret sel reason.active;
+}
 pub val MAX_SESSION_ID_BYTES: usize = 64;
 pub val MAX_SESSION_DATA_BYTES: usize = 2048;
 pub val MAX_CONTEXT_BYTES: usize = 256;
@@ -327,7 +345,7 @@ fun scope_cancelled(scope: *cancel.Scope) bool {
     if (scope == nil) { ret false; }
     if (!scope_valid(scope)) { ret true; }
     val reason: cancel.Reason = cancel.reason(scope);
-    ret reason != cancel.ACTIVE;
+    ret !(sel reason.active);
 }
 
 fun clear_public(data: *u8, len: usize) {
@@ -1031,7 +1049,7 @@ fun key_material_equal(left: *u8, right: *u8) bool {
     val equal: ^u8 = ct.eq_bytes(?left_secret[0], ?right_secret[0], 32);
     ct.zeroize(?left_secret[0], 32);
     ct.zeroize(?right_secret[0], 32);
-    if (equal:^ == 1) {
+    if (equal:>u8 == 1) {
         ct.end();
         ret true;
     }
@@ -1251,7 +1269,7 @@ fun write_u64_secret(output: *^u8, offset: usize, value: u64) {
 }
 
 fun read_u16_secret(input: *^u8, offset: usize) u16 {
-    ret ((input[offset]:^)::u16 << 8) | (input[offset + 1]:^)::u16;
+    ret ((input[offset]:>u8)::u16 << 8) | (input[offset + 1]:>u8)::u16;
 }
 
 fun read_u32_public(input: *u8, offset: usize) u32 {
@@ -1260,21 +1278,21 @@ fun read_u32_public(input: *u8, offset: usize) u32 {
 }
 
 fun read_u32_secret(input: *^u8, offset: usize) u32 {
-    ret ((input[offset]:^)::u32 << 24)
-        | ((input[offset + 1]:^)::u32 << 16)
-        | ((input[offset + 2]:^)::u32 << 8)
-        | (input[offset + 3]:^)::u32;
+    ret ((input[offset]:>u8)::u32 << 24)
+        | ((input[offset + 1]:>u8)::u32 << 16)
+        | ((input[offset + 2]:>u8)::u32 << 8)
+        | (input[offset + 3]:>u8)::u32;
 }
 
 fun read_u64_secret(input: *^u8, offset: usize) u64 {
-    ret ((input[offset]:^)::u64 << 56)
-        | ((input[offset + 1]:^)::u64 << 48)
-        | ((input[offset + 2]:^)::u64 << 40)
-        | ((input[offset + 3]:^)::u64 << 32)
-        | ((input[offset + 4]:^)::u64 << 24)
-        | ((input[offset + 5]:^)::u64 << 16)
-        | ((input[offset + 6]:^)::u64 << 8)
-        | (input[offset + 7]:^)::u64;
+    ret ((input[offset]:>u8)::u64 << 56)
+        | ((input[offset + 1]:>u8)::u64 << 48)
+        | ((input[offset + 2]:>u8)::u64 << 40)
+        | ((input[offset + 3]:>u8)::u64 << 32)
+        | ((input[offset + 4]:>u8)::u64 << 24)
+        | ((input[offset + 5]:>u8)::u64 << 16)
+        | ((input[offset + 6]:>u8)::u64 << 8)
+        | (input[offset + 7]:>u8)::u64;
 }
 
 fun time_valid_for_encode(codec: *ProtectedCodec, value: *Session,
@@ -1629,7 +1647,7 @@ fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
         ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
         ret codec_result(CODEC_AUTH_FAILED);
     }
-    if (plaintext[0]:^ != 1 || plaintext[1]:^ != 0) {
+    if (plaintext[0]:>u8 != 1 || plaintext[1]:>u8 != 0) {
         ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
         ret codec_result(CODEC_INVALID);
     }
@@ -1700,12 +1718,12 @@ fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
     }
     i = 0;
     for (i < id_len) {
-        id_output[i] = plaintext[PLAINTEXT_HEADER_BYTES + i]:^;
+        id_output[i] = plaintext[PLAINTEXT_HEADER_BYTES + i]:>u8;
         i = i + 1;
     }
     i = 0;
     for (i < data_len) {
-        data_output[i] = plaintext[PLAINTEXT_HEADER_BYTES + id_len + i]:^;
+        data_output[i] = plaintext[PLAINTEXT_HEADER_BYTES + id_len + i]:>u8;
         i = i + 1;
     }
     var decoded: Session = Session{id: view.view(id_output, id_len),
@@ -2713,47 +2731,47 @@ pub fun init_binder(binder: *Binder, manager: *Manager, clock: Clock,
 fun allocate_request(binder: *Binder,
     request_context: *context.Context) *RequestSession {
     val alloc: *A.Allocator = request_context.alloc;
-    val session_slot: R.Result[*RequestSession, *u8] =
+    val session_slot: res[*RequestSession, A.Error] =
         A.allocate[RequestSession](alloc, 1);
-    if (R.is_err[*RequestSession, *u8](session_slot)) { ret nil; }
-    val jar: R.Result[*cookie.Cookie, *u8] =
+    if (sel session_slot.err) { ret nil; }
+    val jar: res[*cookie.Cookie, A.Error] =
         A.allocate[cookie.Cookie](alloc, binder.limits.max_cookies);
-    if (R.is_err[*cookie.Cookie, *u8](jar)) { ret nil; }
-    val ids: R.Result[*u8, *u8] = A.allocate[u8](alloc, MAX_SESSION_ID_BYTES);
-    if (R.is_err[*u8, *u8](ids)) { ret nil; }
-    val data: R.Result[*u8, *u8] =
+    if (sel jar.err) { ret nil; }
+    val ids: res[*u8, A.Error] = A.allocate[u8](alloc, MAX_SESSION_ID_BYTES);
+    if (sel ids.err) { ret nil; }
+    val data: res[*u8, A.Error] =
         A.allocate[u8](alloc, binder.limits.max_data_bytes);
-    if (R.is_err[*u8, *u8](data)) { ret nil; }
-    val token: R.Result[*u8, *u8] =
+    if (sel data.err) { ret nil; }
+    val token: res[*u8, A.Error] =
         A.allocate[u8](alloc, binder.limits.max_token_bytes);
-    if (R.is_err[*u8, *u8](token)) { ret nil; }
-    val header: R.Result[*u8, *u8] =
+    if (sel token.err) { ret nil; }
+    val header: res[*u8, A.Error] =
         A.allocate[u8](alloc, binder.limits.max_header_bytes);
-    if (R.is_err[*u8, *u8](header)) { ret nil; }
+    if (sel header.err) { ret nil; }
     val request_session: *RequestSession =
-        R.unwrap_ok[*RequestSession, *u8](session_slot);
+        session_slot.ok;
     request_session.initialized = false;
     if (!init_request(request_session, binder.manager, RequestStorage{
-        jar_items: R.unwrap_ok[*cookie.Cookie, *u8](jar),
+        jar_items: jar.ok,
         jar_capacity: binder.limits.max_cookies,
-        id_bytes: R.unwrap_ok[*u8, *u8](ids),
+        id_bytes: ids.ok,
         id_capacity: MAX_SESSION_ID_BYTES,
-        data_bytes: R.unwrap_ok[*u8, *u8](data),
+        data_bytes: data.ok,
         data_capacity: binder.limits.max_data_bytes,
-        token_bytes: R.unwrap_ok[*u8, *u8](token),
+        token_bytes: token.ok,
         token_capacity: binder.limits.max_token_bytes,
-        header_bytes: R.unwrap_ok[*u8, *u8](header),
+        header_bytes: header.ok,
         header_capacity: binder.limits.max_header_bytes})) { ret nil; }
     ret request_session;
 }
 
-fun binder_failure(detail: str) R.Result[u8, error.AppError] {
-    ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-        "internal server error", detail, false));
+fun binder_failure(detail: str) res[u8, error.AppError] {
+    ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+        "internal server error", detail, false)};
 }
 
 fun bind_session(ctx: ptr, next: middleware.Next,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
+    request_context: *context.Context) res[u8, error.AppError] {
     val binder: *Binder = ctx::*Binder;
     if (binder == nil || !binder.initialized
         || !context.active(request_context)
@@ -2766,7 +2784,7 @@ fun bind_session(ctx: ptr, next: middleware.Next,
         ret binder_failure("session storage could not be allocated");
     }
     request_context.session = request_session::ptr;
-    val outcome: R.Result[u8, error.AppError] =
+    val outcome: res[u8, error.AppError] =
         middleware.call(next, request_context);
     val response: *message.Response = context.response(request_context);
     var settled: RequestStatus = REQUEST_OK;
@@ -2783,11 +2801,11 @@ fun bind_session(ctx: ptr, next: middleware.Next,
     request_context.session = nil;
     release_request(request_session);
     if (settled != REQUEST_OK
-        && !R.is_err[u8, error.AppError](outcome)) {
+        && (sel outcome.ok)) {
         if (settled == REQUEST_CONFLICT) {
-            ret R.err[u8, error.AppError](error.make(error.CONFLICT, 409,
+            ret res[u8, error.AppError].err{error.make(error.CONFLICT, 409,
                 "request conflicted", "session was modified concurrently",
-                true));
+                true)};
         }
         ret binder_failure("session could not be committed");
     }
@@ -2855,7 +2873,7 @@ fun init_request_fixture(fixture: *RequestFixture) bool {
             fixture.codec_fixture.codec, secure_cookie("laurel_session"),
             "laurel.request")
         || start_manager(?fixture.manager) != STORE_OK) { ret false; }
-    if (!cancel.make_root(?fixture.scope, false, time.Time{sec: 0, nsec: 0})) {
+    if (!operation_ok(cancel.make_root(?fixture.scope, false, time.Time{sec: 0, nsec: 0}))) {
         ret false;
     }
     fixture.request.fields = field.init(?fixture.request_items[0], 4,
@@ -3044,7 +3062,7 @@ test "laurel.session: a request reaches its session through the boundary" {
         || emitted_cookie(?fixture).len != 0
         || fixture.response.fields.len != 0) { ret 22; }
 
-    if (!release_request(?fixture.session) || !cancel.destroy(?fixture.scope)
+    if (!release_request(?fixture.session) || !operation_ok(cancel.destroy(?fixture.scope))
         || stop_manager(?fixture.manager) != STORE_OK) { ret 23; }
     ret 0;
 }
@@ -3065,7 +3083,7 @@ test "laurel.session: request storage must be disjoint and complete" {
     absent.header_bytes = nil;
     if (request_storage_valid(absent)) { ret 4; }
     if (!request_storage_valid(request_fixture_storage(?fixture))) { ret 5; }
-    if (!cancel.destroy(?fixture.scope)
+    if (!operation_ok(cancel.destroy(?fixture.scope))
         || stop_manager(?fixture.manager) != STORE_OK) { ret 6; }
     ret 0;
 }
@@ -3827,12 +3845,12 @@ test "laurel.session: stores enforce versions, generations, capacity, and releas
     loaded.generation = first_generation;
 
     var cancelled: cancel.Scope;
-    if (!cancel.make_root(?cancelled, false,
-        time.Time{sec: 0, nsec: 0}) || !cancel.cancel(?cancelled)) { ret 7; }
+    if (!operation_ok(cancel.make_root(?cancelled, false,
+        time.Time{sec: 0, nsec: 0})) || !transition_ok(cancel.cancel(?cancelled))) { ret 7; }
     var untouched: Session = value;
     if (store.load(store.ctx, value.id, 1, ?data[0], 2048, ?untouched,
         ?cancelled) != STORE_CANCELLED || untouched.generation != 0
-        || !cancel.destroy(?cancelled)) { ret 8; }
+        || !operation_ok(cancel.destroy(?cancelled))) { ret 8; }
 
     var second: Session = Session{id: view.view("beta", 4),
         data: view.view("second", 6), issued_at_unix: 1,
@@ -3900,7 +3918,7 @@ test "laurel.session: store scopes are disjoint from every operation range" {
     if (store.load(store.ctx, value.id, 1, ?data[0], 2048, ?loaded, nil)
         != STORE_OK) { ret 4; }
     var scope: cancel.Scope;
-    if (!cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) {
+    if (!operation_ok(cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0}))) {
         ret 5;
     }
     val scope_bytes: *u8 = (?scope)::*u8;
@@ -3921,7 +3939,7 @@ test "laurel.session: store scopes are disjoint from every operation range" {
             ?scope) != STORE_INVALID
         || store.reap(store.ctx, 1, scope_bytes::*usize, ?scope)
             != STORE_INVALID
-        || cancel.reason(?scope) != cancel.ACTIVE || memory.len != 1) {
+        || !scope_active(?scope) || memory.len != 1) {
         ret 7;
     }
     var unchanged: Session;
@@ -3929,7 +3947,7 @@ test "laurel.session: store scopes are disjoint from every operation range" {
             != STORE_OK
         || unchanged.version != loaded.version
         || unchanged.generation != loaded.generation
-        || !cancel.destroy(?scope) || store.stop(store.ctx) != STORE_OK) {
+        || !operation_ok(cancel.destroy(?scope)) || store.stop(store.ctx) != STORE_OK) {
         ret 8;
     }
     ret 0;
@@ -4041,7 +4059,7 @@ test "laurel.session: store lifecycle serializes with active operations" {
     if (worker.tid < 0) { ret 4; }
     for (atomic.load(?started) == 0) { atomic.spin_hint(); }
     if (store.stop(store.ctx) != STORE_OK
-        || thread.join_result(?worker) != 0 || atomic.load(?failures) != 0
+        || !thread_ok(thread.join(?worker)) || atomic.load(?failures) != 0
         || memory.active || memory.len != 0) { ret 5; }
     if (store.start(store.ctx) != STORE_OK || store.stop(store.ctx) != STORE_OK) {
         ret 6;
@@ -4119,8 +4137,8 @@ test "laurel.session: manager ownership and lifecycle fail closed" {
     thread.spawn_with(manager_transition_worker, (?second)::*u8,
         ?second_thread);
     if (first_thread.tid < 0 || second_thread.tid < 0
-        || thread.join_result(?first_thread) != 0
-        || thread.join_result(?second_thread) != 0
+        || !thread_ok(thread.join(?first_thread))
+        || !thread_ok(thread.join(?second_thread))
         || ((first.status == STORE_OK)::usize
             + (second.status == STORE_OK)::usize) != 1
         || ((first.status == STORE_INVALID)::usize
@@ -4136,8 +4154,8 @@ test "laurel.session: manager ownership and lifecycle fail closed" {
     thread.spawn_with(manager_transition_worker, (?second)::*u8,
         ?second_thread);
     if (first_thread.tid < 0 || second_thread.tid < 0
-        || thread.join_result(?first_thread) != 0
-        || thread.join_result(?second_thread) != 0
+        || !thread_ok(thread.join(?first_thread))
+        || !thread_ok(thread.join(?second_thread))
         || ((first.status == STORE_OK)::usize
             + (second.status == STORE_OK)::usize) != 1
         || ((first.status == STORE_INVALID)::usize
@@ -4178,8 +4196,8 @@ test "laurel.session: concurrent updates conflict and durable stores inject clea
     thread.spawn_with(concurrent_update, (?first)::*u8, ?first_thread);
     thread.spawn_with(concurrent_update, (?second)::*u8, ?second_thread);
     if (first_thread.tid < 0 || second_thread.tid < 0
-        || thread.join_result(?first_thread) != 0
-        || thread.join_result(?second_thread) != 0) { ret 4; }
+        || !thread_ok(thread.join(?first_thread))
+        || !thread_ok(thread.join(?second_thread))) { ret 4; }
     val successes: usize = (first.status == STORE_OK)::usize
         + (second.status == STORE_OK)::usize;
     val conflicts: usize = (first.status == STORE_CONFLICT)::usize

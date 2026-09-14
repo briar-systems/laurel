@@ -1,13 +1,13 @@
 # bounded caller-owned service providers
 
-use R: std.types.result;
+use std.types.result.res;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 use std.types.view;
 
-pub def ResolveFun: fun(ptr, view.View) R.Result[ptr, view.View];
+pub def ResolveFun: fun(ptr, view.View) res[ptr, view.View];
 
 pub rec Provider {
     ctx:     ptr;
@@ -51,19 +51,19 @@ pub fun validate(set: *Set) bool {
 }
 
 # an ok nil result means this provider does not own the key
-pub fun resolve(set: *Set, key: view.View) R.Result[ptr, view.View] {
+pub fun resolve(set: *Set, key: view.View) res[ptr, view.View] {
     if (!validate(set) || key.len == 0 || key.len > set.max_key_bytes || key.data == nil) {
-        ret R.err[ptr, view.View](view.view("invalid provider key", 20));
+        ret res[ptr, view.View].err{view.view("invalid provider key", 20)};
     }
     var i: usize = 0;
     for (i < set.len) {
-        val resolved: R.Result[ptr, view.View] = set.items[i].resolve(set.items[i].ctx, key);
-        if (R.is_err[ptr, view.View](resolved)) { ret resolved; }
-        val value: ptr = R.unwrap_ok[ptr, view.View](resolved);
+        val resolved: res[ptr, view.View] = set.items[i].resolve(set.items[i].ctx, key);
+        if (sel resolved.err) { ret resolved; }
+        val value: ptr = resolved.ok;
         if (value != nil) { ret resolved; }
         i = i + 1;
     }
-    ret R.err[ptr, view.View](view.view("provider not found", 18));
+    ret res[ptr, view.View].err{view.view("provider not found", 18)};
 }
 
 rec TestProvider {
@@ -83,12 +83,12 @@ fun view_equal(a: view.View, b: view.View) bool {
     ret true;
 }
 
-fun test_resolve(context: ptr, key: view.View) R.Result[ptr, view.View] {
+fun test_resolve(context: ptr, key: view.View) res[ptr, view.View] {
     val state: *TestProvider = context::*TestProvider;
     state.calls = state.calls + 1;
-    if (state.fail) { ret R.err[ptr, view.View](view.view("provider failed", 15)); }
-    if (view_equal(state.key, key)) { ret R.ok[ptr, view.View](state.value); }
-    ret R.ok[ptr, view.View](nil);
+    if (state.fail) { ret res[ptr, view.View].err{view.view("provider failed", 15)}; }
+    if (view_equal(state.key, key)) { ret res[ptr, view.View].ok{state.value}; }
+    ret res[ptr, view.View].ok{nil};
 }
 
 test "laurel.provider: resolution is ordered, bounded, and explicit" {
@@ -101,15 +101,17 @@ test "laurel.provider: resolution is ordered, bounded, and explicit" {
     items[1] = Provider{ctx: (?states[1])::ptr, resolve: test_resolve};
     var set: Set;
     if (!init(?set, ?items[0], 2, 2, 8)) { ret 1; }
-    val found: R.Result[ptr, view.View] = resolve(?set, view.view("database", 8));
-    if (R.is_err[ptr, view.View](found) || R.unwrap_ok[ptr, view.View](found) != (?value)::ptr
-        || states[0].calls != 1 || states[1].calls != 1) { ret 2; }
-    val missing: R.Result[ptr, view.View] = resolve(?set, view.view("queue", 5));
-    if (!R.is_err[ptr, view.View](missing)) { ret 3; }
-    val oversized: R.Result[ptr, view.View] = resolve(?set, view.view("longer-key", 10));
-    if (!R.is_err[ptr, view.View](oversized) || states[0].calls != 2 || states[1].calls != 2) { ret 4; }
+    val found: res[ptr, view.View] = resolve(?set, view.view("database", 8));
+    if (sel found.err) { ret 2; }
+    if (found.ok != (?value)::ptr || states[0].calls != 1 || states[1].calls != 1) { ret 2; }
+    val missing: res[ptr, view.View] = resolve(?set, view.view("queue", 5));
+    if (sel missing.ok) { ret 3; }
+    val oversized: res[ptr, view.View] = resolve(?set, view.view("longer-key", 10));
+    if (sel oversized.ok) { ret 4; }
+    if (states[0].calls != 2 || states[1].calls != 2) { ret 4; }
     states[0].fail = true;
-    val failed: R.Result[ptr, view.View] = resolve(?set, view.view("database", 8));
-    if (!R.is_err[ptr, view.View](failed) || states[1].calls != 2) { ret 5; }
+    val failed: res[ptr, view.View] = resolve(?set, view.view("database", 8));
+    if (sel failed.ok) { ret 5; }
+    if (states[1].calls != 2) { ret 5; }
     ret 0;
 }

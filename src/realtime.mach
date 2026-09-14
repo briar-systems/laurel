@@ -19,6 +19,14 @@ use http.websocket;
 use http.websocket.negotiation;
 use laurel.render;
 
+
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}
+
+fun transition_ok(outcome: cancel.Transition) bool {
+    ret (sel outcome.ok) && outcome.ok;
+}
 pub val KIND_STREAM:    u8 = 1;
 pub val KIND_SSE:       u8 = 2;
 pub val KIND_WEBSOCKET: u8 = 3;
@@ -407,7 +415,7 @@ fun event_encode(sse: Event, output: *u8) usize {
 
 fun stream_scope_status(stream: *Stream) SendStatus {
     val reason: cancel.Reason = cancel.reason(stream.scope);
-    if (reason == cancel.ACTIVE) { ret SEND_OK; }
+    if (sel reason.active) { ret SEND_OK; }
     ret SEND_CANCELLED;
 }
 
@@ -765,7 +773,7 @@ fun socket_writable(socket: *Socket) SendStatus {
     if (socket.state == STATE_FAILED) { ret SEND_INVALID; }
     if (socket.state == STATE_CLOSED || socket.close_sent) { ret SEND_CLOSED; }
     val reason: cancel.Reason = cancel.reason(socket.scope);
-    if (reason != cancel.ACTIVE) { ret SEND_CANCELLED; }
+    if (!(sel reason.active)) { ret SEND_CANCELLED; }
     ret SEND_OK;
 }
 
@@ -931,7 +939,7 @@ fun fixture_limits() message.Limits {
 }
 
 fun init_fixture(state: *Fixture, generation: u64, upgrade: bool) bool {
-    if (state == nil || !cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0})) {
+    if (state == nil || !operation_ok(cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0}))) {
         ret false;
     }
     val configured: message.Limits = fixture_limits();
@@ -1051,7 +1059,7 @@ test "laurel.realtime: a slow consumer applies backpressure to a bounded stream"
         || stream.reader.transferred != 40) { ret 12; }
     if (stream_send(?stream, repeated(?payload[0], 1, 'f'), FRAME_TEXT).status
         != SEND_CLOSED) { ret 13; }
-    if (!cancel.destroy(?state.scope)) { ret 14; }
+    if (!operation_ok(cancel.destroy(?state.scope))) { ret 14; }
     ret 0;
 }
 
@@ -1103,7 +1111,7 @@ test "laurel.realtime: server-sent events frame data, identity, and heartbeats" 
         || !same(?received[58], 28, view.view("id: 42\nretry: 3000\ndata: x\n\n", 28))
         || !same(?received[86], 7, view.view(": ping\n", 7))
         || !same(?received[93], 12, view.view(": heartbeat\n", 12))) { ret 16; }
-    if (!cancel.destroy(?state.scope)) { ret 17; }
+    if (!operation_ok(cancel.destroy(?state.scope))) { ret 17; }
     ret 0;
 }
 
@@ -1140,14 +1148,14 @@ test "laurel.realtime: suspended readers resume and disconnects fail closed" {
         || stream_state(?other) != STATE_CLOSED
         || stream_send(?other, repeated(?payload[0], 1, 'q'), FRAME_TEXT).status
             != SEND_CLOSED) { ret 10; }
-    if (!cancel.cancel(?state.scope)) { ret 11; }
+    if (!transition_ok(cancel.cancel(?state.scope))) { ret 11; }
     if (stream_send(?stream, repeated(?payload[0], 1, 'y'), FRAME_TEXT).status
         != SEND_CANCELLED) { ret 12; }
     val aborted: body.Progress = body.read(?stream.reader, ?received[0], 16);
     if (aborted.status != body.CANCELLED || stream_state(?stream) != STATE_CLOSED) {
         ret 13;
     }
-    if (!cancel.destroy(?state.scope) || !cancel.destroy(?disconnected.scope)) { ret 14; }
+    if (!operation_ok(cancel.destroy(?state.scope)) || !operation_ok(cancel.destroy(?disconnected.scope))) { ret 14; }
     ret 0;
 }
 
@@ -1223,7 +1231,7 @@ test "laurel.realtime: websocket channels carry frames and close cleanly" {
     if (closed.kind != websocket.EVENT_CLOSE || closed.close_code != 1000
         || socket_state(?socket) != STATE_CLOSED
         || socket_peer_close_code(?socket) != 1000 || !socket_release(?socket)) { ret 13; }
-    if (!cancel.destroy(?state.scope)) { ret 14; }
+    if (!operation_ok(cancel.destroy(?state.scope))) { ret 14; }
     ret 0;
 }
 
@@ -1256,6 +1264,6 @@ test "laurel.realtime: websocket negotiation commits the mach-http handshake" {
     val refused: negotiation.Handshake = negotiate(?rejected.exchange, view.view(nil, 0),
         view.view(nil, 0), ?other_accept[0], 29);
     if (refused.status == negotiation.NEGOTIATED || rejected.response.committed) { ret 6; }
-    if (!cancel.destroy(?state.scope) || !cancel.destroy(?rejected.scope)) { ret 7; }
+    if (!operation_ok(cancel.destroy(?state.scope)) || !operation_ok(cancel.destroy(?rejected.scope))) { ret 7; }
     ret 0;
 }

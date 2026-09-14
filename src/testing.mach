@@ -1,8 +1,9 @@
 # in-process application test harness contract
 
 use A: std.allocator;
-use O: std.types.option;
-use R: std.types.result;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.error.err;
 use fixed_allocator: std.allocator.fixed;
 use std.chrono.time;
 use std.memory;
@@ -41,7 +42,15 @@ use laurel.session;
 use laurel.upload;
 use http_router: http.router.router;
 
-pub val DRAIN_SCRATCH_BYTES: usize = 256;
+
+
+
+fun fixed_ok(outcome: err[A.Error]) bool {
+    ret sel outcome.ok;
+}
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}pub val DRAIN_SCRATCH_BYTES: usize = 256;
 pub val DEFAULT_BODY_POLLS:  usize = 64;
 pub val NO_DEADLINE:         i64 = -1;
 
@@ -277,11 +286,11 @@ fun body_complete(ctx: ptr, token: u64, trailers: *field.Fields) body.Progress {
 fun body_release(ctx: ptr) {}
 
 fun terminal_call(ctx: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
+    request_context: *context.Context) res[u8, error.AppError] {
     val state: *RouteTerminal = ctx::*RouteTerminal;
     if (state == nil || state.routes == nil || state.fallback.call == nil) {
-        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-            "internal server error", "harness terminal handler is invalid", false));
+        ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+            "internal server error", "harness terminal handler is invalid", false)};
     }
     if (state.matched.status == router.DISPATCH_MATCH) {
         ret router.invoke(state.routes, ?state.matched, request_context);
@@ -289,7 +298,7 @@ fun terminal_call(ctx: ptr,
     if (state.matched.status == router.DISPATCH_NOT_FOUND) {
         ret state.fallback.call(state.fallback.ctx, request_context);
     }
-    ret R.err[u8, error.AppError](state.matched.app_error);
+    ret res[u8, error.AppError].err{state.matched.app_error};
 }
 
 pub fun init(harness: *Harness, application: *app.App, routes: *router.Router,
@@ -426,7 +435,7 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
         deadline = time.Time{sec: one.deadline_ns / 1000000000,
             nsec: one.deadline_ns % 1000000000};
     }
-    if (!cancel.make_root(?harness.scope, has_deadline, deadline)) { ret INVOKE_INVALID; }
+    if (!operation_ok(cancel.make_root(?harness.scope, has_deadline, deadline))) { ret INVOKE_INVALID; }
     harness.active = true;
     harness.request_body.content = one.body;
     harness.request_body.offset = 0;
@@ -455,7 +464,7 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
             harness.storage.informationals, harness.storage.informational_cap,
             ?harness.scope, generation, harness.limits)
         || !exchange.begin(?harness.exchange)
-        || O.is_some[*u8](fixed_allocator.make(?harness.allocator, ?harness.allocation,
+        || !fixed_ok(fixed_allocator.make(?harness.allocator, ?harness.allocation,
             harness.storage.arena, harness.storage.arena_bytes))) {
         harness.active = false;
         cancel.destroy(?harness.scope);
@@ -492,7 +501,7 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
     harness.clock_ns = harness.clock_ns + 1;
     val reason: cancel.Reason = cancel.reason(?harness.scope);
     var status_value: Status = INVOKE_OK;
-    if (reason != cancel.ACTIVE || outcome.status == middleware.EXECUTION_CANCELLED) {
+    if (!(sel reason.active) || outcome.status == middleware.EXECUTION_CANCELLED) {
         if (exchange.cancel_exchange(?harness.exchange) != exchange.FINISH_OK) {
             status_value = INVOKE_INVALID;
         } or {
@@ -544,7 +553,7 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
         status_value = INVOKE_INVALID;
     }
     harness.active = false;
-    if (!cancel.destroy(?harness.scope)) { status_value = INVOKE_INVALID; }
+    if (!operation_ok(cancel.destroy(?harness.scope))) { status_value = INVOKE_INVALID; }
     result.status = status_value;
     ret status_value;
 }
@@ -678,10 +687,10 @@ fun set_text(state: *HandlerState, prefix: view.View, value: u64) bool {
 }
 
 fun respond_text(state: *HandlerState,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
+    request_context: *context.Context) res[u8, error.AppError] {
     val response: *message.Response = context.response(request_context);
     if (response == nil || !render.release_fixed(?state.fixed)) {
-        ret R.err[u8, error.AppError](internal_error("response is unavailable"));
+        ret res[u8, error.AppError].err{internal_error("response is unavailable")};
     }
     if (!render.release_media(?state.media) || !render.text_plain(?state.media)
         || !render.init_fixed(?state.fixed, view.view(?state.text[0], state.text_len),
@@ -689,31 +698,31 @@ fun respond_text(state: *HandlerState,
             context.cancellation(request_context))
         || render.respond(request_context, status.OK, ?state.media,
             render.fixed_body(?state.fixed), state.limits) != render.RESPOND_OK) {
-        ret R.err[u8, error.AppError](internal_error("fixed response installation failed"));
+        ret res[u8, error.AppError].err{internal_error("fixed response installation failed")};
     }
-    ret R.ok[u8, error.AppError](handler.RESPOND);
+    ret res[u8, error.AppError].ok{handler.RESPOND};
 }
 
 fun orders_show(ctx: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
+    request_context: *context.Context) res[u8, error.AppError] {
     val state: *HandlerState = ctx::*HandlerState;
     val id: *context.Param = context.find_param(request_context, view.view("id", 2));
     if (state == nil || id == nil || id.kind != context.PARAM_U64) {
-        ret R.err[u8, error.AppError](internal_error("route parameter is missing"));
+        ret res[u8, error.AppError].err{internal_error("route parameter is missing")};
     }
     if (!set_text(state, view.view("order:", 6), id.unsigned_value)) {
-        ret R.err[u8, error.AppError](internal_error("order text does not fit"));
+        ret res[u8, error.AppError].err{internal_error("order text does not fit")};
     }
     ret respond_text(state, request_context);
 }
 
 fun upload_create(ctx: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
+    request_context: *context.Context) res[u8, error.AppError] {
     val state: *HandlerState = ctx::*HandlerState;
     val request: *message.Request = context.request(request_context);
     val scope: *cancel.Scope = context.cancellation(request_context);
     if (state == nil || request == nil || request.body == nil || scope == nil) {
-        ret R.err[u8, error.AppError](internal_error("request is unavailable"));
+        ret res[u8, error.AppError].err{internal_error("request is unavailable")};
     }
     state.body_len = 0;
     var polls: usize = 0;
@@ -721,8 +730,8 @@ fun upload_create(ctx: ptr,
         polls = polls + 1;
         val room: usize = 256 - state.body_len;
         if (room == 0) {
-            ret R.err[u8, error.AppError](error.make(error.TOO_LARGE, 413,
-                "request too large", "harness body buffer is full", false));
+            ret res[u8, error.AppError].err{error.make(error.TOO_LARGE, 413,
+                "request too large", "harness body buffer is full", false)};
         }
         var progress: body.Progress = body.read(request.body,
             ?state.body_buffer[state.body_len], room);
@@ -735,14 +744,16 @@ fun upload_create(ctx: ptr,
     }
     if (!body.reader_terminal_state(request.body)
         || body.reader_result(request.body).status != body.COMPLETE) {
-        ret R.err[u8, error.AppError](error.make(error.BAD_REQUEST, 400,
-            "malformed request body", "request body did not complete", false));
+        ret res[u8, error.AppError].err{error.make(error.BAD_REQUEST, 400,
+            "malformed request body", "request body did not complete", false)};
     }
-    val resolved: R.Result[ptr, view.View] = provider.resolve(state.providers,
+    val resolved: res[ptr, view.View] = provider.resolve(state.providers,
         view.view("counter", 7));
-    if (R.is_err[ptr, view.View](resolved)
-        || R.unwrap_ok[ptr, view.View](resolved) == nil) {
-        ret R.err[u8, error.AppError](internal_error("counter provider is unavailable"));
+    if (sel resolved.err) {
+        ret res[u8, error.AppError].err{internal_error("counter provider is unavailable")};
+    }
+    if (resolved.ok == nil) {
+        ret res[u8, error.AppError].err{internal_error("counter provider is unavailable")};
     }
     state.provider_hits = state.provider_hits + 1;
     var loaded: session.Session;
@@ -750,7 +761,7 @@ fun upload_create(ctx: ptr,
         view.view("harness-session", 15), 1, ?state.session_buffer[0], 2048, ?loaded,
         scope);
     if (found != session.STORE_OK && found != session.STORE_NOT_FOUND) {
-        ret R.err[u8, error.AppError](internal_error("session load failed"));
+        ret res[u8, error.AppError].err{internal_error("session load failed")};
     }
     var expected_version: u64 = 0;
     var record: session.Session = session.Session{
@@ -767,11 +778,11 @@ fun upload_create(ctx: ptr,
     var saved: session.SaveResult;
     if (state.store.save(state.store.ctx, ?record, expected_version, 1, ?saved, scope)
         != session.STORE_OK) {
-        ret R.err[u8, error.AppError](internal_error("session save failed"));
+        ret res[u8, error.AppError].err{internal_error("session save failed")};
     }
     state.session_saves = state.session_saves + 1;
     if (!set_text(state, view.view("stored:", 7), state.body_len::u64)) {
-        ret R.err[u8, error.AppError](internal_error("upload text does not fit"));
+        ret res[u8, error.AppError].err{internal_error("upload text does not fit")};
     }
     ret respond_text(state, request_context);
 }
@@ -797,15 +808,15 @@ fun stream_settle(ctx: ptr, mode: body.Mode) bool {
 }
 
 fun stream_show(ctx: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
+    request_context: *context.Context) res[u8, error.AppError] {
     val state: *HandlerState = ctx::*HandlerState;
     val response: *message.Response = context.response(request_context);
     if (state == nil || response == nil || !render.release_stream(?state.stream)) {
-        ret R.err[u8, error.AppError](internal_error("stream storage is busy"));
+        ret res[u8, error.AppError].err{internal_error("stream storage is busy")};
     }
     state.emitted = 0;
     if (!render.release_media(?state.media)) {
-        ret R.err[u8, error.AppError](internal_error("media storage is busy"));
+        ret res[u8, error.AppError].err{internal_error("media storage is busy")};
     }
     val source: render.Source = render.Source{ctx: state::ptr, produce: stream_produce,
         resume: stream_resume, settle: stream_settle};
@@ -814,21 +825,21 @@ fun stream_show(ctx: ptr,
             state.limits, ?response.trailers, context.cancellation(request_context))
         || render.respond(request_context, status.OK, ?state.media,
             render.stream_body(?state.stream), state.limits) != render.RESPOND_OK) {
-        ret R.err[u8, error.AppError](internal_error("stream installation failed"));
+        ret res[u8, error.AppError].err{internal_error("stream installation failed")};
     }
-    ret R.ok[u8, error.AppError](handler.RESPOND);
+    ret res[u8, error.AppError].ok{handler.RESPOND};
 }
 
 fun conflict_handler(ctx: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
-    ret R.err[u8, error.AppError](error.make(error.CONFLICT, 409, "conflict",
-        "private detail must never reach the wire", false));
+    request_context: *context.Context) res[u8, error.AppError] {
+    ret res[u8, error.AppError].err{error.make(error.CONFLICT, 409, "conflict",
+        "private detail must never reach the wire", false)};
 }
 
 fun secret_handler(ctx: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
-    ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-        "database dsn user:password@host", "private detail", false));
+    request_context: *context.Context) res[u8, error.AppError] {
+    ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+        "database dsn user:password@host", "private detail", false)};
 }
 
 fun harness_clock(ctx: ptr) i64 { ret 1000; }
@@ -855,52 +866,52 @@ fun contains(haystack: view.View, needle: str) bool {
 # the ordinary application path: a handler reaches its session through the
 # context, and never sees the binder, the manager, or a buffer
 fun session_login(ctx: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
+    request_context: *context.Context) res[u8, error.AppError] {
     val request_session: *session.RequestSession =
         session.from_context(request_context);
     if (request_session == nil) {
-        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-            "internal server error", "no session was bound", false));
+        ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+            "internal server error", "no session was bound", false)};
     }
     if (session.load(request_context, 1000) == session.REQUEST_INVALID) {
-        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-            "internal server error", "session load was refused", false));
+        ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+            "internal server error", "session load was refused", false)};
     }
     if (session.request_state(request_session) != session.SESSION_PRESENT
         && session.create_request(request_session, 600, 1000)
             != session.REQUEST_OK) {
-        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-            "internal server error", "session creation was refused", false));
+        ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+            "internal server error", "session creation was refused", false)};
     }
     if (session.write_request(request_session, view.view("user=1", 6))
         != session.REQUEST_OK) {
-        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-            "internal server error", "session write was refused", false));
+        ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+            "internal server error", "session write was refused", false)};
     }
     val response: *message.Response = context.response(request_context);
     if (response == nil) {
-        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-            "internal server error", "no response", false));
+        ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+            "internal server error", "no response", false)};
     }
     message.set_status(response, status.OK);
-    ret R.ok[u8, error.AppError](handler.RESPOND);
+    ret res[u8, error.AppError].ok{handler.RESPOND};
 }
 
 fun fallback_handler(ctx: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
-    ret R.err[u8, error.AppError](error.make(error.NOT_FOUND, 404, "not found",
-        "no route matched the request target", false));
+    request_context: *context.Context) res[u8, error.AppError] {
+    ret res[u8, error.AppError].err{error.make(error.NOT_FOUND, 404, "not found",
+        "no route matched the request target", false)};
 }
 
 fun trace_middleware(ctx: ptr, next: middleware.Next,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
+    request_context: *context.Context) res[u8, error.AppError] {
     val state: *HandlerState = ctx::*HandlerState;
     if (state == nil || state.trace_len + 2 > 16) {
-        ret R.err[u8, error.AppError](internal_error("trace overflow"));
+        ret res[u8, error.AppError].err{internal_error("trace overflow")};
     }
     state.trace[state.trace_len] = 'T';
     state.trace_len = state.trace_len + 1;
-    val result: R.Result[u8, error.AppError] = middleware.call(next, request_context);
+    val result: res[u8, error.AppError] = middleware.call(next, request_context);
     state.trace[state.trace_len] = 't';
     state.trace_len = state.trace_len + 1;
     ret result;
@@ -908,16 +919,16 @@ fun trace_middleware(ctx: ptr, next: middleware.Next,
 
 # the outermost middleware also marks the start of one traced request
 fun headers_middleware(ctx: ptr, next: middleware.Next,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
+    request_context: *context.Context) res[u8, error.AppError] {
     val state: *HandlerState = ctx::*HandlerState;
     if (state == nil) {
-        ret R.err[u8, error.AppError](internal_error("trace state is missing"));
+        ret res[u8, error.AppError].err{internal_error("trace state is missing")};
     }
     state.trace_len = 0;
     state.trace[state.trace_len] = 'H';
     state.trace_len = state.trace_len + 1;
-    val result: R.Result[u8, error.AppError] = middleware.call(next, request_context);
-    if (!R.is_err[u8, error.AppError](result) && context.active(request_context)) {
+    val result: res[u8, error.AppError] = middleware.call(next, request_context);
+    if ((sel result.ok) && context.active(request_context)) {
         state.header_calls = state.header_calls + 1;
         security.apply_headers(state.headers, context.request(request_context),
             context.response(request_context));
@@ -927,15 +938,15 @@ fun headers_middleware(ctx: ptr, next: middleware.Next,
     ret result;
 }
 
-fun counter_resolve(ctx: ptr, key: view.View) R.Result[ptr, view.View] {
-    if (key.len == 7 && key.data[0] == 'c') { ret R.ok[ptr, view.View](ctx); }
-    ret R.ok[ptr, view.View](nil);
+fun counter_resolve(ctx: ptr, key: view.View) res[ptr, view.View] {
+    if (key.len == 7 && key.data[0] == 'c') { ret res[ptr, view.View].ok{ctx}; }
+    ret res[ptr, view.View].ok{nil};
 }
 
-fun service_start(ctx: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
+fun service_start(ctx: ptr) res[lifecycle.CallbackStatus, view.View] {
     val state: *usize = ctx::*usize;
     if (state != nil) { @state = @state + 1; }
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
 fun service_ready(ctx: ptr) lifecycle.Readiness {
@@ -943,12 +954,12 @@ fun service_ready(ctx: ptr) lifecycle.Readiness {
 }
 
 fun service_drain(ctx: ptr,
-    deadline_ns: i64) R.Result[lifecycle.CallbackStatus, view.View] {
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+    deadline_ns: i64) res[lifecycle.CallbackStatus, view.View] {
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
-fun service_stop(ctx: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+fun service_stop(ctx: ptr) res[lifecycle.CallbackStatus, view.View] {
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
 rec EntropyState {
