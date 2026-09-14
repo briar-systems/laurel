@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-13
+
+### Changed
+- demo/ and doc/bench/laurel/ build on mach 5.0 against hedge v0.3.0 (#89).
+
 ## [0.9.0] - 2026-09-13
 
 ### Changed
