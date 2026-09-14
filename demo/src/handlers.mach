@@ -6,7 +6,7 @@
 # that arena is the only per-request allocation in the demo.
 
 use A: std.allocator;
-use R: std.types.result;
+use std.types.result.res;
 use std.types.bool.bool;
 use std.types.char.char;
 use std.types.bool.false;
@@ -28,6 +28,12 @@ use laurel.render;
 use laurel.session;
 use csrf: laurel.security.csrf;
 
+
+fun wall_now() time.Time {
+    val sampled: time.Clock = time.now();
+    if (sel sampled.ok) { ret sampled.ok; }
+    ret time.Time{sec: 0, nsec: 0};
+}
 pub val SESSION_LIFETIME_S: i64 = 3600;
 val FORM_FIELDS: usize = 4;
 val FORM_BYTES: usize = 512;
@@ -89,7 +95,7 @@ pub fun write_u64(value: u64, output: *u8, capacity: usize) usize {
 }
 
 fun unix_seconds() i64 {
-    ret time.time_unix_sec(time.now());
+    ret time.time_unix_sec(wall_now());
 }
 
 # laurel keeps session payloads opaque: this is the application's own encoding
@@ -142,16 +148,16 @@ fun copy_in(output: *u8, capacity: usize, offset: usize, source: view.View) usiz
 # and are released with the exchange rather than by this code.
 fun respond_bytes(request_context: *context.Context, state: *State,
     code: status.Status, json: bool, content: view.View)
-    R.Result[u8, error.AppError] {
+    res[u8, error.AppError] {
     val arena: *A.Allocator = request_context.alloc;
     if (arena == nil) {
-        ret R.err[u8, error.AppError](internal("request arena is unavailable"));
+        ret res[u8, error.AppError].err{internal("request arena is unavailable")};
     }
-    val allocated: R.Result[*Body, *u8] = A.zallocate[Body](arena, 1);
-    if (R.is_err[*Body, *u8](allocated)) {
-        ret R.err[u8, error.AppError](internal("response storage was refused"));
+    val allocated: res[*Body, A.Error] = A.zallocate[Body](arena, 1);
+    if (sel allocated.err) {
+        ret res[u8, error.AppError].err{internal("response storage was refused")};
     }
-    val holder: *Body = R.unwrap_ok[*Body, *u8](allocated);
+    val holder: *Body = allocated.ok;
     var typed: bool = false;
     if (json) { typed = render.application_json(?holder.media); }
     or { typed = render.text_html(?holder.media); }
@@ -164,22 +170,22 @@ fun respond_bytes(request_context: *context.Context, state: *State,
         || !render.init_fixed(?holder.fixed, content, response.generation,
             bound.limits, ?response.trailers,
             context.cancellation(request_context))) {
-        ret R.err[u8, error.AppError](internal("response installation failed"));
+        ret res[u8, error.AppError].err{internal("response installation failed")};
     }
     val installed: render.RespondStatus = render.respond(request_context, code,
         ?holder.media, render.fixed_body(?holder.fixed), bound.limits);
     if (installed != render.RESPOND_OK) {
-        ret R.err[u8, error.AppError](internal("response installation failed"));
+        ret res[u8, error.AppError].err{internal("response installation failed")};
     }
-    ret R.ok[u8, error.AppError](handler.RESPOND);
+    ret res[u8, error.AppError].ok{handler.RESPOND};
 }
 
 # GET /api/hello
 pub fun hello(ctx: ptr, request_context: *context.Context)
-    R.Result[u8, error.AppError] {
+    res[u8, error.AppError] {
     val state: *State = ctx::*State;
     if (state == nil) {
-        ret R.err[u8, error.AppError](internal("handler state is missing"));
+        ret res[u8, error.AppError].err{internal("handler state is missing")};
     }
     state.requests = state.requests + 1;
     ret respond_bytes(request_context, state, status.OK, true,
@@ -192,34 +198,34 @@ pub fun hello(ctx: ptr, request_context: *context.Context)
 # already a u64. a decoder that rejected the text produced a 400 without ever
 # reaching here.
 pub fun echo(ctx: ptr, request_context: *context.Context)
-    R.Result[u8, error.AppError] {
+    res[u8, error.AppError] {
     val state: *State = ctx::*State;
     val found: *context.Param = context.find_param(request_context, text("id"));
     if (state == nil || found == nil || found.kind != context.PARAM_U64) {
-        ret R.err[u8, error.AppError](internal("route parameter is missing"));
+        ret res[u8, error.AppError].err{internal("route parameter is missing")};
     }
     state.requests = state.requests + 1;
     val arena: *A.Allocator = request_context.alloc;
     if (arena == nil) {
-        ret R.err[u8, error.AppError](internal("request arena is unavailable"));
+        ret res[u8, error.AppError].err{internal("request arena is unavailable")};
     }
     val room: usize = 64;
-    val allocated: R.Result[*u8, *u8] = A.allocate[u8](arena, room);
-    if (R.is_err[*u8, *u8](allocated)) {
-        ret R.err[u8, error.AppError](internal("body storage was refused"));
+    val allocated: res[*u8, A.Error] = A.allocate[u8](arena, room);
+    if (sel allocated.err) {
+        ret res[u8, error.AppError].err{internal("body storage was refused")};
     }
-    val out: *u8 = R.unwrap_ok[*u8, *u8](allocated);
+    val out: *u8 = allocated.ok;
     var length: usize = copy_in(out, room, 0, text("{\"id\":"));
     if (length == 0) {
-        ret R.err[u8, error.AppError](internal("body did not fit"));
+        ret res[u8, error.AppError].err{internal("body did not fit")};
     }
     val digits: usize = write_u64(found.unsigned_value, ?out[length], room - length);
     if (digits == 0) {
-        ret R.err[u8, error.AppError](internal("identifier did not fit"));
+        ret res[u8, error.AppError].err{internal("identifier did not fit")};
     }
     length = copy_in(out, room, length + digits, text("}"));
     if (length == 0) {
-        ret R.err[u8, error.AppError](internal("body did not fit"));
+        ret res[u8, error.AppError].err{internal("body did not fit")};
     }
     ret respond_bytes(request_context, state, status.OK, true,
         view.view(out::*char, length));
@@ -231,25 +237,25 @@ pub fun echo(ctx: ptr, request_context: *context.Context)
 # issues a CSRF token bound to that session. the session cookie itself is
 # written by laurel's session binder middleware, not by this handler.
 pub fun form_page(ctx: ptr, request_context: *context.Context)
-    R.Result[u8, error.AppError] {
+    res[u8, error.AppError] {
     val state: *State = ctx::*State;
     if (state == nil || state.protector == nil) {
-        ret R.err[u8, error.AppError](internal("handler state is missing"));
+        ret res[u8, error.AppError].err{internal("handler state is missing")};
     }
     state.requests = state.requests + 1;
     val now: i64 = unix_seconds();
     val request_session: *session.RequestSession =
         session.from_context(request_context);
     if (request_session == nil) {
-        ret R.err[u8, error.AppError](internal("no session is bound"));
+        ret res[u8, error.AppError].err{internal("no session is bound")};
     }
     if (session.load(request_context, now) == session.REQUEST_INVALID) {
-        ret R.err[u8, error.AppError](internal("the session could not be loaded"));
+        ret res[u8, error.AppError].err{internal("the session could not be loaded")};
     }
     if (session.request_state(request_session) != session.SESSION_PRESENT
         && session.create_request(request_session, SESSION_LIFETIME_S, now)
             != session.REQUEST_OK) {
-        ret R.err[u8, error.AppError](internal("the session could not be created"));
+        ret res[u8, error.AppError].err{internal("the session could not be created")};
     }
     var visits: u64 = 1;
     val current: *session.Session =
@@ -259,7 +265,7 @@ pub fun form_page(ctx: ptr, request_context: *context.Context)
     }
     val arena: *A.Allocator = request_context.alloc;
     if (arena == nil) {
-        ret R.err[u8, error.AppError](internal("request arena is unavailable"));
+        ret res[u8, error.AppError].err{internal("request arena is unavailable")};
     }
     var stored: [24]u8;
     var stored_len: usize = copy_in(?stored[0], 24, 0, text("visits="));
@@ -267,32 +273,32 @@ pub fun form_page(ctx: ptr, request_context: *context.Context)
         24 - stored_len);
     if (session.write_request(request_session,
         view.view((?stored[0])::*char, stored_len)) != session.REQUEST_OK) {
-        ret R.err[u8, error.AppError](internal("the session could not be written"));
+        ret res[u8, error.AppError].err{internal("the session could not be written")};
     }
     val identity: *session.Session =
         session.request_session_value(request_session);
     if (identity == nil || identity.id.len == 0) {
-        ret R.err[u8, error.AppError](internal("the session has no identity"));
+        ret res[u8, error.AppError].err{internal("the session has no identity")};
     }
 
-    val issued_storage: R.Result[*u8, *u8] =
+    val issued_storage: res[*u8, A.Error] =
         A.allocate[u8](arena, csrf.TOKEN_CAPACITY);
-    if (R.is_err[*u8, *u8](issued_storage)) {
-        ret R.err[u8, error.AppError](internal("token storage was refused"));
+    if (sel issued_storage.err) {
+        ret res[u8, error.AppError].err{internal("token storage was refused")};
     }
-    val token: *u8 = R.unwrap_ok[*u8, *u8](issued_storage);
+    val token: *u8 = issued_storage.ok;
     val issued: csrf.Operation = csrf.issue(state.protector, request_context,
         identity.id, now, token, csrf.TOKEN_CAPACITY);
     if (issued.status != csrf.OK) {
-        ret R.err[u8, error.AppError](internal("a csrf token could not be issued"));
+        ret res[u8, error.AppError].err{internal("a csrf token could not be issued")};
     }
 
     val room: usize = 768;
-    val page: R.Result[*u8, *u8] = A.allocate[u8](arena, room);
-    if (R.is_err[*u8, *u8](page)) {
-        ret R.err[u8, error.AppError](internal("page storage was refused"));
+    val page: res[*u8, A.Error] = A.allocate[u8](arena, room);
+    if (sel page.err) {
+        ret res[u8, error.AppError].err{internal("page storage was refused")};
     }
-    val out: *u8 = R.unwrap_ok[*u8, *u8](page);
+    val out: *u8 = page.ok;
     var length: usize = copy_in(out, room, 0,
         text("<!doctype html><title>laurel demo</title><h1>laurel demo</h1><p>visits: "));
     length = length + write_u64(visits, ?out[length], room - length);
@@ -303,7 +309,7 @@ pub fun form_page(ctx: ptr, request_context: *context.Context)
     length = copy_in(out, room, length,
         text("\"><button type=\"submit\">send</button></form>"));
     if (length == 0) {
-        ret R.err[u8, error.AppError](internal("the page did not fit"));
+        ret res[u8, error.AppError].err{internal("the page did not fit")};
     }
     ret respond_bytes(request_context, state, status.OK, false,
         view.view(out::*char, length));
@@ -315,47 +321,56 @@ pub fun form_page(ctx: ptr, request_context: *context.Context)
 # it was issued for, and answers. laurel decodes nothing implicitly: the field
 # storage, the byte arena, and the lookup are all the application's.
 pub fun form_submit(ctx: ptr, request_context: *context.Context)
-    R.Result[u8, error.AppError] {
+    res[u8, error.AppError] {
     val state: *State = ctx::*State;
     if (state == nil || state.protector == nil) {
-        ret R.err[u8, error.AppError](internal("handler state is missing"));
+        ret res[u8, error.AppError].err{internal("handler state is missing")};
     }
     state.requests = state.requests + 1;
     val now: i64 = unix_seconds();
     val request: *message.Request = context.request(request_context);
     val arena: *A.Allocator = request_context.alloc;
     if (request == nil || request.body == nil || arena == nil) {
-        ret R.err[u8, error.AppError](internal("the request is unavailable"));
+        ret res[u8, error.AppError].err{internal("the request is unavailable")};
     }
-    val fields_storage: R.Result[*form.Field, *u8] =
+    val fields_storage: res[*form.Field, A.Error] =
         A.zallocate[form.Field](arena, FORM_FIELDS);
-    val bytes_storage: R.Result[*u8, *u8] = A.allocate[u8](arena, FORM_BYTES);
-    val read_storage: R.Result[*u8, *u8] = A.allocate[u8](arena, FORM_READ_BYTES);
-    val decoder_storage: R.Result[*form.UrlEncoded, *u8] =
+    val bytes_storage: res[*u8, A.Error] = A.allocate[u8](arena, FORM_BYTES);
+    val read_storage: res[*u8, A.Error] = A.allocate[u8](arena, FORM_READ_BYTES);
+    val decoder_storage: res[*form.UrlEncoded, A.Error] =
         A.zallocate[form.UrlEncoded](arena, 1);
-    val parser_storage: R.Result[*form.BodyParser, *u8] =
+    val parser_storage: res[*form.BodyParser, A.Error] =
         A.zallocate[form.BodyParser](arena, 1);
-    if (R.is_err[*form.Field, *u8](fields_storage)
-        || R.is_err[*u8, *u8](bytes_storage) || R.is_err[*u8, *u8](read_storage)
-        || R.is_err[*form.UrlEncoded, *u8](decoder_storage)
-        || R.is_err[*form.BodyParser, *u8](parser_storage)) {
-        ret R.err[u8, error.AppError](internal("form storage was refused"));
+    if (sel fields_storage.err) {
+        ret res[u8, error.AppError].err{internal("form storage was refused")};
+    }
+    if (sel bytes_storage.err) {
+        ret res[u8, error.AppError].err{internal("form storage was refused")};
+    }
+    if (sel read_storage.err) {
+        ret res[u8, error.AppError].err{internal("form storage was refused")};
+    }
+    if (sel decoder_storage.err) {
+        ret res[u8, error.AppError].err{internal("form storage was refused")};
+    }
+    if (sel parser_storage.err) {
+        ret res[u8, error.AppError].err{internal("form storage was refused")};
     }
     val decoder: *form.UrlEncoded =
-        R.unwrap_ok[*form.UrlEncoded, *u8](decoder_storage);
+        decoder_storage.ok;
     val parser: *form.BodyParser =
-        R.unwrap_ok[*form.BodyParser, *u8](parser_storage);
+        parser_storage.ok;
     if (!form.init_urlencoded(decoder, form.Storage{
-            fields: R.unwrap_ok[*form.Field, *u8](fields_storage),
+            fields: fields_storage.ok,
             field_capacity: FORM_FIELDS,
-            bytes: R.unwrap_ok[*u8, *u8](bytes_storage),
+            bytes: bytes_storage.ok,
             byte_capacity: FORM_BYTES},
         form.Limits{max_bytes: FORM_BYTES, max_fields: FORM_FIELDS,
             max_name_bytes: 64, max_value_bytes: 512,
             max_temporary_bytes: FORM_BYTES})
         || !form.init_body(parser, decoder, request.body,
-            R.unwrap_ok[*u8, *u8](read_storage), FORM_READ_BYTES)) {
-        ret R.err[u8, error.AppError](internal("the form decoder was refused"));
+            read_storage.ok, FORM_READ_BYTES)) {
+        ret res[u8, error.AppError].err{internal("the form decoder was refused")};
     }
     var current: form.Operation = form.poll_body(parser);
     var turns: usize = 0;
@@ -371,12 +386,12 @@ pub fun form_submit(ctx: ptr, request_context: *context.Context)
     # the host reads sockets in its own loop, so a body that has not arrived by
     # the time the handler runs cannot be waited for from inside the handler
     if (current.status == form.PENDING || current.status == form.MORE) {
-        ret R.err[u8, error.AppError](error.make(error.UNAVAILABLE, 503,
+        ret res[u8, error.AppError].err{error.make(error.UNAVAILABLE, 503,
             "request body was not ready",
-            "the request body had not arrived when the handler ran", true));
+            "the request body had not arrived when the handler ran", true)};
     }
     if (current.status != form.COMPLETE) {
-        ret R.err[u8, error.AppError](current.app_error);
+        ret res[u8, error.AppError].err{current.app_error};
     }
 
     val supplied: view.View = field_value(?current.form, text("csrf_token"));
@@ -385,45 +400,45 @@ pub fun form_submit(ctx: ptr, request_context: *context.Context)
         session.from_context(request_context);
     if (request_session == nil
         || session.load(request_context, now) == session.REQUEST_INVALID) {
-        ret R.err[u8, error.AppError](internal("the session could not be loaded"));
+        ret res[u8, error.AppError].err{internal("the session could not be loaded")};
     }
     val identity: *session.Session =
         session.request_session_value(request_session);
     if (supplied.len == 0) {
-        ret R.err[u8, error.AppError](error.make(error.FORBIDDEN, 403, "forbidden",
-            "the form carried no csrf_token field", false));
+        ret res[u8, error.AppError].err{error.make(error.FORBIDDEN, 403, "forbidden",
+            "the form carried no csrf_token field", false)};
     }
     if (identity == nil) {
-        ret R.err[u8, error.AppError](error.make(error.FORBIDDEN, 403, "forbidden",
-            "the request carried no usable session cookie", false));
+        ret res[u8, error.AppError].err{error.make(error.FORBIDDEN, 403, "forbidden",
+            "the request carried no usable session cookie", false)};
     }
     if (identity.id.len == 0) {
-        ret R.err[u8, error.AppError](error.make(error.FORBIDDEN, 403, "forbidden",
-            "the session has no identity", false));
+        ret res[u8, error.AppError].err{error.make(error.FORBIDDEN, 403, "forbidden",
+            "the session has no identity", false)};
     }
     val checked: csrf.Operation = csrf.verify(state.protector, request_context,
         identity.id, supplied, now);
     if (checked.status != csrf.OK) {
-        ret R.err[u8, error.AppError](error.make(error.FORBIDDEN, 403, "forbidden",
-            "csrf verification failed", false));
+        ret res[u8, error.AppError].err{error.make(error.FORBIDDEN, 403, "forbidden",
+            "csrf verification failed", false)};
     }
 
     val room: usize = 320;
-    val page: R.Result[*u8, *u8] = A.allocate[u8](arena, room);
-    if (R.is_err[*u8, *u8](page)) {
-        ret R.err[u8, error.AppError](internal("page storage was refused"));
+    val page: res[*u8, A.Error] = A.allocate[u8](arena, room);
+    if (sel page.err) {
+        ret res[u8, error.AppError].err{internal("page storage was refused")};
     }
-    val out: *u8 = R.unwrap_ok[*u8, *u8](page);
+    val out: *u8 = page.ok;
     var length: usize = copy_in(out, room, 0,
         text("<!doctype html><title>laurel demo</title><p>accepted: "));
     var escaped: usize = 0;
     if (render.escape_html(name, ?out[length], room - length, ?escaped)
         != render.ESCAPE_OK) {
-        ret R.err[u8, error.AppError](internal("the name could not be escaped"));
+        ret res[u8, error.AppError].err{internal("the name could not be escaped")};
     }
     length = copy_in(out, room, length + escaped, text("</p>"));
     if (length == 0) {
-        ret R.err[u8, error.AppError](internal("the page did not fit"));
+        ret res[u8, error.AppError].err{internal("the page did not fit")};
     }
     ret respond_bytes(request_context, state, status.OK, false,
         view.view(out::*char, length));

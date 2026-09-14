@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.9.1] - 2026-09-13
+
+### Changed
+- demo/ and doc/bench/laurel/ build on mach 5.0 against hedge v0.3.0 (#89).
+
+## [0.9.0] - 2026-09-13
+
+### Changed
+- Migrated to mach 5.0 and mach-std 2.0.0.
+- `laurel.router` stays on `res[u8, str]` matching `http.router`.
+- Dependencies: mach-crypto v0.9.0, mach-http v0.8.0.
+
 ## [0.8.10] - 2026-09-05
 
 All notable changes to this project will be documented in this file.

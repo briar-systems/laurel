@@ -12,7 +12,7 @@
 # kind uses, so nothing here reaches into hedge internals.
 
 use A: std.allocator;
-use R: std.types.result;
+use std.types.result.res;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -38,6 +38,12 @@ use call: hedge.dispatch.call;
 use service: hedge.service;
 use trace: hedge.telemetry.trace;
 
+
+fun monotonic_now() time.Time {
+    val sampled: time.Clock = time.monotonic();
+    if (sel sampled.ok) { ret sampled.ok; }
+    ret time.Time{sec: 0, nsec: 0};
+}
 val REQUEST_ID_BYTES: usize = 32;
 
 # a laurel handler is synchronous: it runs to completion inside one call and
@@ -176,13 +182,13 @@ fun accumulate(state: *RequestState, source: *body.Reader) bool {
         # the buffer is taken only once a body actually needs one, because a
         # bodyless GET must not spend the arena a handler is about to need
         if (state.body == nil) {
-            val buffer: R.Result[*u8, *u8] =
+            val buffer: res[*u8, A.Error] =
                 A.allocate[u8](state.arena, MAX_BUFFERED_BODY);
-            if (R.is_err[*u8, *u8](buffer)) {
+            if (sel buffer.err) {
                 state.body_failed = true;
                 ret true;
             }
-            state.body = R.unwrap_ok[*u8, *u8](buffer);
+            state.body = buffer.ok;
         }
         val room: usize = MAX_BUFFERED_BODY - state.body_len;
         if (room == 0) {
@@ -211,7 +217,7 @@ fun accumulate(state: *RequestState, source: *body.Reader) bool {
 }
 
 fun monotonic_ns() i64 {
-    ret time.time_unix_nsec(time.monotonic());
+    ret time.time_unix_nsec(monotonic_now());
 }
 
 fun hex_digit(value: u8) char {
@@ -238,11 +244,11 @@ fun render_request_id(source: *trace.Context, output: *char) bool {
 # the terminal handler laurel executes at the end of the middleware chain.
 # dispatch already ran, so this only decides what the result of dispatch means.
 fun terminal_call(ctx: ptr, request_context: *context.Context)
-    R.Result[u8, error.AppError] {
+    res[u8, error.AppError] {
     val state: *RequestState = ctx::*RequestState;
     if (state == nil || state.routes == nil || state.fallback.call == nil) {
-        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-            "internal server error", "the terminal handler is invalid", false));
+        ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+            "internal server error", "the terminal handler is invalid", false)};
     }
     if (state.matched.status == router.DISPATCH_MATCH) {
         ret router.invoke(state.routes, ?state.matched, request_context);
@@ -250,7 +256,7 @@ fun terminal_call(ctx: ptr, request_context: *context.Context)
     if (state.matched.status == router.DISPATCH_NOT_FOUND) {
         ret state.fallback.call(state.fallback.ctx, request_context);
     }
-    ret R.err[u8, error.AppError](state.matched.app_error);
+    ret res[u8, error.AppError].err{state.matched.app_error};
 }
 
 # release_context is what closes laurel's admission slot and emits the terminal

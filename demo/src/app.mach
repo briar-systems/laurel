@@ -5,7 +5,8 @@
 # every component lives and how long it lives. here that is one heap allocation
 # made before the server starts and released after it stops.
 
-use R: std.types.result;
+use std.types.error.err;
+use std.types.result.res;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -33,8 +34,18 @@ use csrf: laurel.security.csrf;
 use crypto_rand: std.crypto.rand;
 use secret: std.system.os.secret;
 use std.memory;
+use io_error: std.io.error;
 use demo.handlers;
 
+fun rand_ok(outcome: err[io_error.Error]) bool {
+    ret sel outcome.ok;
+}
+
+fun wall_now() time.Time {
+    val sampled: time.Clock = time.now();
+    if (sel sampled.ok) { ret sampled.ok; }
+    ret time.Time{sec: 0, nsec: 0};
+}
 pub val ROUTE_COUNT: usize = 4;
 val SEGMENT_COUNT: usize = 16;
 val MIDDLEWARE_COUNT: usize = 2;
@@ -142,7 +153,8 @@ fun observer_error(ctx: ptr, event: *observability.RequestEvent,
 fun entropy_fill(ctx: ptr, output: *u8, length: usize) i64 {
     val state: *EntropyState = ctx::*EntropyState;
     if (state != nil) { state.calls = state.calls + 1; }
-    ret crypto_rand.fill(output, length);
+    if (!rand_ok(crypto_rand.fill(output, length))) { ret 1; }
+    ret 0;
 }
 
 fun entropy_aliases(ctx: ptr, data: *u8, length: usize) bool {
@@ -150,7 +162,7 @@ fun entropy_aliases(ctx: ptr, data: *u8, length: usize) bool {
 }
 
 fun clock_now(ctx: ptr) i64 {
-    ret time.time_unix_sec(time.now());
+    ret time.time_unix_sec(wall_now());
 }
 
 fun init_sessions(demo: *Application) bool {
@@ -166,7 +178,7 @@ fun init_sessions(demo: *Application) bool {
     demo.keys[0].activated_at = 0;
     demo.keys[0].encode_until = 4102444800;
     demo.keys[0].decode_until = 4102444800;
-    if (crypto_rand.fill(?demo.keys[0].key[0], 32) != 0) { ret false; }
+    if (!rand_ok(crypto_rand.fill(?demo.keys[0].key[0], 32))) { ret false; }
     val nonce: session.Guard = session.memory_guard(?demo.nonce_guard);
     val replay: session.Guard = session.memory_guard(?demo.replay_guard);
     if (!session.init_key_ring(?demo.ring, ?demo.keys[0], 1, 1, 0,
@@ -219,8 +231,8 @@ pub fun init_csrf(demo: *Application, ring: *csrf.KeyRing,
             clock_skew_s: 30, require_unsafe: false});
 }
 
-fun service_start(ctx: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+fun service_start(ctx: ptr) res[lifecycle.CallbackStatus, view.View] {
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
 fun service_ready(ctx: ptr) lifecycle.Readiness {
@@ -228,23 +240,23 @@ fun service_ready(ctx: ptr) lifecycle.Readiness {
 }
 
 fun service_drain(ctx: ptr, deadline_ns: i64)
-    R.Result[lifecycle.CallbackStatus, view.View] {
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+    res[lifecycle.CallbackStatus, view.View] {
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
-fun service_stop(ctx: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+fun service_stop(ctx: ptr) res[lifecycle.CallbackStatus, view.View] {
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
 # one middleware, wrapping every request: it runs before the handler, calls the
 # rest of the chain exactly once, and applies laurel's secure response headers
 # to whatever the handler produced.
 fun secure_headers_middleware(ctx: ptr, next: middleware.Next,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
+    request_context: *context.Context) res[u8, error.AppError] {
     val policy: *security.HeadersPolicy = ctx::*security.HeadersPolicy;
-    val result: R.Result[u8, error.AppError] =
+    val result: res[u8, error.AppError] =
         middleware.call(next, request_context);
-    if (!R.is_err[u8, error.AppError](result) && context.active(request_context)) {
+    if ((sel result.ok) && context.active(request_context)) {
         security.apply_headers(policy, context.request(request_context),
             context.response(request_context));
     }
@@ -252,9 +264,9 @@ fun secure_headers_middleware(ctx: ptr, next: middleware.Next,
 }
 
 fun not_found(ctx: ptr, request_context: *context.Context)
-    R.Result[u8, error.AppError] {
-    ret R.err[u8, error.AppError](error.make(error.NOT_FOUND, 404, "not found",
-        "no route matched the request target", false));
+    res[u8, error.AppError] {
+    ret res[u8, error.AppError].err{error.make(error.NOT_FOUND, 404, "not found",
+        "no route matched the request target", false)};
 }
 
 # the handler laurel runs when dispatch matched no route
