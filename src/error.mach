@@ -351,6 +351,7 @@ fun response_available(request_context: *context.Context,
     ret true;
 }
 
+# initialize default error renderer using host limits
 pub fun initialize_default(renderer: *Default, limits: message.Limits,
     max_public_bytes: usize) bool {
     if (renderer == nil || renderer.initialized) { ret false; }
@@ -380,7 +381,7 @@ fun render_default(ctx: ptr, app_error: AppError,
         ret res[u8, RenderFailure].err{render_failure(
             "error response is unavailable")};
     }
-    val configured:       message.Limits   = renderer.limits;
+    val configured:       message.Limits   = context.limits(request_context);
     val max_public_bytes: usize            = renderer.max_public_bytes;
     var snapshot:         ResponseSnapshot = ResponseSnapshot{
         response: response, allocator: request_context.alloc,
@@ -584,10 +585,10 @@ rec HostileFixture {
     request_context:           context.Context;
 }
 
-fun hostile_fixture_init(fixture: *HostileFixture, generation: u64,
-    mode: HostileMode, mutate_call: usize) bool {
+fun hostile_fixture_init_with_limits(fixture: *HostileFixture, generation: u64,
+    mode: HostileMode, mutate_call: usize, limits: message.Limits) bool {
     if (fixture == nil || generation == 0 || mutate_call == 0) { ret false; }
-    fixture.limits = message.limits_default();
+    fixture.limits = limits;
     if (!operation_ok(cancel.make_root(?fixture.scope, false,
         time.Time{sec: 0, nsec: 0}))) { ret false; }
     fixture.request_body = body.empty_reader(generation);
@@ -647,6 +648,12 @@ fun hostile_fixture_init(fixture: *HostileFixture, generation: u64,
         ?fixture.allocator, fixture::ptr, 1, nil,
         view.view("request", 7), 64)) { ret false; }
     ret true;
+}
+
+fun hostile_fixture_init(fixture: *HostileFixture, generation: u64,
+    mode: HostileMode, mutate_call: usize) bool {
+    ret hostile_fixture_init_with_limits(fixture, generation, mode, mutate_call,
+        message.limits_default());
 }
 
 fun hostile_fixture_end(fixture: *HostileFixture) bool {
@@ -870,5 +877,28 @@ test "laurel.error: allocator callbacks cannot invalidate response mapping" {
         || generation_fixture.response.body_kind != message.BODY_NONE
         || !hostile_sentinel_preserved(?generation_fixture)
         || !hostile_fixture_end(?generation_fixture)) { ret 14; }
+    ret 0;
+}
+
+test "laurel.error: default error renderer uses host limits and commits" {
+    var tight_limits: message.Limits = message.limits_default();
+    tight_limits.response_body = body.limits(16777216, 8192, 2048);
+    var fixture: HostileFixture;
+    if (!hostile_fixture_init_with_limits(?fixture, 108, 0, 999, tight_limits)) { ret 1; }
+    fixture.response.fields.len = 0;
+    fixture.response.fields.bytes = 0;
+    var renderer: Default;
+    if (!initialize_default(?renderer, message.limits_default(), 128)) { ret 2; }
+    val mapper: Mapper = default_mapper(?renderer);
+    val rendered: res[u8, RenderFailure] = mapper.render(mapper.ctx,
+        make(NOT_FOUND, 404, "not found", "private detail", false), ?fixture.request_context);
+    if (sel rendered.err) { ret 3; }
+    val reader: *body.Reader = fixture.response.body_reader;
+    if (reader == nil || reader.limits.max_chunk_bytes != 8192
+        || reader.limits.max_bytes != 16777216) { ret 4; }
+    val committed: message.ResponseStatus = message.commit_response(?fixture.response,
+        method.GET, tight_limits);
+    if (committed != message.RESPONSE_OK) { ret 5; }
+    if (!hostile_fixture_end(?fixture)) { ret 6; }
     ret 0;
 }
