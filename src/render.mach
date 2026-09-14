@@ -1,18 +1,5 @@
 # response rendering boundary
 
-use A: std.allocator;
-use std.types.option.opt;
-use std.types.result.res;
-use std.types.error.err;
-use fixed_allocator: std.allocator.fixed;
-use std.chrono.time;
-use std.sync.cancel;
-use std.text.utf8;
-use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
-use std.types.size.usize;
-use std.types.view;
 use http.core.body;
 use http.core.exchange;
 use http.core.field;
@@ -22,21 +9,34 @@ use http.core.status;
 use http.core.target;
 use laurel.context;
 use laurel.error;
-
-
-
+use A:               std.allocator;
+use fixed_allocator: std.allocator.fixed;
+use std.chrono.time;
+use std.sync.cancel;
+use std.text.utf8;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.view;
 
 fun fixed_ok(outcome: err[A.Error]) bool {
     ret sel outcome.ok;
 }
+
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
 
 fun transition_ok(outcome: cancel.Transition) bool {
     ret (sel outcome.ok) && outcome.ok;
-}pub val MAX_MEDIA_TYPE_BYTES: usize = 96;
-pub val MAX_CHARSET_BYTES:    usize = 32;
+}
+
+pub val MAX_MEDIA_TYPE_BYTES:   usize = 96;
+pub val MAX_CHARSET_BYTES:      usize = 32;
 pub val MAX_CONTENT_TYPE_BYTES: usize = 138;
 
 val CHARSET_PREFIX_BYTES: usize = 10;
@@ -155,7 +155,7 @@ fun media_type_valid(value: view.View) bool {
     if (slash == 0 || slash + 1 >= value.len) { ret false; }
     ret token_valid(view.view(value.data, slash), MAX_MEDIA_TYPE_BYTES)
         && token_valid(view.view(?value.data[slash + 1], value.len - slash - 1),
-            MAX_MEDIA_TYPE_BYTES);
+        MAX_MEDIA_TYPE_BYTES);
 }
 
 pub fun init_media(media: *Media, media_type: view.View, charset: view.View) bool {
@@ -163,28 +163,28 @@ pub fun init_media(media: *Media, media_type: view.View, charset: view.View) boo
         || !view_valid(charset) || charset.len > MAX_CHARSET_BYTES
         || (charset.len != 0 && !token_valid(charset, MAX_CHARSET_BYTES))) { ret false; }
     var length: usize = media_type.len;
-    if (charset.len != 0) { length = length + CHARSET_PREFIX_BYTES + charset.len; }
+    if (charset.len != 0)                { length = length + CHARSET_PREFIX_BYTES + charset.len; }
     if (length > MAX_CONTENT_TYPE_BYTES) { ret false; }
     var i: usize = 0;
     for (i < media_type.len) {
         media.header[i] = media_type.data[i];
-        i = i + 1;
+        i               = i + 1;
     }
     if (charset.len != 0) {
         val prefix: view.View = view.view("; charset=", CHARSET_PREFIX_BYTES);
-        var j: usize = 0;
+        var j:      usize     = 0;
         for (j < CHARSET_PREFIX_BYTES) {
             media.header[media_type.len + j] = prefix.data[j];
-            j = j + 1;
+            j                                = j + 1;
         }
         j = 0;
         for (j < charset.len) {
             media.header[media_type.len + CHARSET_PREFIX_BYTES + j] = charset.data[j];
-            j = j + 1;
+            j                                                       = j + 1;
         }
     }
-    media.header_len = length;
-    media.type_len = media_type.len;
+    media.header_len  = length;
+    media.type_len    = media_type.len;
     media.charset_len = charset.len;
     media.initialized = true;
     ret true;
@@ -206,8 +206,8 @@ pub fun media_valid(media: *Media) bool {
 pub fun release_media(media: *Media) bool {
     if (media == nil) { ret false; }
     media.initialized = false;
-    media.header_len = 0;
-    media.type_len = 0;
+    media.header_len  = 0;
+    media.type_len    = 0;
     media.charset_len = 0;
     ret true;
 }
@@ -244,7 +244,7 @@ fun html_replacement(codepoint: utf8.Codepoint) view.View {
     if (codepoint == '<') { ret view.view("&lt;", 4); }
     if (codepoint == '>') { ret view.view("&gt;", 4); }
     if (codepoint == '"') { ret view.view("&quot;", 6); }
-    if (codepoint == 39) { ret view.view("&#x27;", 6); }
+    if (codepoint == 39)  { ret view.view("&#x27;", 6); }
     ret view.view(nil, 0);
 }
 
@@ -264,12 +264,12 @@ fun escape_unicode(codepoint: utf8.Codepoint, output: *u8) {
 
 fun json_short(codepoint: utf8.Codepoint) u8 {
     if (codepoint == '"') { ret '"'; }
-    if (codepoint == 92) { ret 92; }
-    if (codepoint == 8) { ret 'b'; }
-    if (codepoint == 12) { ret 'f'; }
-    if (codepoint == 10) { ret 'n'; }
-    if (codepoint == 13) { ret 'r'; }
-    if (codepoint == 9) { ret 't'; }
+    if (codepoint == 92)  { ret 92; }
+    if (codepoint == 8)   { ret 'b'; }
+    if (codepoint == 12)  { ret 'f'; }
+    if (codepoint == 10)  { ret 'n'; }
+    if (codepoint == 13)  { ret 'r'; }
+    if (codepoint == 9)   { ret 't'; }
     ret 0;
 }
 
@@ -281,35 +281,43 @@ fun json_unicode(codepoint: utf8.Codepoint) bool {
 # html: reject every control code point except tab, newline, and carriage return
 fun html_size(codepoint: utf8.Codepoint, consumed: usize, size: *usize) bool {
     if (codepoint < 0x20 && codepoint != 9 && codepoint != 10 && codepoint != 13) { ret false; }
-    if (codepoint == 0x7f || (codepoint >= 0x80 && codepoint <= 0x9f)) { ret false; }
+    if (codepoint == 0x7f || (codepoint >= 0x80 && codepoint <= 0x9f))            { ret false; }
     val replacement: view.View = html_replacement(codepoint);
-    if (replacement.len != 0) { @size = replacement.len; } or { @size = consumed; }
+    if (replacement.len != 0) { @size = replacement.len; }
+    or                        { @size = consumed; }
     ret true;
 }
 
 fun json_size(codepoint: utf8.Codepoint, consumed: usize, size: *usize) bool {
-    if (json_short(codepoint) != 0) { @size = 2; ret true; }
-    if (json_unicode(codepoint)) { @size = 6; ret true; }
+    if (json_short(codepoint) != 0) {
+        @size = 2;
+        ret true;
+    }
+    if (json_unicode(codepoint)) {
+        @size = 6;
+        ret true;
+    }
     @size = consumed;
     ret true;
 }
 
 fun escaped_length(input: view.View, json: bool, needed: *usize) EscapeStatus {
     var total: usize = 0;
-    var i: usize = 0;
+    var i:     usize = 0;
     for (i < input.len) {
         var codepoint: utf8.Codepoint;
-        val consumed: usize = utf8.decode(?input.data[i], input.len - i, ?codepoint);
+        val consumed:  usize = utf8.decode(?input.data[i], input.len - i, ?codepoint);
         if (consumed == 0) { ret ESCAPE_INVALID; }
         var size: usize = 0;
         if (json) {
             if (!json_size(codepoint, consumed, ?size)) { ret ESCAPE_INVALID; }
-        } or {
+        }
+        or {
             if (!html_size(codepoint, consumed, ?size)) { ret ESCAPE_INVALID; }
         }
         if (size > ~(0::usize) - total) { ret ESCAPE_CAPACITY; }
         total = total + size;
-        i = i + consumed;
+        i     = i + consumed;
     }
     @needed = total;
     ret ESCAPE_OK;
@@ -317,32 +325,34 @@ fun escaped_length(input: view.View, json: bool, needed: *usize) EscapeStatus {
 
 fun escape_into(input: view.View, json: bool, output: *u8) usize {
     var cursor: usize = 0;
-    var i: usize = 0;
+    var i:      usize = 0;
     for (i < input.len) {
         var codepoint: utf8.Codepoint;
-        val consumed: usize = utf8.decode(?input.data[i], input.len - i, ?codepoint);
-        var handled: bool = false;
+        val consumed:  usize = utf8.decode(?input.data[i], input.len - i, ?codepoint);
+        var handled:   bool  = false;
         if (json) {
             val short: u8 = json_short(codepoint);
             if (short != 0) {
-                output[cursor] = 92;
+                output[cursor]     = 92;
                 output[cursor + 1] = short;
-                cursor = cursor + 2;
-                handled = true;
-            } or (json_unicode(codepoint)) {
+                cursor             = cursor + 2;
+                handled            = true;
+            }
+            or (json_unicode(codepoint)) {
                 escape_unicode(codepoint, ?output[cursor]);
-                cursor = cursor + 6;
+                cursor  = cursor + 6;
                 handled = true;
             }
-        } or {
+        }
+        or {
             val replacement: view.View = html_replacement(codepoint);
             if (replacement.len != 0) {
                 var j: usize = 0;
                 for (j < replacement.len) {
                     output[cursor + j] = replacement.data[j];
-                    j = j + 1;
+                    j                  = j + 1;
                 }
-                cursor = cursor + replacement.len;
+                cursor  = cursor + replacement.len;
                 handled = true;
             }
         }
@@ -350,7 +360,7 @@ fun escape_into(input: view.View, json: bool, output: *u8) usize {
             var j: usize = 0;
             for (j < consumed) {
                 output[cursor + j] = input.data[i + j];
-                j = j + 1;
+                j                  = j + 1;
             }
             cursor = cursor + consumed;
         }
@@ -364,11 +374,11 @@ fun escape(input: view.View, json: bool, output: *u8, capacity: usize,
     if (written == nil) { ret ESCAPE_INVALID; }
     @written = 0;
     if (!view_valid(input) || (capacity != 0 && output == nil)) { ret ESCAPE_INVALID; }
-    var needed: usize = 0;
+    var needed:   usize        = 0;
     val measured: EscapeStatus = escaped_length(input, json, ?needed);
-    if (measured != ESCAPE_OK) { ret measured; }
-    if (needed > capacity) { ret ESCAPE_CAPACITY; }
-    if (needed == 0) { ret ESCAPE_OK; }
+    if (measured != ESCAPE_OK)                      { ret measured; }
+    if (needed > capacity)                          { ret ESCAPE_CAPACITY; }
+    if (needed == 0)                                { ret ESCAPE_OK; }
     if (escape_into(input, json, output) != needed) { ret ESCAPE_INVALID; }
     @written = needed;
     ret ESCAPE_OK;
@@ -419,7 +429,7 @@ pub fun chunk_failed() Chunk {
 fun body_limits_fit(length: u64, configured: body.Limits) bool {
     if (configured.max_chunk_bytes == 0 || configured.max_chunks == 0
         || length > configured.max_bytes) { ret false; }
-    val chunks: u64 = length / configured.max_chunk_bytes::u64;
+    val chunks:    u64 = length / configured.max_chunk_bytes::u64;
     val remainder: u64 = length % configured.max_chunk_bytes::u64;
     ret chunks < configured.max_chunks::u64
         || (chunks == configured.max_chunks::u64 && remainder == 0);
@@ -435,11 +445,11 @@ fun fixed_read(ctx: ptr, output: *u8, capacity: usize,
     if (state.offset == state.content.len) { ret body.complete(body.REUSE_ALLOWED); }
     var count: usize = state.content.len - state.offset;
     if (count > capacity) { count = capacity; }
-    if (count == 0) { ret body.failed("empty fixed render read", body.REUSE_FORBIDDEN); }
+    if (count == 0)       { ret body.failed("empty fixed render read", body.REUSE_FORBIDDEN); }
     var i: usize = 0;
     for (i < count) {
         output[i] = state.content.data[state.offset + i];
-        i = i + 1;
+        i         = i + 1;
     }
     state.offset = state.offset + count;
     ret body.data(count);
@@ -454,8 +464,8 @@ fun fixed_finish(ctx: ptr, mode: body.Mode, trailers: *field.Fields) body.Progre
         state.offset = state.content.len;
         ret body.complete(body.REUSE_ALLOWED);
     }
-    if (mode == body.REJECT) { ret body.rejected(body.REUSE_ALLOWED); }
-    if (mode == body.CANCEL) { ret body.cancelled(body.REUSE_FORBIDDEN); }
+    if (mode == body.REJECT)  { ret body.rejected(body.REUSE_ALLOWED); }
+    if (mode == body.CANCEL)  { ret body.cancelled(body.REUSE_FORBIDDEN); }
     if (mode == body.TIMEOUT) { ret body.timed_out(body.REUSE_FORBIDDEN); }
     ret body.failed("invalid fixed render finish", body.REUSE_FORBIDDEN);
 }
@@ -471,11 +481,11 @@ pub fun init_fixed(state: *Fixed, content: view.View, generation: u64,
     if (state == nil || state.initialized || generation == 0 || !view_valid(content)
         || trailers == nil || scope == nil
         || !body_limits_fit(content.len::u64, configured.response_body)) { ret false; }
-    state.content = content;
-    state.offset = 0;
-    state.generation = generation;
+    state.content     = content;
+    state.offset      = 0;
+    state.generation  = generation;
     state.initialized = true;
-    state.reader = body.init_reader(state::ptr, fixed_read, fixed_finish, fixed_complete,
+    state.reader      = body.init_reader(state::ptr, fixed_read, fixed_finish, fixed_complete,
         fixed_release, body.OWNER_APPLICATION, generation, true, content.len::u64,
         configured.response_body, trailers, scope);
     if (!state.reader.valid) {
@@ -492,11 +502,11 @@ pub fun fixed_body(state: *Fixed) *body.Reader {
 
 # storage is reusable only once its body can no longer be read
 pub fun release_fixed(state: *Fixed) bool {
-    if (state == nil) { ret false; }
+    if (state == nil)                                                    { ret false; }
     if (state.initialized && !body.reader_terminal_state(?state.reader)) { ret false; }
     state.initialized = false;
-    state.offset = 0;
-    state.generation = 0;
+    state.offset      = 0;
+    state.generation  = 0;
     ret true;
 }
 
@@ -509,11 +519,11 @@ fun stream_chunk(state: *Stream, chunk: Chunk, output: *u8, allowed: usize) body
         if (chunk.token == 0 || output == nil || allowed == 0) {
             ret body.failed("invalid pending render chunk", body.REUSE_FORBIDDEN);
         }
-        state.pending_output = output;
+        state.pending_output   = output;
         state.pending_capacity = allowed;
         ret body.pending(chunk.token);
     }
-    state.pending_output = nil;
+    state.pending_output   = nil;
     state.pending_capacity = 0;
     if (chunk.status == SOURCE_END) {
         state.ended = true;
@@ -539,8 +549,8 @@ fun stream_read(ctx: ptr, output: *u8, capacity: usize,
         ret body.failed("invalid render stream body", body.REUSE_FORBIDDEN);
     }
     if (state.ended) { ret body.complete(body.REUSE_ALLOWED); }
-    var allowed: usize = capacity;
-    val remaining: u64 = state.max_bytes - state.produced;
+    var allowed:   usize = capacity;
+    val remaining: u64   = state.max_bytes - state.produced;
     if (allowed::u64 > remaining) { allowed = remaining::usize; }
     if (allowed == 0) {
         state.ended = true;
@@ -556,13 +566,13 @@ fun stream_finish(ctx: ptr, mode: body.Mode, trailers: *field.Fields) body.Progr
         ret body.failed("invalid render stream body", body.REUSE_FORBIDDEN);
     }
     val settled: bool = state.source.settle(state.source.ctx, mode);
-    state.pending_output = nil;
+    state.pending_output   = nil;
     state.pending_capacity = 0;
-    state.ended = true;
-    if (!settled) { ret body.failed("render stream source rejected finish", body.REUSE_FORBIDDEN); }
-    if (mode == body.DRAIN) { ret body.complete(body.REUSE_ALLOWED); }
-    if (mode == body.REJECT) { ret body.rejected(body.REUSE_ALLOWED); }
-    if (mode == body.CANCEL) { ret body.cancelled(body.REUSE_FORBIDDEN); }
+    state.ended            = true;
+    if (!settled)             { ret body.failed("render stream source rejected finish", body.REUSE_FORBIDDEN); }
+    if (mode == body.DRAIN)   { ret body.complete(body.REUSE_ALLOWED); }
+    if (mode == body.REJECT)  { ret body.rejected(body.REUSE_ALLOWED); }
+    if (mode == body.CANCEL)  { ret body.cancelled(body.REUSE_FORBIDDEN); }
     if (mode == body.TIMEOUT) { ret body.timed_out(body.REUSE_FORBIDDEN); }
     ret body.failed("invalid render stream finish", body.REUSE_FORBIDDEN);
 }
@@ -573,7 +583,7 @@ fun stream_complete(ctx: ptr, token: u64, trailers: *field.Fields) body.Progress
         || state.pending_output == nil || state.pending_capacity == 0 || token == 0) {
         ret body.failed("render stream has no pending operation", body.REUSE_FORBIDDEN);
     }
-    val output: *u8 = state.pending_output;
+    val output:  *u8   = state.pending_output;
     val allowed: usize = state.pending_capacity;
     ret stream_chunk(state, state.source.resume(state.source.ctx, token, output, allowed),
         output, allowed);
@@ -588,15 +598,15 @@ pub fun init_stream(state: *Stream, source: Source, max_bytes: u64, generation: 
         || max_bytes > configured.response_body.max_bytes
         || configured.response_body.max_chunk_bytes == 0
         || configured.response_body.max_chunks == 0) { ret false; }
-    state.source = source;
-    state.max_bytes = max_bytes;
-    state.produced = 0;
-    state.pending_output = nil;
+    state.source           = source;
+    state.max_bytes        = max_bytes;
+    state.produced         = 0;
+    state.pending_output   = nil;
     state.pending_capacity = 0;
-    state.ended = false;
-    state.generation = generation;
-    state.initialized = true;
-    state.reader = body.init_reader(state::ptr, stream_read, stream_finish, stream_complete,
+    state.ended            = false;
+    state.generation       = generation;
+    state.initialized      = true;
+    state.reader           = body.init_reader(state::ptr, stream_read, stream_finish, stream_complete,
         stream_release, body.OWNER_APPLICATION, generation, false, 0,
         configured.response_body, trailers, scope);
     if (!state.reader.valid) {
@@ -612,14 +622,14 @@ pub fun stream_body(state: *Stream) *body.Reader {
 }
 
 pub fun release_stream(state: *Stream) bool {
-    if (state == nil) { ret false; }
+    if (state == nil)                                                    { ret false; }
     if (state.initialized && !body.reader_terminal_state(?state.reader)) { ret false; }
-    state.initialized = false;
-    state.produced = 0;
-    state.pending_output = nil;
+    state.initialized      = false;
+    state.produced         = 0;
+    state.pending_output   = nil;
     state.pending_capacity = 0;
-    state.ended = false;
-    state.generation = 0;
+    state.ended            = false;
+    state.generation       = 0;
     ret true;
 }
 
@@ -646,21 +656,22 @@ pub fun respond(request_context: *context.Context, code: status.Status, media: *
         ret RESPOND_INVALID;
     }
     val original_status: status.Status = response.status;
-    val original_len: usize = response.fields.len;
-    val original_bytes: usize = response.fields.bytes;
+    val original_len:    usize         = response.fields.len;
+    val original_bytes:  usize         = response.fields.bytes;
     if (message.set_status(response, code) != message.RESPONSE_OK) { ret RESPOND_INVALID; }
     val added: field.AddStatus = message.add_field(response, field.Field{
-        name: view.view("content-type", 12), value: media_header(media), sensitive: false});
+        name: view.view("content-type", 12), value: media_header(media), sensitive: false
+    });
     if (added != field.ADD_OK) {
-        response.status = original_status;
-        response.fields.len = original_len;
+        response.status       = original_status;
+        response.fields.len   = original_len;
         response.fields.bytes = original_bytes;
         if (added == field.ADD_INVALID) { ret RESPOND_INVALID; }
         ret RESPOND_LIMIT;
     }
     if (message.set_body_reader(response, reader, configured) != message.RESPONSE_OK) {
-        response.status = original_status;
-        response.fields.len = original_len;
+        response.status       = original_status;
+        response.fields.len   = original_len;
         response.fields.bytes = original_bytes;
         ret RESPOND_INVALID;
     }
@@ -724,7 +735,7 @@ rec Fixture {
 
 fun fixture_limits() message.Limits {
     var configured: message.Limits = message.limits_default();
-    configured.response_fields = field.limits(16, 1024, 64, 256);
+    configured.response_fields   = field.limits(16, 1024, 64, 256);
     configured.response_trailers = field.limits(8, 512, 64, 256);
     ret configured;
 }
@@ -735,15 +746,16 @@ fun init_fixture(state: *Fixture, generation: u64) bool {
     }
     if (!fixed_ok(fixed_allocator.make(?state.allocator, ?state.allocation_state,
         ?state.allocation_bytes[0], 1024))) { ret false; }
-    val configured: message.Limits = fixture_limits();
-    val request_fields: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
-    val request_trailers: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    val configured:       message.Limits = fixture_limits();
+    val request_fields:   field.Fields   = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    val request_trailers: field.Fields   = field.init(nil, 0, field.limits(0, 0, 0, 0));
     state.request_body = body.empty_reader(generation);
     val metadata: message.Metadata = message.Metadata{
-        version: message.version_h1(1, 1), secure: true, early_data: false,
-        peer: message.unspecified_endpoint(), local: message.unspecified_endpoint(),
+        version:     message.version_h1(1, 1), secure: true, early_data: false,
+        peer:        message.unspecified_endpoint(), local: message.unspecified_endpoint(),
         received_at: time.Time{sec: 1, nsec: 0}, has_deadline: false,
-        deadline: time.Time{sec: 0, nsec: 0}, request_index: 1};
+        deadline:    time.Time{sec: 0, nsec: 0}, request_index: 1
+    };
     if (!message.init_request(?state.request, method.from_kind(method.GET),
         target.origin(view.view("/", 1), view.view("/", 1), view.view(nil, 0)), metadata,
         request_fields, request_trailers, ?state.request_body, generation, configured)) {
@@ -781,7 +793,7 @@ test "laurel.render: content type and charset are explicit and bounded" {
     var json: Media;
     if (!application_json(?json)
         || !same(?json.header[0], json.header_len,
-            view.view("application/json; charset=utf-8", 31))) { ret 5; }
+        view.view("application/json; charset=utf-8", 31))) { ret 5; }
     var bare: Media;
     if (!init_media(?bare, view.view("application/octet-stream", 24), view.view(nil, 0))
         || bare.header_len != 24 || media_charset(?bare).len != 0) { ret 6; }
@@ -792,10 +804,10 @@ test "laurel.render: content type and charset are explicit and bounded" {
         || init_media(?rejected, view.view("text/ht\nml", 10), view.view("utf-8", 5))
         || rejected.initialized) { ret 7; }
     var oversized: [200]u8;
-    var i: usize = 0;
+    var i:         usize = 0;
     for (i < 200) {
         oversized[i] = 'a';
-        i = i + 1;
+        i            = i + 1;
     }
     oversized[50] = '/';
     if (init_media(?rejected, view.view(?oversized[0], 200), view.view(nil, 0))) { ret 8; }
@@ -803,7 +815,7 @@ test "laurel.render: content type and charset are explicit and bounded" {
 }
 
 test "laurel.render: escaping is explicit for html and json output" {
-    var output: [64]u8;
+    var output:  [64]u8;
     var written: usize = 0;
     if (escape_html(view.view("<&>", 3), ?output[0], 64, ?written) != ESCAPE_OK
         || !same(?output[0], written, view.view("&lt;&amp;&gt;", 13))) { ret 1; }
@@ -857,9 +869,9 @@ test "laurel.render: escaping is explicit for html and json output" {
 test "laurel.render: a bounded body reaches the wire without a template engine" {
     var state: Fixture;
     if (!init_fixture(?state, 31)) { ret 1; }
-    var media: Media;
+    var media:   Media;
     var content: Fixed;
-    val text: view.View = view.view("abcdefghijklmnopqrstuvwxyz", 26);
+    val text:    view.View = view.view("abcdefghijklmnopqrstuvwxyz", 26);
     if (!text_plain(?media) || !init_fixed(?content, text, 31, fixture_limits(),
         ?state.response.trailers, ?state.scope)) { ret 2; }
     if (respond(?state.context, status.OK, ?media, fixed_body(?content),
@@ -874,13 +886,13 @@ test "laurel.render: a bounded body reaches the wire without a template engine" 
     if (respond(?state.context, status.OK, ?media, fixed_body(?content),
         fixture_limits()) != RESPOND_INVALID || state.response.fields.len != 1) { ret 6; }
     var received: [32]u8;
-    var total: usize = 0;
-    var chunks: usize = 0;
+    var total:    usize         = 0;
+    var chunks:   usize         = 0;
     var progress: body.Progress = body.data(0);
     for (progress.status == body.DATA && chunks < 16) {
         progress = body.read(?content.reader, ?received[total], 8);
         if (progress.status == body.DATA) {
-            total = total + progress.count;
+            total  = total + progress.count;
             chunks = chunks + 1;
         }
     }
@@ -905,11 +917,11 @@ rec TestSource {
 
 fun test_emit(state: *TestSource, output: *u8, capacity: usize) Chunk {
     if (state.emitted == state.total) { ret chunk_end(); }
-    if (capacity < 4) { ret chunk_failed(); }
-    output[0] = 'c';
-    output[1] = 'h';
-    output[2] = '0' + state.emitted;
-    output[3] = '|';
+    if (capacity < 4)                 { ret chunk_failed(); }
+    output[0]     = 'c';
+    output[1]     = 'h';
+    output[2]     = '0' + state.emitted;
+    output[3]     = '|';
     state.emitted = state.emitted + 1;
     ret chunk_data(4);
 }
@@ -933,7 +945,7 @@ fun test_resume(ctx: ptr, token: u64, output: *u8, capacity: usize) Chunk {
 
 fun test_settle(ctx: ptr, mode: body.Mode) bool {
     val state: *TestSource = ctx::*TestSource;
-    state.settles = state.settles + 1;
+    state.settles     = state.settles + 1;
     state.settle_mode = mode;
     ret true;
 }
@@ -942,7 +954,7 @@ test "laurel.render: streamed bodies suspend, resume, and cancel" {
     var state: Fixture;
     if (!init_fixture(?state, 41)) { ret 1; }
     var source_state: TestSource = TestSource{pending: true, total: 3, produces: 0, resumes: 0, settles: 0, settle_mode: 0, emitted: 0};
-    val source: Source = Source{ctx: ?source_state, produce: test_produce,
+    val source:       Source     = Source{ctx: ?source_state, produce: test_produce,
         resume: test_resume, settle: test_settle};
     var stream: Stream;
     if (!init_stream(?stream, source, 4096, 41, fixture_limits(),
@@ -950,7 +962,7 @@ test "laurel.render: streamed bodies suspend, resume, and cancel" {
     var media: Media;
     if (!text_plain(?media) || respond(?state.context, status.OK, ?media,
         stream_body(?stream), fixture_limits()) != RESPOND_OK) { ret 3; }
-    var received: [64]u8;
+    var received:  [64]u8;
     var suspended: body.Progress = body.read(?stream.reader, ?received[0], 16);
     if (suspended.status != body.PENDING || suspended.token != 77
         || source_state.produces != 1 || stream.pending_output != ?received[0]) { ret 4; }
@@ -976,7 +988,7 @@ test "laurel.render: streamed bodies suspend, resume, and cancel" {
 test "laurel.render: a renderer installs its own body with no engine coupling" {
     var state: Fixture;
     if (!init_fixture(?state, 51)) { ret 1; }
-    var media: Media;
+    var media:   Media;
     var content: Fixed;
     if (!text_html(?media) || !init_fixed(?content, view.view("<p>ok</p>", 9), 51,
         fixture_limits(), ?state.response.trailers, ?state.scope)) { ret 2; }
@@ -986,7 +998,7 @@ test "laurel.render: a renderer installs its own body with no engine coupling" {
     if (!renderer_valid(?renderer)) { ret 3; }
     val installed: res[u8, error.AppError] = render_into(?renderer,
         view.view("page", 4), nil, ?state.context, fixture_limits());
-    if (sel installed.err) { ret 4; }
+    if (sel installed.err)                                                                                          { ret 4; }
     if (provider.calls != 1 || state.response.status != status.OK || state.response.body_reader != ?content.reader) { ret 4; }
     provider.fail = true;
     var second: Fixture;

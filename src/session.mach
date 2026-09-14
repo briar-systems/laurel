@@ -3,22 +3,6 @@
 use crypto.aead.aes_gcm;
 use crypto.aead.chacha20_poly1305;
 use crypto.contracts;
-use std.crypto.ct;
-use std.chrono.time;
-use std.encoding.base64;
-use std.sync.cancel;
-use std.sync.atomic;
-use std.sync.mutex;
-use std.sync.thread;
-use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
-use std.types.size.usize;
-use std.types.string.str;
-use std.types.string.str_len;
-use std.types.view;
-use A: std.allocator;
-use std.types.result.res;
 use http.core.field;
 use http.core.message;
 use laurel.context;
@@ -26,14 +10,27 @@ use laurel.cookie;
 use laurel.error;
 use laurel.handler;
 use laurel.middleware;
-
-
-
-
+use A: std.allocator;
+use std.chrono.time;
+use std.crypto.ct;
+use std.encoding.base64;
+use std.sync.atomic;
+use std.sync.cancel;
+use std.sync.mutex;
+use std.sync.thread;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_len;
+use std.types.view;
 
 fun thread_ok(outcome: thread.Operation) bool {
     ret sel outcome.ok;
 }
+
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
@@ -41,20 +38,22 @@ fun operation_ok(outcome: cancel.Operation) bool {
 fun transition_ok(outcome: cancel.Transition) bool {
     ret (sel outcome.ok) && outcome.ok;
 }
+
 fun scope_active(scope: *cancel.Scope) bool {
     val reason: cancel.Reason = cancel.reason(scope);
     ret sel reason.active;
 }
-pub val MAX_SESSION_ID_BYTES: usize = 64;
-pub val MAX_SESSION_DATA_BYTES: usize = 2048;
-pub val MAX_CONTEXT_BYTES: usize = 256;
-pub val MAX_RAW_TOKEN_BYTES: usize = 3072;
-pub val MAX_TOKEN_BYTES: usize = 4096;
-pub val GENERATED_ID_BYTES: usize = 32;
+
+pub val MAX_SESSION_ID_BYTES:    usize = 64;
+pub val MAX_SESSION_DATA_BYTES:  usize = 2048;
+pub val MAX_CONTEXT_BYTES:       usize = 256;
+pub val MAX_RAW_TOKEN_BYTES:     usize = 3072;
+pub val MAX_TOKEN_BYTES:         usize = 4096;
+pub val GENERATED_ID_BYTES:      usize = 32;
 pub val GENERATED_ID_TEXT_BYTES: usize = 43;
 
-val ENVELOPE_BYTES: usize = 20;
-val PLAINTEXT_HEADER_BYTES: usize = 48;
+val ENVELOPE_BYTES:             usize = 20;
+val PLAINTEXT_HEADER_BYTES:     usize = 48;
 val MAX_SECRET_PLAINTEXT_BYTES: usize = 2160;
 
 pub def StoreStatus: u8;
@@ -70,20 +69,20 @@ pub val STORE_UNAVAILABLE:      StoreStatus = 7;
 
 pub def CodecStatus: u8;
 
-pub val CODEC_OK:                 CodecStatus = 0;
-pub val CODEC_INVALID:            CodecStatus = 1;
-pub val CODEC_OUTPUT_TOO_SMALL:   CodecStatus = 2;
+pub val CODEC_OK:                  CodecStatus = 0;
+pub val CODEC_INVALID:             CodecStatus = 1;
+pub val CODEC_OUTPUT_TOO_SMALL:    CodecStatus = 2;
 pub val CODEC_ENTROPY_UNAVAILABLE: CodecStatus = 3;
-pub val CODEC_NONCE_REUSED:       CodecStatus = 4;
-pub val CODEC_AUTH_FAILED:        CodecStatus = 5;
-pub val CODEC_TRUNCATED:          CodecStatus = 6;
-pub val CODEC_UNKNOWN_KEY:        CodecStatus = 7;
-pub val CODEC_KEY_INACTIVE:       CodecStatus = 8;
-pub val CODEC_NOT_YET_VALID:      CodecStatus = 9;
-pub val CODEC_EXPIRED:            CodecStatus = 10;
-pub val CODEC_REPLAYED:           CodecStatus = 11;
-pub val CODEC_REPLAY_CAPACITY:    CodecStatus = 12;
-pub val CODEC_FIXATION_FAILED:    CodecStatus = 13;
+pub val CODEC_NONCE_REUSED:        CodecStatus = 4;
+pub val CODEC_AUTH_FAILED:         CodecStatus = 5;
+pub val CODEC_TRUNCATED:           CodecStatus = 6;
+pub val CODEC_UNKNOWN_KEY:         CodecStatus = 7;
+pub val CODEC_KEY_INACTIVE:        CodecStatus = 8;
+pub val CODEC_NOT_YET_VALID:       CodecStatus = 9;
+pub val CODEC_EXPIRED:             CodecStatus = 10;
+pub val CODEC_REPLAYED:            CodecStatus = 11;
+pub val CODEC_REPLAY_CAPACITY:     CodecStatus = 12;
+pub val CODEC_FIXATION_FAILED:     CodecStatus = 13;
 
 pub def GuardStatus: u8;
 
@@ -94,8 +93,8 @@ pub val GUARD_INVALID:  GuardStatus = 3;
 
 pub def Algorithm: u8;
 
-pub val AES_256_GCM:            Algorithm = 1;
-pub val CHACHA20_POLY1305:      Algorithm = 2;
+pub val AES_256_GCM:       Algorithm = 1;
+pub val CHACHA20_POLY1305: Algorithm = 2;
 
 pub def ReplayPolicy: u8;
 
@@ -125,11 +124,11 @@ pub rec SaveResult {
     generation: u64;
 }
 
-pub def AliasesFun: fun(ptr, *u8, usize) bool;
+pub def AliasesFun:  fun(ptr, *u8, usize) bool;
 pub def OverlapsFun: fun(ptr, ptr, AliasesFun) bool;
-pub def StartFun: fun(ptr) StoreStatus;
-pub def StopFun: fun(ptr) StoreStatus;
-pub def LoadFun: fun(ptr, view.View, i64, *u8, usize, *Session,
+pub def StartFun:    fun(ptr) StoreStatus;
+pub def StopFun:     fun(ptr) StoreStatus;
+pub def LoadFun:     fun(ptr, view.View, i64, *u8, usize, *Session,
     *cancel.Scope) StoreStatus;
 pub def SaveFun: fun(ptr, *Session, u64, i64, *SaveResult,
     *cancel.Scope) StoreStatus;
@@ -174,7 +173,7 @@ pub rec MemoryStore {
     active:          bool;
 }
 
-pub def ClaimFun: fun(ptr, u32, *u8, usize, i64, i64) GuardStatus;
+pub def ClaimFun:  fun(ptr, u32, *u8, usize, i64, i64) GuardStatus;
 pub def ForgetFun: fun(ptr, u32, *u8, usize) GuardStatus;
 
 pub rec Guard {
@@ -203,24 +202,24 @@ pub rec MemoryGuard {
 }
 
 pub rec KeyGeneration {
-    id:            u32;
-    key:           [32]u8;
-    key_len:       usize;
-    activated_at:  i64;
-    encode_until:  i64;
-    decode_until:  i64;
+    id:           u32;
+    key:          [32]u8;
+    key_len:      usize;
+    activated_at: i64;
+    encode_until: i64;
+    decode_until: i64;
 }
 
 pub rec KeyRing {
-    items:       *KeyGeneration;
-    len:         usize;
-    current_id:  u32;
-    max_retired: usize;
-    algorithm:   Algorithm;
+    items:        *KeyGeneration;
+    len:          usize;
+    current_id:   u32;
+    max_retired:  usize;
+    algorithm:    Algorithm;
     nonce_domain: ptr;
-    lock:        mutex.Mutex;
-    initialized: bool;
-    active:      bool;
+    lock:         mutex.Mutex;
+    initialized:  bool;
+    active:       bool;
 }
 
 pub rec CodecOperation {
@@ -253,16 +252,16 @@ pub rec Entropy {
 }
 
 pub rec ProtectedCodec {
-    ring:             *KeyRing;
-    entropy:          Entropy;
-    nonce_guard:      Guard;
-    replay_guard:     Guard;
-    replay_policy:    ReplayPolicy;
-    algorithm:        Algorithm;
-    clock_skew_s:     i64;
-    max_lifetime_s:   i64;
+    ring:              *KeyRing;
+    entropy:           Entropy;
+    nonce_guard:       Guard;
+    replay_guard:      Guard;
+    replay_policy:     ReplayPolicy;
+    algorithm:         Algorithm;
+    clock_skew_s:      i64;
+    max_lifetime_s:    i64;
     max_context_bytes: usize;
-    active:           bool;
+    active:            bool;
 }
 
 pub rec CookiePolicy {
@@ -294,7 +293,7 @@ fun public_equal(a: *u8, b: *u8, len: usize) bool {
 }
 
 fun range_valid(data: *u8, len: usize) bool {
-    if (len == 0) { ret true; }
+    if (len == 0)    { ret true; }
     if (data == nil) { ret false; }
     ret len - 1 <= ~(0::usize) - data::usize;
 }
@@ -314,12 +313,12 @@ fun array_valid(data: *u8, count: usize, item_size: usize,
 }
 
 fun ranges_overlap(a: *u8, a_len: usize, b: *u8, b_len: usize) bool {
-    if (a_len == 0 || b_len == 0) { ret false; }
+    if (a_len == 0 || b_len == 0)                         { ret false; }
     if (!range_valid(a, a_len) || !range_valid(b, b_len)) { ret true; }
     val a_start: usize = a::usize;
     val b_start: usize = b::usize;
-    val a_end: usize = a_start + (a_len - 1);
-    val b_end: usize = b_start + (b_len - 1);
+    val a_end:   usize = a_start + (a_len - 1);
+    val b_end:   usize = b_start + (b_len - 1);
     ret a_start <= b_end && b_start <= a_end;
 }
 
@@ -342,7 +341,7 @@ fun scope_valid(scope: *cancel.Scope) bool {
 }
 
 fun scope_cancelled(scope: *cancel.Scope) bool {
-    if (scope == nil) { ret false; }
+    if (scope == nil)        { ret false; }
     if (!scope_valid(scope)) { ret true; }
     val reason: cancel.Reason = cancel.reason(scope);
     ret !(sel reason.active);
@@ -353,7 +352,7 @@ fun clear_public(data: *u8, len: usize) {
     var i: usize = 0;
     for (i < len) {
         data[i] = 0;
-        i = i + 1;
+        i       = i + 1;
     }
 }
 
@@ -361,14 +360,14 @@ fun clear_slot(slot: *MemorySlot) {
     if (slot == nil) { ret; }
     clear_public(?slot.id[0], MAX_SESSION_ID_BYTES);
     clear_public(?slot.data[0], MAX_SESSION_DATA_BYTES);
-    slot.id_len = 0;
-    slot.data_len = 0;
-    slot.issued_at_unix = 0;
+    slot.id_len          = 0;
+    slot.data_len        = 0;
+    slot.issued_at_unix  = 0;
     slot.not_before_unix = 0;
     slot.expires_at_unix = 0;
-    slot.version = 0;
-    slot.generation = 0;
-    slot.used = false;
+    slot.version         = 0;
+    slot.generation      = 0;
+    slot.used            = false;
 }
 
 fun memory_store_shape_valid(store: *MemoryStore) bool {
@@ -378,7 +377,7 @@ fun memory_store_shape_valid(store: *MemoryStore) bool {
     ret array_valid(store.slots::*u8, store.capacity,
         $size_of(MemorySlot), ?slot_bytes)
         && !ranges_overlap(store::*u8, $size_of(MemoryStore),
-            store.slots::*u8, slot_bytes);
+        store.slots::*u8, slot_bytes);
 }
 
 fun memory_store_aliases(ctx: ptr, data: *u8, len: usize) bool {
@@ -413,9 +412,9 @@ pub fun init_memory_store(store: *MemoryStore, slots: *MemorySlot,
     var slot_bytes: usize = 0;
     if (store.initialized || store.active || capacity == 0
         || !array_valid(slots::*u8, capacity, $size_of(MemorySlot),
-            ?slot_bytes)
+        ?slot_bytes)
         || ranges_overlap(store::*u8, $size_of(MemoryStore),
-            slots::*u8, slot_bytes)) {
+        slots::*u8, slot_bytes)) {
         ret false;
     }
     var i: usize = 0;
@@ -423,13 +422,13 @@ pub fun init_memory_store(store: *MemoryStore, slots: *MemorySlot,
         clear_slot(?slots[i]);
         i = i + 1;
     }
-    store.slots = slots;
-    store.capacity = capacity;
-    store.len = 0;
+    store.slots           = slots;
+    store.capacity        = capacity;
+    store.len             = 0;
     store.next_generation = 1;
-    store.lock = mutex.make();
-    store.initialized = true;
-    store.active = false;
+    store.lock            = mutex.make();
+    store.initialized     = true;
+    store.active          = false;
     ret true;
 }
 
@@ -458,7 +457,7 @@ fun find_slot(store: *MemoryStore, id: view.View) usize {
 
 fun reap_expired_locked(store: *MemoryStore, now: i64) usize {
     var reaped: usize = 0;
-    var i: usize = 0;
+    var i:      usize = 0;
     for (i < store.capacity) {
         val slot: *MemorySlot = ?store.slots[i];
         if (slot.used && slot.expires_at_unix <= now) {
@@ -482,10 +481,10 @@ fun memory_load(ctx: ptr, id: view.View, now: i64, data_output: *u8,
         || !memory_store_range_safe(store, data_output, data_capacity)
         || !memory_store_range_safe(store, output::*u8, $size_of(Session))
         || (scope != nil && !memory_store_range_safe(store, scope::*u8,
-            $size_of(cancel.Scope)))
+        $size_of(cancel.Scope)))
         || ranges_overlap(data_output, data_capacity, id.data, id.len)
         || ranges_overlap(data_output, data_capacity, output::*u8,
-            $size_of(Session))
+        $size_of(Session))
         || ranges_overlap(id.data, id.len, output::*u8, $size_of(Session))
         || scope_overlaps(scope, id.data, id.len)
         || scope_overlaps(scope, data_output, data_capacity)
@@ -514,14 +513,14 @@ fun memory_load(ctx: ptr, id: view.View, now: i64, data_output: *u8,
     var i: usize = 0;
     for (i < slot.data_len) {
         data_output[i] = slot.data[i];
-        i = i + 1;
+        i              = i + 1;
     }
     var loaded: Session = Session{id: id,
-        data: view.view(data_output, slot.data_len),
-        issued_at_unix: slot.issued_at_unix,
+        data:            view.view(data_output, slot.data_len),
+        issued_at_unix:  slot.issued_at_unix,
         not_before_unix: slot.not_before_unix,
         expires_at_unix: slot.expires_at_unix, version: slot.version,
-        generation: slot.generation};
+        generation:      slot.generation};
     @output = loaded;
     mutex.unlock(?store.lock);
     ret STORE_OK;
@@ -539,23 +538,23 @@ fun memory_save(ctx: ptr, value: *Session, expected_version: u64,
     }
     val result_bytes: *u8 = result::*u8;
     if (ranges_overlap(result_bytes, $size_of(SaveResult), value::*u8,
-            $size_of(Session))
+        $size_of(Session))
         || ranges_overlap(result_bytes, $size_of(SaveResult), value.id.data,
-            value.id.len)
+        value.id.len)
         || ranges_overlap(result_bytes, $size_of(SaveResult), value.data.data,
-            value.data.len)
+        value.data.len)
         || !memory_store_range_safe(store, value::*u8, $size_of(Session))
         || !memory_store_range_safe(store, value.id.data, value.id.len)
         || !memory_store_range_safe(store, value.data.data, value.data.len)
         || !memory_store_range_safe(store, result_bytes,
-            $size_of(SaveResult))
+        $size_of(SaveResult))
         || (scope != nil && !memory_store_range_safe(store, scope::*u8,
-            $size_of(cancel.Scope)))
+        $size_of(cancel.Scope)))
         || scope_overlaps(scope, value::*u8, $size_of(Session))
         || scope_overlaps(scope, value.id.data, value.id.len)
         || scope_overlaps(scope, value.data.data, value.data.len)
         || scope_overlaps(scope, result_bytes,
-            $size_of(SaveResult))) { ret STORE_INVALID; }
+        $size_of(SaveResult))) { ret STORE_INVALID; }
     if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
     mutex.lock(?store.lock);
     if (!store.initialized || !store.active || store.len > store.capacity
@@ -583,14 +582,14 @@ fun memory_save(ctx: ptr, value: *Session, expected_version: u64,
         var i: usize = 0;
         for (i < value.data.len) {
             slot.data[i] = value.data.data[i];
-            i = i + 1;
+            i            = i + 1;
         }
-        slot.data_len = value.data.len;
-        slot.issued_at_unix = value.issued_at_unix;
+        slot.data_len        = value.data.len;
+        slot.issued_at_unix  = value.issued_at_unix;
         slot.not_before_unix = value.not_before_unix;
         slot.expires_at_unix = value.expires_at_unix;
-        slot.version = slot.version + 1;
-        @result = SaveResult{version: slot.version,
+        slot.version         = slot.version + 1;
+        @result              = SaveResult{version: slot.version,
             generation: slot.generation};
         mutex.unlock(?store.lock);
         ret STORE_OK;
@@ -613,24 +612,24 @@ fun memory_save(ctx: ptr, value: *Session, expected_version: u64,
     var i: usize = 0;
     for (i < value.id.len) {
         slot.id[i] = value.id.data[i];
-        i = i + 1;
+        i          = i + 1;
     }
     i = 0;
     for (i < value.data.len) {
         slot.data[i] = value.data.data[i];
-        i = i + 1;
+        i            = i + 1;
     }
-    slot.id_len = value.id.len;
-    slot.data_len = value.data.len;
-    slot.issued_at_unix = value.issued_at_unix;
-    slot.not_before_unix = value.not_before_unix;
-    slot.expires_at_unix = value.expires_at_unix;
-    slot.version = 1;
-    slot.generation = store.next_generation;
-    slot.used = true;
+    slot.id_len           = value.id.len;
+    slot.data_len         = value.data.len;
+    slot.issued_at_unix   = value.issued_at_unix;
+    slot.not_before_unix  = value.not_before_unix;
+    slot.expires_at_unix  = value.expires_at_unix;
+    slot.version          = 1;
+    slot.generation       = store.next_generation;
+    slot.used             = true;
     store.next_generation = store.next_generation + 1;
-    store.len = store.len + 1;
-    @result = SaveResult{version: 1, generation: slot.generation};
+    store.len             = store.len + 1;
+    @result               = SaveResult{version: 1, generation: slot.generation};
     mutex.unlock(?store.lock);
     ret STORE_OK;
 }
@@ -642,7 +641,7 @@ fun memory_delete(ctx: ptr, id: view.View, expected_version: u64,
         || !view_valid(id, MAX_SESSION_ID_BYTES)
         || !memory_store_range_safe(store, id.data, id.len)
         || (scope != nil && !memory_store_range_safe(store, scope::*u8,
-            $size_of(cancel.Scope)))
+        $size_of(cancel.Scope)))
         || scope_overlaps(scope, id.data, id.len)) {
         ret STORE_INVALID;
     }
@@ -683,32 +682,32 @@ fun memory_replace(ctx: ptr, old_id: view.View, expected_version: u64,
         || replacement.generation != 0 || replacement.expires_at_unix <= now
         || result == nil || !range_valid(result::*u8, $size_of(SaveResult))
         || (old_id.len == replacement.id.len
-            && public_equal(old_id.data, replacement.id.data, old_id.len))
+        && public_equal(old_id.data, replacement.id.data, old_id.len))
         || ranges_overlap(result::*u8, $size_of(SaveResult),
-            replacement::*u8, $size_of(Session))
+        replacement::*u8, $size_of(Session))
         || ranges_overlap(result::*u8, $size_of(SaveResult), old_id.data,
-            old_id.len)
+        old_id.len)
         || ranges_overlap(result::*u8, $size_of(SaveResult),
-            replacement.id.data, replacement.id.len)
+        replacement.id.data, replacement.id.len)
         || ranges_overlap(result::*u8, $size_of(SaveResult),
-            replacement.data.data, replacement.data.len)
+        replacement.data.data, replacement.data.len)
         || !memory_store_range_safe(store, old_id.data, old_id.len)
         || !memory_store_range_safe(store, replacement::*u8,
-            $size_of(Session))
+        $size_of(Session))
         || !memory_store_range_safe(store, replacement.id.data,
-            replacement.id.len)
+        replacement.id.len)
         || !memory_store_range_safe(store, replacement.data.data,
-            replacement.data.len)
+        replacement.data.len)
         || !memory_store_range_safe(store, result::*u8,
-            $size_of(SaveResult))
+        $size_of(SaveResult))
         || (scope != nil && !memory_store_range_safe(store, scope::*u8,
-            $size_of(cancel.Scope)))
+        $size_of(cancel.Scope)))
         || scope_overlaps(scope, old_id.data, old_id.len)
         || scope_overlaps(scope, replacement::*u8, $size_of(Session))
         || scope_overlaps(scope, replacement.id.data, replacement.id.len)
         || scope_overlaps(scope, replacement.data.data, replacement.data.len)
         || scope_overlaps(scope, result::*u8,
-            $size_of(SaveResult))) { ret STORE_INVALID; }
+        $size_of(SaveResult))) { ret STORE_INVALID; }
     if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
     mutex.lock(?store.lock);
     if (!store.initialized || !store.active || store.len > store.capacity
@@ -743,23 +742,23 @@ fun memory_replace(ctx: ptr, old_id: view.View, expected_version: u64,
     var i: usize = 0;
     for (i < replacement.id.len) {
         old_slot.id[i] = replacement.id.data[i];
-        i = i + 1;
+        i              = i + 1;
     }
     i = 0;
     for (i < replacement.data.len) {
         old_slot.data[i] = replacement.data.data[i];
-        i = i + 1;
+        i                = i + 1;
     }
-    old_slot.id_len = replacement.id.len;
-    old_slot.data_len = replacement.data.len;
-    old_slot.issued_at_unix = replacement.issued_at_unix;
+    old_slot.id_len          = replacement.id.len;
+    old_slot.data_len        = replacement.data.len;
+    old_slot.issued_at_unix  = replacement.issued_at_unix;
     old_slot.not_before_unix = replacement.not_before_unix;
     old_slot.expires_at_unix = replacement.expires_at_unix;
-    old_slot.version = 1;
-    old_slot.generation = store.next_generation;
-    old_slot.used = true;
-    store.next_generation = store.next_generation + 1;
-    @result = SaveResult{version: 1, generation: old_slot.generation};
+    old_slot.version         = 1;
+    old_slot.generation      = store.next_generation;
+    old_slot.used            = true;
+    store.next_generation    = store.next_generation + 1;
+    @result                  = SaveResult{version: 1, generation: old_slot.generation};
     mutex.unlock(?store.lock);
     ret STORE_OK;
 }
@@ -771,7 +770,7 @@ fun memory_reap(ctx: ptr, now: i64, result: *usize,
         || !scope_valid(scope)
         || !memory_store_range_safe(store, result::*u8, $size_of(usize))
         || (scope != nil && !memory_store_range_safe(store, scope::*u8,
-            $size_of(cancel.Scope)))
+        $size_of(cancel.Scope)))
         || scope_overlaps(scope, result::*u8, $size_of(usize))) {
         ret STORE_INVALID;
     }
@@ -801,7 +800,7 @@ fun memory_stop(ctx: ptr) StoreStatus {
         clear_slot(?store.slots[i]);
         i = i + 1;
     }
-    store.len = 0;
+    store.len    = 0;
     store.active = false;
     mutex.unlock(?store.lock);
     ret STORE_OK;
@@ -810,12 +809,12 @@ fun memory_stop(ctx: ptr) StoreStatus {
 pub fun memory_store(store: *MemoryStore) Store {
     if (!memory_store_shape_valid(store)) {
         ret Store{ctx: nil, aliases: nil, start: nil, stop: nil, load: nil,
-        save: nil, delete: nil, replace: nil, reap: nil};
+            save: nil, delete: nil, replace: nil, reap: nil};
     }
     ret Store{ctx: store::ptr, aliases: memory_store_aliases,
         start: memory_start, stop: memory_stop, load: memory_load,
-        save: memory_save, delete: memory_delete, replace: memory_replace,
-        reap: memory_reap};
+        save:  memory_save, delete: memory_delete, replace: memory_replace,
+        reap:  memory_reap};
 }
 
 fun guard_token_equal(slot: *GuardSlot, key_id: u32, token: *u8,
@@ -831,7 +830,7 @@ fun memory_guard_shape_valid(guard: *MemoryGuard) bool {
     ret array_valid(guard.slots::*u8, guard.capacity,
         $size_of(GuardSlot), ?slot_bytes)
         && !ranges_overlap(guard::*u8, $size_of(MemoryGuard),
-            guard.slots::*u8, slot_bytes);
+        guard.slots::*u8, slot_bytes);
 }
 
 fun memory_guard_aliases(ctx: ptr, data: *u8, len: usize) bool {
@@ -868,25 +867,25 @@ pub fun init_memory_guard(guard: *MemoryGuard, slots: *GuardSlot,
     var slot_bytes: usize = 0;
     if (guard.initialized || guard.active || capacity == 0
         || !array_valid(slots::*u8, capacity, $size_of(GuardSlot),
-            ?slot_bytes)
+        ?slot_bytes)
         || ranges_overlap(guard::*u8, $size_of(MemoryGuard),
-            slots::*u8, slot_bytes)) {
+        slots::*u8, slot_bytes)) {
         ret false;
     }
     var i: usize = 0;
     for (i < capacity) {
         clear_public(?slots[i].token[0], 12);
-        slots[i].used = false;
-        slots[i].token_len = 0;
-        slots[i].key_id = 0;
+        slots[i].used       = false;
+        slots[i].token_len  = 0;
+        slots[i].key_id     = 0;
         slots[i].expires_at = 0;
-        i = i + 1;
+        i                   = i + 1;
     }
-    guard.slots = slots;
-    guard.capacity = capacity;
-    guard.lock = mutex.make();
+    guard.slots       = slots;
+    guard.capacity    = capacity;
+    guard.lock        = mutex.make();
     guard.initialized = true;
-    guard.active = true;
+    guard.active      = true;
     ret true;
 }
 
@@ -905,7 +904,7 @@ fun memory_guard_claim(ctx: ptr, key_id: u32, token: *u8,
         ret GUARD_INVALID;
     }
     var reusable: usize = guard.capacity;
-    var i: usize = 0;
+    var i:        usize = 0;
     for (i < guard.capacity) {
         val slot: *GuardSlot = ?guard.slots[i];
         if (slot.used && slot.expires_at <= now) {
@@ -928,12 +927,12 @@ fun memory_guard_claim(ctx: ptr, key_id: u32, token: *u8,
     i = 0;
     for (i < token_len) {
         slot.token[i] = token[i];
-        i = i + 1;
+        i             = i + 1;
     }
-    slot.key_id = key_id;
-    slot.token_len = token_len;
+    slot.key_id     = key_id;
+    slot.token_len  = token_len;
     slot.expires_at = expires_at;
-    slot.used = true;
+    slot.used       = true;
     mutex.unlock(?guard.lock);
     ret GUARD_OK;
 }
@@ -956,9 +955,9 @@ fun memory_guard_forget(ctx: ptr, key_id: u32, token: *u8,
         val slot: *GuardSlot = ?guard.slots[i];
         if (guard_token_equal(slot, key_id, token, token_len)) {
             clear_public(?slot.token[0], 12);
-            slot.used = false;
-            slot.token_len = 0;
-            slot.key_id = 0;
+            slot.used       = false;
+            slot.token_len  = 0;
+            slot.key_id     = 0;
             slot.expires_at = 0;
             mutex.unlock(?guard.lock);
             ret GUARD_OK;
@@ -970,16 +969,20 @@ fun memory_guard_forget(ctx: ptr, key_id: u32, token: *u8,
 }
 
 pub fun memory_guard(guard: *MemoryGuard) Guard {
-    if (!memory_guard_shape_valid(guard)) { ret Guard{ctx: nil, domain: nil, aliases: nil, overlaps: nil,
-        claim: nil, forget: nil}; }
+    if (!memory_guard_shape_valid(guard)) {
+        ret Guard{ctx: nil, domain: nil, aliases: nil, overlaps: nil,
+            claim: nil, forget: nil};
+    }
     mutex.lock(?guard.lock);
     val active: bool = guard.active;
     mutex.unlock(?guard.lock);
-    if (!active) { ret Guard{ctx: nil, domain: nil, aliases: nil, overlaps: nil,
-        claim: nil, forget: nil}; }
+    if (!active) {
+        ret Guard{ctx: nil, domain: nil, aliases: nil, overlaps: nil,
+            claim: nil, forget: nil};
+    }
     ret Guard{ctx: guard::ptr, domain: guard::ptr,
         aliases: memory_guard_aliases, overlaps: memory_guard_overlaps,
-        claim: memory_guard_claim, forget: memory_guard_forget};
+        claim:   memory_guard_claim, forget: memory_guard_forget};
 }
 
 pub fun release_memory_guard(guard: *MemoryGuard) bool {
@@ -992,11 +995,11 @@ pub fun release_memory_guard(guard: *MemoryGuard) bool {
     var i: usize = 0;
     for (i < guard.capacity) {
         clear_public(?guard.slots[i].token[0], 12);
-        guard.slots[i].used = false;
-        guard.slots[i].token_len = 0;
-        guard.slots[i].key_id = 0;
+        guard.slots[i].used       = false;
+        guard.slots[i].token_len  = 0;
+        guard.slots[i].key_id     = 0;
         guard.slots[i].expires_at = 0;
-        i = i + 1;
+        i                         = i + 1;
     }
     guard.active = false;
     mutex.unlock(?guard.lock);
@@ -1021,7 +1024,7 @@ fun key_ring_shape_valid(ring: *KeyRing) bool {
     ret array_valid(ring.items::*u8, ring.len,
         $size_of(KeyGeneration), ?item_bytes)
         && !ranges_overlap(ring::*u8, $size_of(KeyRing),
-            ring.items::*u8, item_bytes);
+        ring.items::*u8, item_bytes);
 }
 
 fun key_ring_aliases(ring: *KeyRing, data: *u8, len: usize) bool {
@@ -1035,15 +1038,15 @@ fun key_ring_aliases(ring: *KeyRing, data: *u8, len: usize) bool {
 }
 
 fun key_material_equal(left: *u8, right: *u8) bool {
-    var left_secret: [32]^u8;
+    var left_secret:  [32]^u8;
     var right_secret: [32]^u8;
     ct.zeroize(?left_secret[0], 32);
     ct.zeroize(?right_secret[0], 32);
     var i: usize = 0;
     for (i < 32) {
-        left_secret[i] = left[i];
+        left_secret[i]  = left[i];
         right_secret[i] = right[i];
-        i = i + 1;
+        i               = i + 1;
     }
     ct.begin();
     val equal: ^u8 = ct.eq_bytes(?left_secret[0], ?right_secret[0], 32);
@@ -1068,11 +1071,11 @@ pub fun init_key_ring(ring: *KeyRing, items: *KeyGeneration, len: usize,
         || len - 1 > max_retired || current_id == 0 || nonce_domain == nil
         || (algorithm != AES_256_GCM && algorithm != CHACHA20_POLY1305)
         || !array_valid(items::*u8, len, $size_of(KeyGeneration),
-            ?item_bytes)
+        ?item_bytes)
         || ranges_overlap(ring::*u8, $size_of(KeyRing),
-            items::*u8, item_bytes)) { ret false; }
-    var current_found: bool = false;
-    var i: usize = 0;
+        items::*u8, item_bytes)) { ret false; }
+    var current_found: bool  = false;
+    var i:             usize = 0;
     for (i < len) {
         val item: *KeyGeneration = ?items[i];
         if (item.id == 0 || item.key_len != 32
@@ -1083,21 +1086,21 @@ pub fun init_key_ring(ring: *KeyRing, items: *KeyGeneration, len: usize,
         for (previous < i) {
             if (items[previous].id == item.id
                 || key_material_equal(?items[previous].key[0],
-                    ?item.key[0])) { ret false; }
+                ?item.key[0])) { ret false; }
             previous = previous + 1;
         }
         i = i + 1;
     }
     if (!current_found) { ret false; }
-    ring.items = items;
-    ring.len = len;
-    ring.current_id = current_id;
-    ring.max_retired = max_retired;
-    ring.algorithm = algorithm;
+    ring.items        = items;
+    ring.len          = len;
+    ring.current_id   = current_id;
+    ring.max_retired  = max_retired;
+    ring.algorithm    = algorithm;
     ring.nonce_domain = nonce_domain;
-    ring.lock = mutex.make();
-    ring.initialized = true;
-    ring.active = true;
+    ring.lock         = mutex.make();
+    ring.initialized  = true;
+    ring.active       = true;
     ret true;
 }
 
@@ -1111,15 +1114,15 @@ pub fun release_key_ring(ring: *KeyRing) bool {
     var i: usize = 0;
     for (i < ring.len) {
         clear_public(?ring.items[i].key[0], 32);
-        ring.items[i].id = 0;
-        ring.items[i].key_len = 0;
+        ring.items[i].id           = 0;
+        ring.items[i].key_len      = 0;
         ring.items[i].activated_at = 0;
         ring.items[i].encode_until = 0;
         ring.items[i].decode_until = 0;
-        i = i + 1;
+        i                          = i + 1;
     }
     ring.current_id = 0;
-    ring.active = false;
+    ring.active     = false;
     mutex.unlock(?ring.lock);
     ret true;
 }
@@ -1162,12 +1165,12 @@ fun protected_valid(codec: *ProtectedCodec) bool {
         && codec.entropy.ctx != nil && codec.entropy.aliases != nil
         && codec.entropy.fill != nil && guard_valid(codec.nonce_guard)
         && (codec.replay_policy == REPLAY_ALLOW
-            || (codec.replay_policy == REPLAY_REJECT
-                && guard_valid(codec.replay_guard)
-                && codec.replay_guard.ctx != codec.nonce_guard.ctx
-                && codec.replay_guard.domain != codec.nonce_guard.domain))
+        || (codec.replay_policy == REPLAY_REJECT
+        && guard_valid(codec.replay_guard)
+        && codec.replay_guard.ctx != codec.nonce_guard.ctx
+        && codec.replay_guard.domain != codec.nonce_guard.domain))
         && (codec.algorithm == AES_256_GCM
-            || codec.algorithm == CHACHA20_POLY1305)
+        || codec.algorithm == CHACHA20_POLY1305)
         && codec.clock_skew_s >= 0 && codec.max_lifetime_s > 0
         && codec.max_context_bytes > 0
         && codec.max_context_bytes <= MAX_CONTEXT_BYTES;
@@ -1193,17 +1196,17 @@ pub fun init_protected_codec(codec: *ProtectedCodec, ring: *KeyRing,
     if (codec == nil || !range_valid(codec::*u8, $size_of(ProtectedCodec))
         || codec.active || !key_ring_shape_valid(ring)
         || ranges_overlap(codec::*u8, $size_of(ProtectedCodec),
-            ring::*u8, $size_of(KeyRing))) { ret false; }
+        ring::*u8, $size_of(KeyRing))) { ret false; }
     var ring_item_bytes: usize = 0;
     if (!multiply_size(ring.len, $size_of(KeyGeneration),
-            ?ring_item_bytes)
+        ?ring_item_bytes)
         || ranges_overlap(codec::*u8, $size_of(ProtectedCodec),
-            ring.items::*u8, ring_item_bytes)) { ret false; }
+        ring.items::*u8, ring_item_bytes)) { ret false; }
     var candidate: ProtectedCodec = ProtectedCodec{ring: ring,
-        entropy: entropy, nonce_guard: nonce_guard,
-        replay_guard: replay_guard, replay_policy: replay_policy,
-        algorithm: algorithm, clock_skew_s: clock_skew_s,
-        max_lifetime_s: max_lifetime_s,
+        entropy:           entropy, nonce_guard: nonce_guard,
+        replay_guard:      replay_guard, replay_policy: replay_policy,
+        algorithm:         algorithm, clock_skew_s: clock_skew_s,
+        max_lifetime_s:    max_lifetime_s,
         max_context_bytes: max_context_bytes, active: true};
     if (!protected_valid(?candidate)) { ret false; }
     mutex.lock(?ring.lock);
@@ -1212,53 +1215,53 @@ pub fun init_protected_codec(codec: *ProtectedCodec, ring: *KeyRing,
     mutex.unlock(?ring.lock);
     if (!binding_valid
         || (replay_policy == REPLAY_REJECT
-            && guards_overlap(nonce_guard, replay_guard))
+        && guards_overlap(nonce_guard, replay_guard))
         || entropy.aliases(entropy.ctx, codec::*u8,
-            $size_of(ProtectedCodec))
+        $size_of(ProtectedCodec))
         || entropy.aliases(entropy.ctx, ring::*u8, $size_of(KeyRing))
         || entropy.aliases(entropy.ctx, ring.items::*u8, ring_item_bytes)
         || nonce_guard.aliases(nonce_guard.ctx, codec::*u8,
-            $size_of(ProtectedCodec))
+        $size_of(ProtectedCodec))
         || nonce_guard.aliases(nonce_guard.ctx, ring::*u8,
-            $size_of(KeyRing))
+        $size_of(KeyRing))
         || nonce_guard.aliases(nonce_guard.ctx, ring.items::*u8,
-            ring_item_bytes)
+        ring_item_bytes)
         || nonce_guard.overlaps(nonce_guard.ctx, entropy.ctx,
-            entropy.aliases)
+        entropy.aliases)
         || (replay_policy == REPLAY_REJECT
-            && (replay_guard.aliases(replay_guard.ctx, codec::*u8,
-                    $size_of(ProtectedCodec))
-                || replay_guard.aliases(replay_guard.ctx, ring::*u8,
-                    $size_of(KeyRing))
-                || replay_guard.aliases(replay_guard.ctx, ring.items::*u8,
-                    ring_item_bytes)
-                || replay_guard.overlaps(replay_guard.ctx, entropy.ctx,
-                    entropy.aliases)))) { ret false; }
+        && (replay_guard.aliases(replay_guard.ctx, codec::*u8,
+        $size_of(ProtectedCodec))
+        || replay_guard.aliases(replay_guard.ctx, ring::*u8,
+        $size_of(KeyRing))
+        || replay_guard.aliases(replay_guard.ctx, ring.items::*u8,
+        ring_item_bytes)
+        || replay_guard.overlaps(replay_guard.ctx, entropy.ctx,
+        entropy.aliases)))) { ret false; }
     @codec = candidate;
     ret true;
 }
 
 fun write_u16_secret(output: *^u8, offset: usize, value: u16) {
-    output[offset] = (value >> 8)::u8;
+    output[offset]     = (value >> 8)::u8;
     output[offset + 1] = value::u8;
 }
 
 fun write_u32_public(output: *u8, offset: usize, value: u32) {
-    output[offset] = (value >> 24)::u8;
+    output[offset]     = (value >> 24)::u8;
     output[offset + 1] = (value >> 16)::u8;
     output[offset + 2] = (value >> 8)::u8;
     output[offset + 3] = value::u8;
 }
 
 fun write_u32_secret(output: *^u8, offset: usize, value: u32) {
-    output[offset] = (value >> 24)::u8;
+    output[offset]     = (value >> 24)::u8;
     output[offset + 1] = (value >> 16)::u8;
     output[offset + 2] = (value >> 8)::u8;
     output[offset + 3] = value::u8;
 }
 
 fun write_u64_secret(output: *^u8, offset: usize, value: u64) {
-    output[offset] = (value >> 56)::u8;
+    output[offset]     = (value >> 56)::u8;
     output[offset + 1] = (value >> 48)::u8;
     output[offset + 2] = (value >> 40)::u8;
     output[offset + 3] = (value >> 32)::u8;
@@ -1299,10 +1302,10 @@ fun time_valid_for_encode(codec: *ProtectedCodec, value: *Session,
     now: i64) bool {
     if (now < 0 || !session_valid(value)
         || value.expires_at_unix - value.issued_at_unix
-            > codec.max_lifetime_s
+        > codec.max_lifetime_s
         || now >= value.expires_at_unix
         || value.expires_at_unix > 9223372036854775807
-            - codec.clock_skew_s) { ret false; }
+        - codec.clock_skew_s) { ret false; }
     if (value.issued_at_unix > now
         && value.issued_at_unix - now > codec.clock_skew_s) { ret false; }
     ret true;
@@ -1319,7 +1322,7 @@ fun expired(expires: i64, now: i64, skew: i64) bool {
 }
 
 fun key_decode_active(key: *KeyGeneration, now: i64, skew: i64) bool {
-    if (key == nil || now < 0) { ret false; }
+    if (key == nil || now < 0)                                   { ret false; }
     if (key.activated_at > now && key.activated_at - now > skew) { ret false; }
     ret now < key.decode_until
         || (now - key.decode_until < skew);
@@ -1330,12 +1333,12 @@ fun build_aad(header: *u8, context_value: view.View,
     var i: usize = 0;
     for (i < 8) {
         output[i] = header[i];
-        i = i + 1;
+        i         = i + 1;
     }
     i = 0;
     for (i < context_value.len) {
         output[8 + i] = context_value.data[i];
-        i = i + 1;
+        i             = i + 1;
     }
     ret 8 + context_value.len;
 }
@@ -1375,17 +1378,17 @@ fun map_guard(status: GuardStatus, nonce: bool) CodecStatus {
 
 fun forget_nonce(guard: Guard, key_id: u32, nonce: *u8) {
     var token: [12]u8;
-    var i: usize = 0;
+    var i:     usize = 0;
     for (i < 12) {
         token[i] = nonce[i];
-        i = i + 1;
+        i        = i + 1;
     }
     guard.forget(guard.ctx, key_id, ?token[0], 12);
     clear_public(?token[0], 12);
 }
 
 fun base64url_text_len(input_len: usize) usize {
-    val complete: usize = input_len / 3 * 4;
+    val complete:  usize = input_len / 3 * 4;
     val remaining: usize = input_len % 3;
     if (remaining == 0) { ret complete; }
     ret complete + remaining + 1;
@@ -1399,9 +1402,9 @@ fun encode_protected(ctx: ptr, value: *Session, context_value: view.View,
         codec.max_context_bytes) || !time_valid_for_encode(codec, value, now)) {
         ret codec_result(CODEC_INVALID);
     }
-    val config: ProtectedCodec = @codec;
-    val source: Session = @value;
-    val plaintext_len: usize = PLAINTEXT_HEADER_BYTES
+    val config:        ProtectedCodec = @codec;
+    val source:        Session        = @value;
+    val plaintext_len: usize          = PLAINTEXT_HEADER_BYTES
         + source.id.len + source.data.len;
     val raw_len: usize = ENVELOPE_BYTES + plaintext_len + 16;
     if (plaintext_len > MAX_SECRET_PLAINTEXT_BYTES
@@ -1423,7 +1426,7 @@ fun encode_protected(ctx: ptr, value: *Session, context_value: view.View,
     var i: usize = 0;
     for (i < source.id.len) {
         plaintext[PLAINTEXT_HEADER_BYTES + i] = source.id.data[i];
-        i = i + 1;
+        i                                     = i + 1;
     }
     i = 0;
     for (i < source.data.len) {
@@ -1435,7 +1438,7 @@ fun encode_protected(ctx: ptr, value: *Session, context_value: view.View,
     i = 0;
     for (i < context_value.len) {
         context_snapshot[i] = context_value.data[i];
-        i = i + 1;
+        i                   = i + 1;
     }
     val context_copy: view.View = view.view(?context_snapshot[0],
         context_value.len);
@@ -1446,11 +1449,11 @@ fun encode_protected(ctx: ptr, value: *Session, context_value: view.View,
         || protected_aliases(codec, source.data.data, source.data.len)
         || protected_aliases(codec, context_value.data, context_value.len)
         || ranges_overlap(output, required_output, value::*u8,
-            $size_of(Session))
+        $size_of(Session))
         || ranges_overlap(output, required_output, source.id.data,
-            source.id.len)
+        source.id.len)
         || ranges_overlap(output, required_output, source.data.data,
-            source.data.len)) {
+        source.data.len)) {
         ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
         ret codec_result(CODEC_INVALID);
     }
@@ -1468,12 +1471,12 @@ fun encode_protected(ctx: ptr, value: *Session, context_value: view.View,
         ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
         ret codec_result(CODEC_KEY_INACTIVE);
     }
-    val key_id: u32 = key.id;
+    val key_id:         u32 = key.id;
     val nonce_deadline: i64 = key.decode_until + config.clock_skew_s;
     i = 0;
     for (i < 32) {
         secret_key[i] = key.key[i];
-        i = i + 1;
+        i             = i + 1;
     }
     mutex.unlock(?config.ring.lock);
     var staged: [3072]u8;
@@ -1482,8 +1485,8 @@ fun encode_protected(ctx: ptr, value: *Session, context_value: view.View,
     staged[2] = 1;
     staged[3] = config.algorithm;
     write_u32_public(?staged[0], 4, key_id);
-    var aad: [264]u8;
-    val aad_len: usize = build_aad(?staged[0], context_copy, ?aad[0]);
+    var aad:         [264]u8;
+    val aad_len:     usize = build_aad(?staged[0], context_copy, ?aad[0]);
     var nonce_value: [12]u8;
     clear_public(?nonce_value[0], 12);
     if (config.entropy.fill(config.entropy.ctx, ?nonce_value[0], 12) != 0) {
@@ -1495,14 +1498,14 @@ fun encode_protected(ctx: ptr, value: *Session, context_value: view.View,
     i = 0;
     for (i < 12) {
         staged[8 + i] = nonce_value[i];
-        i = i + 1;
+        i             = i + 1;
     }
     clear_public(?nonce_value[0], 12);
     var claim_token: [12]u8;
     i = 0;
     for (i < 12) {
         claim_token[i] = staged[8 + i];
-        i = i + 1;
+        i              = i + 1;
     }
     val claimed: GuardStatus = config.nonce_guard.claim(config.nonce_guard.ctx,
         key_id, ?claim_token[0], 12, nonce_deadline, now);
@@ -1519,20 +1522,21 @@ fun encode_protected(ctx: ptr, value: *Session, context_value: view.View,
         ret codec_result(map_guard(claimed, true));
     }
     val key_bytes: contracts.SecretBytes = contracts.SecretBytes{
-        data: ?secret_key[0], len: 32};
+        data: ?secret_key[0], len: 32
+    };
     val sealed: contracts.Operation = seal_aead(config.algorithm, key_bytes,
         contracts.Bytes{data: ?staged[8], len: 12},
         contracts.Bytes{data: ?aad[0], len: aad_len},
         contracts.SecretBytes{data: ?plaintext[0], len: plaintext_len},
         contracts.Buffer{data: ?staged[ENVELOPE_BYTES],
-            capacity: MAX_RAW_TOKEN_BYTES - ENVELOPE_BYTES});
+        capacity: MAX_RAW_TOKEN_BYTES - ENVELOPE_BYTES});
     ct.zeroize(?secret_key[0], 32);
     ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
     if (sealed.error != contracts.OK || sealed.written != plaintext_len + 16) {
         forget_nonce(config.nonce_guard, key_id, ?staged[8]);
         ret codec_result(CODEC_INVALID);
     }
-    var encoded: [4097]u8;
+    var encoded:     [4097]u8;
     val encoded_len: usize = base64.encode_url(?staged[0], raw_len,
         ?encoded[0], 4097);
     if (encoded_len == 0 || encoded_len != required_output) {
@@ -1542,7 +1546,7 @@ fun encode_protected(ctx: ptr, value: *Session, context_value: view.View,
     i = 0;
     for (i < encoded_len) {
         output[i] = encoded[i];
-        i = i + 1;
+        i         = i + 1;
     }
     ret CodecOperation{status: CODEC_OK, written: encoded_len,
         key_id: key_id, needs_rotation: false};
@@ -1575,21 +1579,21 @@ fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
         || !token_text_valid(input, input_len)) {
         ret codec_result(CODEC_INVALID);
     }
-    val config: ProtectedCodec = @codec;
+    val config:           ProtectedCodec = @codec;
     var context_snapshot: [256]u8;
-    var context_index: usize = 0;
+    var context_index:    usize          = 0;
     for (context_index < context_value.len) {
         context_snapshot[context_index] = context_value.data[context_index];
-        context_index = context_index + 1;
+        context_index                   = context_index + 1;
     }
     val context_copy: view.View = view.view(?context_snapshot[0],
         context_value.len);
-    var raw: [3072]u8;
+    var raw:     [3072]u8;
     val raw_len: usize = base64.decode(input, input_len, ?raw[0], 3072);
     if (raw_len < ENVELOPE_BYTES + 16 + PLAINTEXT_HEADER_BYTES) {
         ret codec_result(CODEC_TRUNCATED);
     }
-    var canonical: [4097]u8;
+    var canonical:     [4097]u8;
     val canonical_len: usize = base64.encode_url(?raw[0], raw_len,
         ?canonical[0], 4097);
     if (canonical_len != input_len
@@ -1601,7 +1605,7 @@ fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
         || protected_aliases(codec, output::*u8, $size_of(Session))) {
         ret codec_result(CODEC_INVALID);
     }
-    val key_id: u32 = read_u32_public(?raw[0], 4);
+    val key_id:     u32 = read_u32_public(?raw[0], 4);
     var secret_key: [32]^u8;
     ct.zeroize(?secret_key[0], 32);
     mutex.lock(?config.ring.lock);
@@ -1618,11 +1622,11 @@ fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
         ct.zeroize(?secret_key[0], 32);
         ret codec_result(CODEC_KEY_INACTIVE);
     }
-    val needs_rotation: bool = key_id != config.ring.current_id;
-    var i: usize = 0;
+    val needs_rotation: bool  = key_id != config.ring.current_id;
+    var i:              usize = 0;
     for (i < 32) {
         secret_key[i] = key.key[i];
-        i = i + 1;
+        i             = i + 1;
     }
     mutex.unlock(?config.ring.lock);
     val plaintext_len: usize = raw_len - ENVELOPE_BYTES - 16;
@@ -1630,17 +1634,18 @@ fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
         ct.zeroize(?secret_key[0], 32);
         ret codec_result(CODEC_INVALID);
     }
-    var aad: [264]u8;
-    val aad_len: usize = build_aad(?raw[0], context_copy, ?aad[0]);
+    var aad:       [264]u8;
+    val aad_len:   usize = build_aad(?raw[0], context_copy, ?aad[0]);
     var plaintext: [2160]^u8;
     ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
     val key_bytes: contracts.SecretBytes = contracts.SecretBytes{
-        data: ?secret_key[0], len: 32};
+        data: ?secret_key[0], len: 32
+    };
     val opened: contracts.Operation = open_aead(config.algorithm, key_bytes,
         contracts.Bytes{data: ?raw[8], len: 12},
         contracts.Bytes{data: ?aad[0], len: aad_len},
         contracts.Bytes{data: ?raw[ENVELOPE_BYTES],
-            len: raw_len - ENVELOPE_BYTES},
+        len: raw_len - ENVELOPE_BYTES},
         contracts.SecretBuffer{data: ?plaintext[0], capacity: plaintext_len});
     ct.zeroize(?secret_key[0], 32);
     if (opened.error != contracts.OK || opened.written != plaintext_len) {
@@ -1651,7 +1656,7 @@ fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
         ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
         ret codec_result(CODEC_INVALID);
     }
-    val id_len: usize = read_u16_secret(?plaintext[0], 2)::usize;
+    val id_len:   usize = read_u16_secret(?plaintext[0], 2)::usize;
     val data_len: usize = read_u32_secret(?plaintext[0], 4)::usize;
     if (id_len == 0 || id_len > MAX_SESSION_ID_BYTES
         || data_len > MAX_SESSION_DATA_BYTES
@@ -1660,10 +1665,10 @@ fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
         ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
         ret codec_result(CODEC_INVALID);
     }
-    val issued: i64 = read_u64_secret(?plaintext[0], 8)::i64;
+    val issued:     i64 = read_u64_secret(?plaintext[0], 8)::i64;
     val not_before: i64 = read_u64_secret(?plaintext[0], 16)::i64;
-    val expires: i64 = read_u64_secret(?plaintext[0], 24)::i64;
-    val version: u64 = read_u64_secret(?plaintext[0], 32);
+    val expires:    i64 = read_u64_secret(?plaintext[0], 24)::i64;
+    val version:    u64 = read_u64_secret(?plaintext[0], 32);
     val generation: u64 = read_u64_secret(?plaintext[0], 40);
     if (issued < 0 || not_before < issued || expires <= not_before
         || expires - issued > config.max_lifetime_s
@@ -1691,7 +1696,7 @@ fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
         || ranges_overlap(id_output, id_len, data_output, data_len)
         || ranges_overlap(id_output, id_len, output_bytes, $size_of(Session))
         || ranges_overlap(data_output, data_len, output_bytes,
-            $size_of(Session))) {
+        $size_of(Session))) {
         ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
         ret codec_result(CODEC_INVALID);
     }
@@ -1700,7 +1705,7 @@ fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
         i = 0;
         for (i < 12) {
             claim_token[i] = raw[8 + i];
-            i = i + 1;
+            i              = i + 1;
         }
         val replay: GuardStatus = config.replay_guard.claim(
             config.replay_guard.ctx, key_id, ?claim_token[0], 12,
@@ -1719,16 +1724,16 @@ fun decode_protected(ctx: ptr, input: *u8, input_len: usize,
     i = 0;
     for (i < id_len) {
         id_output[i] = plaintext[PLAINTEXT_HEADER_BYTES + i]:>u8;
-        i = i + 1;
+        i            = i + 1;
     }
     i = 0;
     for (i < data_len) {
         data_output[i] = plaintext[PLAINTEXT_HEADER_BYTES + id_len + i]:>u8;
-        i = i + 1;
+        i              = i + 1;
     }
     var decoded: Session = Session{id: view.view(id_output, id_len),
-        data: view.view(data_output, data_len),
-        issued_at_unix: issued, not_before_unix: not_before,
+        data:            view.view(data_output, data_len),
+        issued_at_unix:  issued, not_before_unix: not_before,
         expires_at_unix: expires, version: version, generation: generation};
     @output = decoded;
     ct.zeroize(?plaintext[0], MAX_SECRET_PLAINTEXT_BYTES);
@@ -1753,18 +1758,18 @@ pub fun protected_codec(codec: *ProtectedCodec) Codec {
 pub fun release_protected_codec(codec: *ProtectedCodec) bool {
     if (codec == nil || !range_valid(codec::*u8, $size_of(ProtectedCodec))
         || !codec.active) { ret false; }
-    codec.ring = nil;
-    codec.entropy = Entropy{ctx: nil, aliases: nil, fill: nil};
+    codec.ring        = nil;
+    codec.entropy     = Entropy{ctx: nil, aliases: nil, fill: nil};
     codec.nonce_guard = Guard{ctx: nil, domain: nil, aliases: nil, overlaps: nil,
         claim: nil, forget: nil};
     codec.replay_guard = Guard{ctx: nil, domain: nil, aliases: nil, overlaps: nil,
         claim: nil, forget: nil};
-    codec.replay_policy = 0;
-    codec.algorithm = 0;
-    codec.clock_skew_s = 0;
-    codec.max_lifetime_s = 0;
+    codec.replay_policy     = 0;
+    codec.algorithm         = 0;
+    codec.clock_skew_s      = 0;
+    codec.max_lifetime_s    = 0;
     codec.max_context_bytes = 0;
-    codec.active = false;
+    codec.active            = false;
     ret true;
 }
 
@@ -1779,13 +1784,13 @@ pub fun regenerate_id(codec: *ProtectedCodec, source: *Session,
         || source.generation == 18446744073709551615) {
         ret CODEC_INVALID;
     }
-    val config: ProtectedCodec = @codec;
-    var source_snapshot: Session = @source;
-    var source_id: [64]u8;
-    var snapshot_index: usize = 0;
+    val config:          ProtectedCodec = @codec;
+    var source_snapshot: Session        = @source;
+    var source_id:       [64]u8;
+    var snapshot_index:  usize          = 0;
     for (snapshot_index < source_snapshot.id.len) {
         source_id[snapshot_index] = source_snapshot.id.data[snapshot_index];
-        snapshot_index = snapshot_index + 1;
+        snapshot_index            = snapshot_index + 1;
     }
     if (protected_aliases(codec, id_output, GENERATED_ID_TEXT_BYTES)
         || protected_aliases(codec, output::*u8, $size_of(Session))
@@ -1793,26 +1798,26 @@ pub fun regenerate_id(codec: *ProtectedCodec, source: *Session,
         || protected_aliases(codec, source.id.data, source.id.len)
         || protected_aliases(codec, source.data.data, source.data.len)
         || ranges_overlap(source::*u8, $size_of(Session), output::*u8,
-            $size_of(Session))
+        $size_of(Session))
         || ranges_overlap(id_output, GENERATED_ID_TEXT_BYTES,
-            codec::*u8, $size_of(ProtectedCodec))
+        codec::*u8, $size_of(ProtectedCodec))
         || ranges_overlap(output::*u8, $size_of(Session),
-            codec::*u8, $size_of(ProtectedCodec))
+        codec::*u8, $size_of(ProtectedCodec))
         || ranges_overlap(id_output, GENERATED_ID_TEXT_BYTES,
-            source::*u8, $size_of(Session))
+        source::*u8, $size_of(Session))
         || ranges_overlap(id_output, GENERATED_ID_TEXT_BYTES,
-            source.id.data, source.id.len)
+        source.id.data, source.id.len)
         || ranges_overlap(id_output, GENERATED_ID_TEXT_BYTES,
-            source.data.data, source.data.len)
+        source.data.data, source.data.len)
         || ranges_overlap(id_output, GENERATED_ID_TEXT_BYTES,
-            output::*u8, $size_of(Session))
+        output::*u8, $size_of(Session))
         || ranges_overlap(output::*u8, $size_of(Session),
-            source.id.data, source.id.len)
+        source.id.data, source.id.len)
         || ranges_overlap(output::*u8, $size_of(Session),
-            source.data.data, source.data.len)) { ret CODEC_INVALID; }
-    var random: [32]u8;
+        source.data.data, source.data.len)) { ret CODEC_INVALID; }
+    var random:    [32]u8;
     var candidate: [45]u8;
-    var attempt: usize = 0;
+    var attempt:   usize = 0;
     for (attempt < 4) {
         clear_public(?random[0], 32);
         if (config.entropy.fill(config.entropy.ctx, ?random[0], 32) != 0) {
@@ -1822,10 +1827,10 @@ pub fun regenerate_id(codec: *ProtectedCodec, source: *Session,
             ret CODEC_ENTROPY_UNAVAILABLE;
         }
         var public_random: [32]u8;
-        var i: usize = 0;
+        var i:             usize = 0;
         for (i < 32) {
             public_random[i] = random[i];
-            i = i + 1;
+            i                = i + 1;
         }
         clear_public(?random[0], 32);
         val encoded: usize = base64.encode_url(?public_random[0], 32,
@@ -1841,13 +1846,13 @@ pub fun regenerate_id(codec: *ProtectedCodec, source: *Session,
             i = 0;
             for (i < encoded) {
                 id_output[i] = candidate[i];
-                i = i + 1;
+                i            = i + 1;
             }
             var regenerated: Session = source_snapshot;
-            regenerated.id = view.view(id_output, encoded);
-            regenerated.version = 0;
+            regenerated.id         = view.view(id_output, encoded);
+            regenerated.version    = 0;
             regenerated.generation = 0;
-            @output = regenerated;
+            @output                = regenerated;
             clear_public(?candidate[0], 45);
             clear_public(?source_id[0], 64);
             ret CODEC_OK;
@@ -1881,7 +1886,7 @@ pub fun manager_valid(manager: *Manager) bool {
     val state: ManagerState = atomic.load(?manager.state);
     ret (state == MANAGER_STOPPED || state == MANAGER_ACTIVE)
         && manager_dependencies_valid(manager.store, manager.codec,
-            manager.cookie);
+        manager.cookie);
 }
 
 pub fun manager_active(manager: *Manager) bool {
@@ -1904,9 +1909,9 @@ pub fun init_manager(manager: *Manager, store: Store, codec: Codec,
     if (!atomic.cas(?manager.state, ?expected, MANAGER_STARTING)) {
         ret false;
     }
-    manager.store = store;
-    manager.codec = codec;
-    manager.cookie = cookie;
+    manager.store   = store;
+    manager.codec   = codec;
+    manager.cookie  = cookie;
     manager.context = context_value;
     atomic.store(?manager.state, MANAGER_STOPPED);
     ret true;
@@ -1927,7 +1932,7 @@ pub fun start_manager(manager: *Manager) StoreStatus {
     }
     val started: StoreStatus = store.start(store.ctx);
     if (started == STORE_OK) { atomic.store(?manager.state, MANAGER_ACTIVE); }
-    or { atomic.store(?manager.state, MANAGER_STOPPED); }
+    or                       { atomic.store(?manager.state, MANAGER_STOPPED); }
     ret started;
 }
 
@@ -1946,7 +1951,7 @@ pub fun stop_manager(manager: *Manager) StoreStatus {
     }
     val stopped: StoreStatus = store.stop(store.ctx);
     if (stopped == STORE_OK) { atomic.store(?manager.state, MANAGER_STOPPED); }
-    or { atomic.store(?manager.state, MANAGER_ACTIVE); }
+    or                       { atomic.store(?manager.state, MANAGER_ACTIVE); }
     ret stopped;
 }
 
@@ -1963,7 +1968,7 @@ fun test_entropy_fill(ctx: ptr, output: *u8, len: usize) i64 {
     var i: usize = 0;
     for (i < len) {
         output[i] = state.seed + i::u8;
-        i = i + 1;
+        i         = i + 1;
     }
     state.calls = state.calls + 1;
     if (!state.repeat) { state.seed = state.seed + 1; }
@@ -1985,12 +1990,12 @@ rec MutatingEntropyState {
 fun mutating_entropy_fill(ctx: ptr, output: *u8, len: usize) i64 {
     val state: *MutatingEntropyState = ctx::*MutatingEntropyState;
     if (state == nil || state.source == nil || output == nil) { ret -1; }
-    state.source.data = view.view("mutated", ~(0::usize));
+    state.source.data           = view.view("mutated", ~(0::usize));
     state.source.issued_at_unix = 999;
     var i: usize = 0;
     for (i < len) {
         output[i] = 0x40 + i::u8;
-        i = i + 1;
+        i         = i + 1;
     }
     state.calls = state.calls + 1;
     ret 0;
@@ -2017,7 +2022,7 @@ fun mutating_guard_claim(ctx: ptr, key_id: u32, token: *u8,
     val status: GuardStatus = state.inner.claim(state.inner.ctx, key_id,
         token, token_len, expires_at, now);
     if (token != nil && token_len != 0) {
-        token[0] = token[0] ^ 0xff;
+        token[0]        = token[0] ^ 0xff;
         state.mutations = state.mutations + 1;
     }
     ret status;
@@ -2030,7 +2035,7 @@ fun mutating_guard_forget(ctx: ptr, key_id: u32, token: *u8,
     val status: GuardStatus = state.inner.forget(state.inner.ctx, key_id,
         token, token_len);
     if (token != nil && token_len != 0) {
-        token[0] = token[0] ^ 0xff;
+        token[0]        = token[0] ^ 0xff;
         state.mutations = state.mutations + 1;
     }
     ret status;
@@ -2057,11 +2062,11 @@ fun mutating_guard_overlaps(ctx: ptr, other_ctx: ptr,
 fun mutating_guard(state: *MutatingGuardState) Guard {
     if (state == nil || !guard_valid(state.inner)) {
         ret Guard{ctx: nil, domain: nil, aliases: nil, overlaps: nil,
-        claim: nil, forget: nil};
+            claim: nil, forget: nil};
     }
     ret Guard{ctx: state::ptr, domain: state.inner.domain,
         aliases: mutating_guard_aliases, overlaps: mutating_guard_overlaps,
-        claim: mutating_guard_claim, forget: mutating_guard_forget};
+        claim:   mutating_guard_claim, forget: mutating_guard_forget};
 }
 
 rec CodecFixture {
@@ -2081,22 +2086,22 @@ fun init_codec_fixture(fixture: *CodecFixture, algorithm: Algorithm,
     replay_capacity: usize) bool {
     if (fixture == nil || nonce_capacity == 0 || nonce_capacity > 8
         || replay_capacity == 0 || replay_capacity > 8) { ret false; }
-    fixture.ring.initialized = false;
-    fixture.ring.active = false;
-    fixture.nonce_guard.initialized = false;
-    fixture.nonce_guard.active = false;
+    fixture.ring.initialized         = false;
+    fixture.ring.active              = false;
+    fixture.nonce_guard.initialized  = false;
+    fixture.nonce_guard.active       = false;
     fixture.replay_guard.initialized = false;
-    fixture.replay_guard.active = false;
-    fixture.protected.active = false;
-    fixture.entropy = TestEntropyState{seed: 1, calls: 0,
+    fixture.replay_guard.active      = false;
+    fixture.protected.active         = false;
+    fixture.entropy                  = TestEntropyState{seed: 1, calls: 0,
         fail: false, repeat: false};
-    fixture.keys[0].id = 1;
-    fixture.keys[0].key_len = 32;
+    fixture.keys[0].id           = 1;
+    fixture.keys[0].key_len      = 32;
     fixture.keys[0].activated_at = 0;
     fixture.keys[0].encode_until = 2000;
     fixture.keys[0].decode_until = 3000;
-    fixture.keys[1].id = 2;
-    fixture.keys[1].key_len = 32;
+    fixture.keys[1].id           = 2;
+    fixture.keys[1].key_len      = 32;
     fixture.keys[1].activated_at = 1000;
     fixture.keys[1].encode_until = 4000;
     fixture.keys[1].decode_until = 5000;
@@ -2104,12 +2109,12 @@ fun init_codec_fixture(fixture: *CodecFixture, algorithm: Algorithm,
     for (i < 32) {
         fixture.keys[0].key[i] = 0x10 + i::u8;
         fixture.keys[1].key[i] = 0x80 + i::u8;
-        i = i + 1;
+        i                      = i + 1;
     }
     if (!init_memory_guard(?fixture.nonce_guard,
-            ?fixture.nonce_slots[0], nonce_capacity)
+        ?fixture.nonce_slots[0], nonce_capacity)
         || !init_memory_guard(?fixture.replay_guard,
-            ?fixture.replay_slots[0], replay_capacity)) { ret false; }
+        ?fixture.replay_slots[0], replay_capacity)) { ret false; }
     val nonce: Guard = memory_guard(?fixture.nonce_guard);
     if (!init_key_ring(?fixture.ring, ?fixture.keys[0], 2, 1, 1,
         algorithm, nonce.domain)) { ret false; }
@@ -2132,13 +2137,13 @@ fun release_codec_fixture(fixture: *CodecFixture) bool {
 
 fun duplicate_generation_rejected(algorithm: Algorithm) bool {
     var items: [2]KeyGeneration;
-    items[0].id = 1;
-    items[0].key_len = 32;
+    items[0].id           = 1;
+    items[0].key_len      = 32;
     items[0].activated_at = 0;
     items[0].encode_until = 100;
     items[0].decode_until = 200;
-    items[1].id = 2;
-    items[1].key_len = 32;
+    items[1].id           = 2;
+    items[1].key_len      = 32;
     items[1].activated_at = 50;
     items[1].encode_until = 200;
     items[1].decode_until = 300;
@@ -2148,11 +2153,11 @@ fun duplicate_generation_rejected(algorithm: Algorithm) bool {
     for (i < 32) {
         items[0].key[i] = seed + i::u8;
         items[1].key[i] = seed + i::u8;
-        i = i + 1;
+        i               = i + 1;
     }
     var ring: KeyRing;
     ring.initialized = false;
-    ring.active = false;
+    ring.active      = false;
     ret !init_key_ring(?ring, ?items[0], 2, 1, 1, algorithm,
         (?ring)::ptr) && !ring.active;
 }
@@ -2162,15 +2167,16 @@ fun mutating_guard_rejected(algorithm: Algorithm) bool {
     if (!init_codec_fixture(?fixture, algorithm, REPLAY_ALLOW, 8, 8)
         || !release_protected_codec(?fixture.protected)) { ret false; }
     var mutation: MutatingGuardState = MutatingGuardState{
-        inner: memory_guard(?fixture.nonce_guard), mutations: 0};
+        inner: memory_guard(?fixture.nonce_guard), mutations: 0
+    };
     val entropy: Entropy = Entropy{ctx: (?fixture.entropy)::ptr,
         aliases: test_entropy_aliases, fill: test_entropy_fill};
     if (!init_protected_codec(?fixture.protected, ?fixture.ring, entropy,
         mutating_guard(?mutation), REPLAY_ALLOW,
         memory_guard(?fixture.replay_guard), algorithm, 5, 3600,
         MAX_CONTEXT_BYTES)) { ret false; }
-    fixture.codec = protected_codec(?fixture.protected);
-    fixture.entropy.seed = 1;
+    fixture.codec          = protected_codec(?fixture.protected);
+    fixture.entropy.seed   = 1;
     fixture.entropy.repeat = true;
     var value: Session = sample_session();
     var token: [4096]u8;
@@ -2178,15 +2184,15 @@ fun mutating_guard_rejected(algorithm: Algorithm) bool {
     val encoded: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
         ?value, view.view("binding", 7), 100, ?token[0], 4096);
     var expected_nonce: [12]u8;
-    var i: usize = 0;
+    var i:              usize = 0;
     for (i < 12) {
         expected_nonce[i] = 1 + i::u8;
-        i = i + 1;
+        i                 = i + 1;
     }
     if (encoded.status != CODEC_INVALID || token[0] != 0xa5
         || mutation.mutations != 1
         || mutation.inner.claim(mutation.inner.ctx, 1,
-            ?expected_nonce[0], 12, 3005, 100) != GUARD_SEEN) { ret false; }
+        ?expected_nonce[0], 12, 3005, 100) != GUARD_SEEN) { ret false; }
     ret release_codec_fixture(?fixture);
 }
 
@@ -2195,16 +2201,16 @@ fun rotation_round_trip(algorithm: Algorithm) bool {
     if (!init_codec_fixture(?fixture, algorithm, REPLAY_ALLOW, 8, 8)) {
         ret false;
     }
-    fixture.entropy.seed = 1;
+    fixture.entropy.seed   = 1;
     fixture.entropy.repeat = true;
-    var value: Session = sample_session();
+    var value: Session        = sample_session();
     var token: [4096]u8;
     val first: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
         ?value, view.view("binding", 7), 100, ?token[0], 4096);
     if (first.status != CODEC_OK || first.key_id != 1) { ret false; }
-    var id_output: [64]u8;
+    var id_output:   [64]u8;
     var data_output: [2048]u8;
-    var decoded: Session;
+    var decoded:     Session;
     if (fixture.codec.decode(fixture.codec.ctx, ?token[0], first.written,
         view.view("binding", 7), 100, ?id_output[0], 64,
         ?data_output[0], 2048, ?decoded).status != CODEC_OK
@@ -2213,15 +2219,15 @@ fun rotation_round_trip(algorithm: Algorithm) bool {
         ?value, view.view("binding", 7), 1100, ?token[0], 4096);
     if (second.status != CODEC_OK || second.key_id != 2) { ret false; }
     if (fixture.codec.decode(fixture.codec.ctx, ?token[0], second.written,
-            view.view("binding", 7), 1100, ?id_output[0], 64,
-            ?data_output[0], 2048, ?decoded).status != CODEC_OK) { ret false; }
+        view.view("binding", 7), 1100, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_OK) { ret false; }
     ret release_codec_fixture(?fixture);
 }
 
 fun sample_session() Session {
     ret Session{id: view.view("session-id", 10),
-        data: view.view("authenticated state", 19),
-        issued_at_unix: 100, not_before_unix: 100,
+        data:            view.view("authenticated state", 19),
+        issued_at_unix:  100, not_before_unix: 100,
         expires_at_unix: 2000, version: 7, generation: 11};
 }
 
@@ -2300,7 +2306,7 @@ pub fun request_storage_valid(storage: RequestStorage) bool {
         ret false;
     }
     var jar_bytes: usize = 0;
-    val jar: *u8 = storage_span(storage.jar_items::ptr, storage.jar_capacity,
+    val jar:       *u8   = storage_span(storage.jar_items::ptr, storage.jar_capacity,
         $size_of(cookie.Cookie), ?jar_bytes);
     if (jar == nil || !range_valid(jar, jar_bytes)
         || !range_valid(storage.id_bytes, storage.id_capacity)
@@ -2311,33 +2317,33 @@ pub fun request_storage_valid(storage: RequestStorage) bool {
     }
     ret spans_disjoint(jar, jar_bytes, storage.id_bytes, storage.id_capacity)
         && spans_disjoint(jar, jar_bytes, storage.data_bytes,
-            storage.data_capacity)
+        storage.data_capacity)
         && spans_disjoint(jar, jar_bytes, storage.token_bytes,
-            storage.token_capacity)
+        storage.token_capacity)
         && spans_disjoint(jar, jar_bytes, storage.header_bytes,
-            storage.header_capacity)
+        storage.header_capacity)
         && spans_disjoint(storage.id_bytes, storage.id_capacity,
-            storage.data_bytes, storage.data_capacity)
+        storage.data_bytes, storage.data_capacity)
         && spans_disjoint(storage.id_bytes, storage.id_capacity,
-            storage.token_bytes, storage.token_capacity)
+        storage.token_bytes, storage.token_capacity)
         && spans_disjoint(storage.id_bytes, storage.id_capacity,
-            storage.header_bytes, storage.header_capacity)
+        storage.header_bytes, storage.header_capacity)
         && spans_disjoint(storage.data_bytes, storage.data_capacity,
-            storage.token_bytes, storage.token_capacity)
+        storage.token_bytes, storage.token_capacity)
         && spans_disjoint(storage.data_bytes, storage.data_capacity,
-            storage.header_bytes, storage.header_capacity)
+        storage.header_bytes, storage.header_capacity)
         && spans_disjoint(storage.token_bytes, storage.token_capacity,
-            storage.header_bytes, storage.header_capacity);
+        storage.header_bytes, storage.header_capacity);
 }
 
 fun clear_session_value(value: *Session) {
-    value.id = view.view(nil, 0);
-    value.data = view.view(nil, 0);
-    value.issued_at_unix = 0;
+    value.id              = view.view(nil, 0);
+    value.data            = view.view(nil, 0);
+    value.issued_at_unix  = 0;
     value.not_before_unix = 0;
     value.expires_at_unix = 0;
-    value.version = 0;
-    value.generation = 0;
+    value.version         = 0;
+    value.generation      = 0;
 }
 
 pub fun init_request(request_session: *RequestSession, manager: *Manager,
@@ -2349,7 +2355,7 @@ pub fun init_request(request_session: *RequestSession, manager: *Manager,
     request_session.manager = manager;
     request_session.storage = storage;
     clear_session_value(?request_session.value);
-    request_session.state = SESSION_IDLE;
+    request_session.state       = SESSION_IDLE;
     request_session.initialized = true;
     ret true;
 }
@@ -2366,7 +2372,7 @@ pub fun request_state(request_session: *RequestSession) RequestState {
 pub fun request_session_value(request_session: *RequestSession) *Session {
     if (request_session == nil || !request_session.initialized
         || (request_session.state != SESSION_PRESENT
-            && request_session.state != SESSION_DIRTY)) { ret nil; }
+        && request_session.state != SESSION_DIRTY)) { ret nil; }
     ret ?request_session.value;
 }
 
@@ -2421,7 +2427,7 @@ pub fun open_request(request_session: *RequestSession,
         request_session.state = SESSION_ABSENT;
         ret REQUEST_NONE;
     }
-    val codec: Codec = manager.codec;
+    val codec:   Codec          = manager.codec;
     val decoded: CodecOperation = codec.decode(codec.ctx, entry.value.data,
         entry.value.len, manager_context(manager), now_unix,
         request_session.storage.id_bytes, request_session.storage.id_capacity,
@@ -2432,7 +2438,7 @@ pub fun open_request(request_session: *RequestSession,
         request_session.state = SESSION_ABSENT;
         ret REQUEST_REJECTED;
     }
-    val store: Store = manager.store;
+    val store:  Store       = manager.store;
     val loaded: StoreStatus = store.load(store.ctx, request_session.value.id,
         now_unix, request_session.storage.data_bytes,
         request_session.storage.data_capacity, ?request_session.value, scope);
@@ -2458,7 +2464,7 @@ fun copy_into(source: view.View, output: *u8, capacity: usize) bool {
     var i: usize = 0;
     for (i < source.len) {
         output[i] = source.data[i];
-        i = i + 1;
+        i         = i + 1;
     }
     ret true;
 }
@@ -2495,8 +2501,8 @@ pub fun destroy_request(request_session: *RequestSession) RequestStatus {
 pub fun release_request(request_session: *RequestSession) bool {
     if (request_session == nil || !request_session.initialized) { ret false; }
     clear_session_value(?request_session.value);
-    request_session.manager = nil;
-    request_session.state = SESSION_IDLE;
+    request_session.manager     = nil;
+    request_session.state       = SESSION_IDLE;
     request_session.initialized = false;
     ret true;
 }
@@ -2504,9 +2510,9 @@ pub fun release_request(request_session: *RequestSession) bool {
 fun policy_same_site(value: str) u8 {
     if (value == nil) { ret cookie.SAME_SITE_DEFAULT; }
     val text: view.View = view.view(value, str_len(value));
-    if (view_text_equal(text, "Lax")) { ret cookie.SAME_SITE_LAX; }
+    if (view_text_equal(text, "Lax"))    { ret cookie.SAME_SITE_LAX; }
     if (view_text_equal(text, "Strict")) { ret cookie.SAME_SITE_STRICT; }
-    if (view_text_equal(text, "None")) { ret cookie.SAME_SITE_NONE; }
+    if (view_text_equal(text, "None"))   { ret cookie.SAME_SITE_NONE; }
     ret cookie.SAME_SITE_DEFAULT;
 }
 
@@ -2530,22 +2536,24 @@ fun policy_view(value: str) view.View {
 # restates the policy the manager already holds
 fun emit_cookie(request_session: *RequestSession, response: *message.Response,
     value: view.View, max_age: i64, expiring: bool) RequestStatus {
-    val policy: CookiePolicy = request_session.manager.cookie;
+    val policy: CookiePolicy  = request_session.manager.cookie;
     var header: cookie.Cookie = cookie.Cookie{
-        name: policy_view(policy.name), value: value,
-        path: policy_view(policy.path), domain: policy_view(policy.domain),
-        has_max_age: true, max_age_s: max_age, has_expires: expiring,
+        name:         policy_view(policy.name), value: value,
+        path:         policy_view(policy.path), domain: policy_view(policy.domain),
+        has_max_age:  true, max_age_s: max_age, has_expires: expiring,
         expires_unix: 0, secure: policy.secure, http_only: policy.http_only,
-        partitioned: false, same_site: policy_same_site(policy.same_site),
-        attributes: nil, attribute_len: 0};
+        partitioned:  false, same_site: policy_same_site(policy.same_site),
+        attributes:   nil, attribute_len: 0
+    };
     val written: cookie.Operation = cookie.serialize_set_cookie(?header,
         request_session.storage.header_bytes,
         request_session.storage.header_capacity, cookie.limits_default());
     if (written.status != cookie.OK) { ret REQUEST_LIMIT; }
     if (field.append(?response.fields, field.Field{
-        name: view.view("set-cookie", 10),
-        value: view.view(request_session.storage.header_bytes, written.written),
-        sensitive: true}) != field.ADD_OK) { ret REQUEST_LIMIT; }
+        name:      view.view("set-cookie", 10),
+        value:     view.view(request_session.storage.header_bytes, written.written),
+        sensitive: true
+    }) != field.ADD_OK) { ret REQUEST_LIMIT; }
     ret REQUEST_OK;
 }
 
@@ -2573,18 +2581,18 @@ pub fun create_request(request_session: *RequestSession, lifetime_s: i64,
     var seed_id: [64]u8;
     seed_id[0] = 's';
     var seed: Session = Session{id: view.view(?seed_id[0], 1),
-        data: view.view(nil, 0), issued_at_unix: now_unix,
+        data:            view.view(nil, 0), issued_at_unix: now_unix,
         not_before_unix: now_unix, expires_at_unix: now_unix + lifetime_s,
-        version: 0, generation: 0};
+        version:         0, generation: 0};
     var created: Session;
     if (codec.regenerate(codec.ctx, ?seed,
         request_session.storage.id_bytes, request_session.storage.id_capacity,
         ?created) != CODEC_OK) { ret REQUEST_INVALID; }
-    request_session.value = created;
-    request_session.value.data = view.view(nil, 0);
-    request_session.value.version = 0;
+    request_session.value            = created;
+    request_session.value.data       = view.view(nil, 0);
+    request_session.value.version    = 0;
     request_session.value.generation = 0;
-    request_session.state = SESSION_DIRTY;
+    request_session.state            = SESSION_DIRTY;
     ret REQUEST_OK;
 }
 
@@ -2603,14 +2611,14 @@ pub fun regenerate_request(request_session: *RequestSession, now_unix: i64,
     # the generated identifier lands in the same buffer the current one
     # occupies, so the source is snapshotted out of the way first
     var previous_id: [64]u8;
-    val current: Session = request_session.value;
+    val current:     Session = request_session.value;
     if (current.id.len == 0 || current.id.len > MAX_SESSION_ID_BYTES) {
         ret REQUEST_INVALID;
     }
     var index: usize = 0;
     for (index < current.id.len) {
         previous_id[index] = current.id.data[index];
-        index = index + 1;
+        index              = index + 1;
     }
     var previous: Session = current;
     previous.id = view.view(?previous_id[0], current.id.len);
@@ -2618,16 +2626,16 @@ pub fun regenerate_request(request_session: *RequestSession, now_unix: i64,
     if (codec.regenerate(codec.ctx, ?previous,
         request_session.storage.id_bytes, request_session.storage.id_capacity,
         ?replacement) != CODEC_OK) { ret REQUEST_INVALID; }
-    val store: Store = manager.store;
-    var saved: SaveResult = SaveResult{version: 0, generation: 0};
+    val store:    Store       = manager.store;
+    var saved:    SaveResult  = SaveResult{version: 0, generation: 0};
     val replaced: StoreStatus = store.replace(store.ctx, previous.id,
         previous.version, previous.generation, ?replacement, now_unix,
         ?saved, scope);
     if (replaced != STORE_OK) { ret map_store_status(replaced); }
-    request_session.value = replacement;
-    request_session.value.version = saved.version;
+    request_session.value            = replacement;
+    request_session.value.version    = saved.version;
     request_session.value.generation = saved.generation;
-    request_session.state = SESSION_DIRTY;
+    request_session.state            = SESSION_DIRTY;
     ret REQUEST_OK;
 }
 
@@ -2643,7 +2651,7 @@ pub fun commit_request(request_session: *RequestSession,
         || request_session.state == SESSION_PRESENT) { ret REQUEST_OK; }
     val manager: *Manager = request_session.manager;
     if (!manager_active(manager)) { ret REQUEST_UNAVAILABLE; }
-    if (response.committed) { ret REQUEST_INVALID; }
+    if (response.committed)       { ret REQUEST_INVALID; }
     val store: Store = manager.store;
     if (request_session.state == SESSION_DESTROYED) {
         val removed: StoreStatus = store.delete(store.ctx,
@@ -2658,13 +2666,13 @@ pub fun commit_request(request_session: *RequestSession,
         request_session.state = SESSION_ABSENT;
         ret cleared;
     }
-    var saved: SaveResult = SaveResult{version: 0, generation: 0};
+    var saved:  SaveResult  = SaveResult{version: 0, generation: 0};
     val stored: StoreStatus = store.save(store.ctx, ?request_session.value,
         request_session.value.version, now_unix, ?saved, scope);
     if (stored != STORE_OK) { ret map_store_status(stored); }
-    request_session.value.version = saved.version;
+    request_session.value.version    = saved.version;
     request_session.value.generation = saved.generation;
-    val codec: Codec = manager.codec;
+    val codec: Codec          = manager.codec;
     val token: CodecOperation = codec.encode(codec.ctx,
         ?request_session.value, manager_context(manager), now_unix,
         request_session.storage.token_bytes,
@@ -2719,9 +2727,9 @@ pub fun init_binder(binder: *Binder, manager: *Manager, clock: Clock,
     if (binder == nil || !range_valid(binder::*u8, $size_of(Binder))
         || binder.initialized || !manager_valid(manager) || clock.now == nil
         || !request_limits_valid(limits)) { ret false; }
-    binder.manager = manager;
-    binder.clock = clock;
-    binder.limits = limits;
+    binder.manager     = manager;
+    binder.clock       = clock;
+    binder.limits      = limits;
     binder.initialized = true;
     ret true;
 }
@@ -2730,7 +2738,7 @@ pub fun init_binder(binder: *Binder, manager: *Manager, clock: Clock,
 # so one binder serves every concurrently admitted request
 fun allocate_request(binder: *Binder,
     request_context: *context.Context) *RequestSession {
-    val alloc: *A.Allocator = request_context.alloc;
+    val alloc:        *A.Allocator                  = request_context.alloc;
     val session_slot: res[*RequestSession, A.Error] =
         A.allocate[RequestSession](alloc, 1);
     if (sel session_slot.err) { ret nil; }
@@ -2752,16 +2760,17 @@ fun allocate_request(binder: *Binder,
         session_slot.ok;
     request_session.initialized = false;
     if (!init_request(request_session, binder.manager, RequestStorage{
-        jar_items: jar.ok,
-        jar_capacity: binder.limits.max_cookies,
-        id_bytes: ids.ok,
-        id_capacity: MAX_SESSION_ID_BYTES,
-        data_bytes: data.ok,
-        data_capacity: binder.limits.max_data_bytes,
-        token_bytes: token.ok,
-        token_capacity: binder.limits.max_token_bytes,
-        header_bytes: header.ok,
-        header_capacity: binder.limits.max_header_bytes})) { ret nil; }
+        jar_items:       jar.ok,
+        jar_capacity:    binder.limits.max_cookies,
+        id_bytes:        ids.ok,
+        id_capacity:     MAX_SESSION_ID_BYTES,
+        data_bytes:      data.ok,
+        data_capacity:   binder.limits.max_data_bytes,
+        token_bytes:     token.ok,
+        token_capacity:  binder.limits.max_token_bytes,
+        header_bytes:    header.ok,
+        header_capacity: binder.limits.max_header_bytes
+    })) { ret nil; }
     ret request_session;
 }
 
@@ -2787,12 +2796,13 @@ fun bind_session(ctx: ptr, next: middleware.Next,
     val outcome: res[u8, error.AppError] =
         middleware.call(next, request_context);
     val response: *message.Response = context.response(request_context);
-    var settled: RequestStatus = REQUEST_OK;
+    var settled:  RequestStatus     = REQUEST_OK;
     if (response != nil) {
         settled = commit_request(request_session, response,
             binder.clock.now(binder.clock.ctx),
             context.cancellation(request_context));
-    } or {
+    }
+    or {
         if (request_state(request_session) == SESSION_DIRTY
             || request_state(request_session) == SESSION_DESTROYED) {
             settled = REQUEST_UNAVAILABLE;
@@ -2835,28 +2845,28 @@ pub fun load(request_context: *context.Context, now_unix: i64) RequestStatus {
 }
 
 rec RequestFixture {
-    codec_fixture:   CodecFixture;
-    memory:          MemoryStore;
-    slots:           [4]MemorySlot;
-    manager:         Manager;
-    jar_items:       [8]cookie.Cookie;
-    id_bytes:        [64]u8;
-    data_bytes:      [256]u8;
-    token_bytes:     [4096]u8;
-    header_bytes:    [1024]u8;
-    request_items:   [4]field.Field;
-    response_items:  [8]field.Field;
-    request:         message.Request;
-    response:        message.Response;
-    scope:           cancel.Scope;
-    session:         RequestSession;
+    codec_fixture:  CodecFixture;
+    memory:         MemoryStore;
+    slots:          [4]MemorySlot;
+    manager:        Manager;
+    jar_items:      [8]cookie.Cookie;
+    id_bytes:       [64]u8;
+    data_bytes:     [256]u8;
+    token_bytes:    [4096]u8;
+    header_bytes:   [1024]u8;
+    request_items:  [4]field.Field;
+    response_items: [8]field.Field;
+    request:        message.Request;
+    response:       message.Response;
+    scope:          cancel.Scope;
+    session:        RequestSession;
 }
 
 fun request_fixture_storage(fixture: *RequestFixture) RequestStorage {
     ret RequestStorage{jar_items: ?fixture.jar_items[0], jar_capacity: 8,
-        id_bytes: ?fixture.id_bytes[0], id_capacity: 64,
-        data_bytes: ?fixture.data_bytes[0], data_capacity: 256,
-        token_bytes: ?fixture.token_bytes[0], token_capacity: 4096,
+        id_bytes:     ?fixture.id_bytes[0], id_capacity: 64,
+        data_bytes:   ?fixture.data_bytes[0], data_capacity: 256,
+        token_bytes:  ?fixture.token_bytes[0], token_capacity: 4096,
         header_bytes: ?fixture.header_bytes[0], header_capacity: 1024};
 }
 
@@ -2864,33 +2874,33 @@ fun init_request_fixture(fixture: *RequestFixture) bool {
     if (!init_codec_fixture(?fixture.codec_fixture, AES_256_GCM, REPLAY_ALLOW,
         8, 8)) { ret false; }
     fixture.memory.initialized = false;
-    fixture.memory.active = false;
+    fixture.memory.active      = false;
     if (!init_memory_store(?fixture.memory, ?fixture.slots[0], 4)) {
         ret false;
     }
     fixture.manager.state = MANAGER_EMPTY;
     if (!init_manager(?fixture.manager, memory_store(?fixture.memory),
-            fixture.codec_fixture.codec, secure_cookie("laurel_session"),
-            "laurel.request")
+        fixture.codec_fixture.codec, secure_cookie("laurel_session"),
+        "laurel.request")
         || start_manager(?fixture.manager) != STORE_OK) { ret false; }
     if (!operation_ok(cancel.make_root(?fixture.scope, false, time.Time{sec: 0, nsec: 0}))) {
         ret false;
     }
     fixture.request.fields = field.init(?fixture.request_items[0], 4,
         field.limits(4, 8192, 64, 4096));
-    fixture.request.trailers = field.init(nil, 0, field.limits(0, 0, 0, 0));
-    fixture.request.body = nil;
+    fixture.request.trailers   = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    fixture.request.body       = nil;
     fixture.request.generation = 9;
-    fixture.response.status = 200;
-    fixture.response.fields = field.init(?fixture.response_items[0], 8,
+    fixture.response.status    = 200;
+    fixture.response.fields    = field.init(?fixture.response_items[0], 8,
         field.limits(8, 8192, 64, 4096));
-    fixture.response.trailers = field.init(nil, 0, field.limits(0, 0, 0, 0));
-    fixture.response.body_kind = message.BODY_NONE;
+    fixture.response.trailers    = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    fixture.response.body_kind   = message.BODY_NONE;
     fixture.response.body_reader = nil;
     fixture.response.body_writer = nil;
-    fixture.response.generation = 9;
-    fixture.response.committed = false;
-    fixture.session.initialized = false;
+    fixture.response.generation  = 9;
+    fixture.response.committed   = false;
+    fixture.session.initialized  = false;
     ret init_request(?fixture.session, ?fixture.manager,
         request_fixture_storage(fixture));
 }
@@ -2913,23 +2923,24 @@ fun replay_cookie(fixture: *RequestFixture, buffer: *u8,
     capacity: usize) bool {
     val header: view.View = emitted_cookie(fixture);
     if (header.len == 0) { ret false; }
-    var length: usize = 0;
-    var scanning: bool = true;
+    var length:   usize = 0;
+    var scanning: bool  = true;
     for (scanning && length < header.len) {
         if (header.data[length] == ';') { scanning = false; }
-        or { length = length + 1; }
+        or                              { length = length + 1; }
     }
     if (length == 0 || length > capacity) { ret false; }
     var i: usize = 0;
     for (i < length) {
         buffer[i] = header.data[i];
-        i = i + 1;
+        i         = i + 1;
     }
     fixture.request.fields = field.init(?fixture.request_items[0], 4,
         field.limits(4, 8192, 64, 4096));
     ret field.append(?fixture.request.fields, field.Field{
-        name: view.view("cookie", 6), value: view.view(buffer, length),
-        sensitive: true}) == field.ADD_OK;
+        name:      view.view("cookie", 6), value: view.view(buffer, length),
+        sensitive: true
+    }) == field.ADD_OK;
 }
 
 fun reset_response(fixture: *RequestFixture) {
@@ -2944,7 +2955,7 @@ test "laurel.session: a request reaches its session through the boundary" {
 
     # no cookie at all is an absent session, not a nil that reads as one
     if (open_request(?fixture.session, ?fixture.request, 100, ?fixture.scope)
-            != REQUEST_NONE
+        != REQUEST_NONE
         || request_state(?fixture.session) != SESSION_ABSENT
         || request_session_value(?fixture.session) != nil) { ret 2; }
 
@@ -2954,7 +2965,7 @@ test "laurel.session: a request reaches its session through the boundary" {
         || request_session_value(?fixture.session) == nil) { ret 3; }
     if (write_request(?fixture.session, view.view("user=7", 6)) != REQUEST_OK
         || commit_request(?fixture.session, ?fixture.response, 100,
-            ?fixture.scope) != REQUEST_OK
+        ?fixture.scope) != REQUEST_OK
         || request_state(?fixture.session) != SESSION_PRESENT) { ret 4; }
     val issued: view.View = emitted_cookie(?fixture);
     if (issued.len == 0) { ret 5; }
@@ -2967,7 +2978,7 @@ test "laurel.session: a request reaches its session through the boundary" {
     if (!init_request(?second, ?fixture.manager,
         request_fixture_storage(?fixture))) { ret 7; }
     if (open_request(?second, ?fixture.request, 120, ?fixture.scope)
-            != REQUEST_OK
+        != REQUEST_OK
         || request_state(?second) != SESSION_PRESENT) { ret 8; }
     val loaded: *Session = request_session_value(?second);
     if (loaded == nil || loaded.data.len != 6
@@ -2976,11 +2987,11 @@ test "laurel.session: a request reaches its session through the boundary" {
     # a tampered token is rejected and leaves no session behind
     var tampered: RequestSession;
     tampered.initialized = false;
-    carried[20] = carried[20] + 1;
+    carried[20]          = carried[20] + 1;
     if (!init_request(?tampered, ?fixture.manager,
-            request_fixture_storage(?fixture))
+        request_fixture_storage(?fixture))
         || open_request(?tampered, ?fixture.request, 120, ?fixture.scope)
-            != REQUEST_REJECTED
+        != REQUEST_REJECTED
         || request_state(?tampered) != SESSION_ABSENT
         || request_session_value(?tampered) != nil) { ret 10; }
     carried[20] = carried[20] - 1;
@@ -2989,24 +3000,24 @@ test "laurel.session: a request reaches its session through the boundary" {
     var expired: RequestSession;
     expired.initialized = false;
     if (!init_request(?expired, ?fixture.manager,
-            request_fixture_storage(?fixture))
+        request_fixture_storage(?fixture))
         || open_request(?expired, ?fixture.request, 5000, ?fixture.scope)
-            == REQUEST_OK) { ret 11; }
+        == REQUEST_OK) { ret 11; }
 
     # regeneration replaces the identity and the old record
     var rotated: RequestSession;
     rotated.initialized = false;
     if (!init_request(?rotated, ?fixture.manager,
-            request_fixture_storage(?fixture))
+        request_fixture_storage(?fixture))
         || open_request(?rotated, ?fixture.request, 130, ?fixture.scope)
-            != REQUEST_OK) { ret 12; }
+        != REQUEST_OK) { ret 12; }
     var previous_id: [64]u8;
-    val before: *Session = request_session_value(?rotated);
+    val before:      *Session = request_session_value(?rotated);
     if (before == nil || before.id.len == 0 || before.id.len > 64) { ret 13; }
     var i: usize = 0;
     for (i < before.id.len) {
         previous_id[i] = before.id.data[i];
-        i = i + 1;
+        i              = i + 1;
     }
     val previous_len: usize = before.id.len;
     if (regenerate_request(?rotated, 130, ?fixture.scope) != REQUEST_OK) {
@@ -3015,8 +3026,8 @@ test "laurel.session: a request reaches its session through the boundary" {
     val after: *Session = request_session_value(?rotated);
     if (after == nil || after.id.len == 0) { ret 15; }
     if (after.id.len == previous_len) {
-        var same: bool = true;
-        var j: usize = 0;
+        var same: bool  = true;
+        var j:    usize = 0;
         for (j < previous_len) {
             if (after.id.data[j] != previous_id[j]) { same = false; }
             j = j + 1;
@@ -3033,32 +3044,32 @@ test "laurel.session: a request reaches its session through the boundary" {
     var ending: RequestSession;
     ending.initialized = false;
     if (!init_request(?ending, ?fixture.manager,
-            request_fixture_storage(?fixture))
+        request_fixture_storage(?fixture))
         || open_request(?ending, ?fixture.request, 140, ?fixture.scope)
-            != REQUEST_OK
+        != REQUEST_OK
         || destroy_request(?ending) != REQUEST_OK
         || request_state(?ending) != SESSION_DESTROYED) { ret 19; }
     reset_response(?fixture);
     if (commit_request(?ending, ?fixture.response, 140, ?fixture.scope)
-            != REQUEST_OK
+        != REQUEST_OK
         || request_state(?ending) != SESSION_ABSENT
         || emitted_cookie(?fixture).len == 0) { ret 20; }
     var gone: RequestSession;
     gone.initialized = false;
     if (!init_request(?gone, ?fixture.manager,
-            request_fixture_storage(?fixture))
+        request_fixture_storage(?fixture))
         || open_request(?gone, ?fixture.request, 150, ?fixture.scope)
-            != REQUEST_NONE) { ret 21; }
+        != REQUEST_NONE) { ret 21; }
 
     # a request that never asks costs nothing and writes no cookie
     var untouched: RequestSession;
     untouched.initialized = false;
     reset_response(?fixture);
     if (!init_request(?untouched, ?fixture.manager,
-            request_fixture_storage(?fixture))
+        request_fixture_storage(?fixture))
         || request_state(?untouched) != SESSION_IDLE
         || commit_request(?untouched, ?fixture.response, 160, ?fixture.scope)
-            != REQUEST_OK
+        != REQUEST_OK
         || emitted_cookie(?fixture).len != 0
         || fixture.response.fields.len != 0) { ret 22; }
 
@@ -3081,7 +3092,7 @@ test "laurel.session: request storage must be disjoint and complete" {
     if (request_storage_valid(short_id)) { ret 3; }
     var absent: RequestStorage = request_fixture_storage(?fixture);
     absent.header_bytes = nil;
-    if (request_storage_valid(absent)) { ret 4; }
+    if (request_storage_valid(absent))                             { ret 4; }
     if (!request_storage_valid(request_fixture_storage(?fixture))) { ret 5; }
     if (!operation_ok(cancel.destroy(?fixture.scope))
         || stop_manager(?fixture.manager) != STORE_OK) { ret 6; }
@@ -3089,19 +3100,19 @@ test "laurel.session: request storage must be disjoint and complete" {
 }
 
 test "laurel.session: invalid provider records carry no callable pointer" {
-    var store: MemoryStore;
+    var store:        MemoryStore;
     val absent_store: Store = memory_store(?store);
     if (absent_store.ctx != nil || absent_store.aliases != nil
         || absent_store.start != nil || absent_store.stop != nil
         || absent_store.load != nil || absent_store.save != nil
         || absent_store.delete != nil || absent_store.replace != nil
         || absent_store.reap != nil) { ret 1; }
-    var guard: MemoryGuard;
+    var guard:        MemoryGuard;
     val absent_guard: Guard = memory_guard(?guard);
     if (absent_guard.ctx != nil || absent_guard.domain != nil
         || absent_guard.aliases != nil || absent_guard.overlaps != nil
         || absent_guard.claim != nil || absent_guard.forget != nil) { ret 2; }
-    var codec: ProtectedCodec;
+    var codec:        ProtectedCodec;
     val absent_codec: Codec = protected_codec(?codec);
     if (absent_codec.ctx != nil || absent_codec.encode != nil
         || absent_codec.decode != nil) { ret 3; }
@@ -3113,7 +3124,7 @@ test "laurel.session: authenticated codecs reject hostile tokens transactionally
     if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_REJECT, 8, 8)) {
         ret 1;
     }
-    var value: Session = sample_session();
+    var value:    Session = sample_session();
     var rejected: [4096]u8;
     rejected[0] = 0xa5;
     if (fixture.codec.encode(fixture.codec.ctx, ?value, view.view(nil, 0),
@@ -3128,20 +3139,20 @@ test "laurel.session: authenticated codecs reject hostile tokens transactionally
         view.view("tenant:a", 8), 100, ?tiny[0], 1).status
         != CODEC_OUTPUT_TOO_SMALL || tiny[0] != 0xa5
         || fixture.entropy.calls != 0) { ret 2; }
-    var token: [4096]u8;
+    var token:   [4096]u8;
     val encoded: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
         ?value, view.view("tenant:a", 8), 100, ?token[0], 4096);
     if (encoded.status != CODEC_OK || encoded.written == 0
         || encoded.key_id != 1) { ret 3; }
 
-    var id_output: [64]u8;
+    var id_output:   [64]u8;
     var data_output: [2048]u8;
-    id_output[0] = 0xa5;
+    id_output[0]   = 0xa5;
     data_output[0] = 0x5a;
     var decoded: Session = Session{id: view.view("unchanged", 9),
-        data: view.view("unchanged", 9), issued_at_unix: 1,
+        data:            view.view("unchanged", 9), issued_at_unix: 1,
         not_before_unix: 1, expires_at_unix: 2, version: 9,
-        generation: 9};
+        generation:      9};
     val wrong_context: CodecOperation = fixture.codec.decode(
         fixture.codec.ctx, ?token[0], encoded.written,
         view.view("tenant:b", 8), 100, ?id_output[0], 64,
@@ -3156,14 +3167,14 @@ test "laurel.session: authenticated codecs reject hostile tokens transactionally
         || decoded.version != 9) { ret 30; }
 
     var tampered: [4096]u8;
-    var i: usize = 0;
+    var i:        usize = 0;
     for (i < encoded.written) {
         tampered[i] = token[i];
-        i = i + 1;
+        i           = i + 1;
     }
     val middle: usize = encoded.written / 2;
     if (tampered[middle] == 'A') { tampered[middle] = 'B'; }
-    or { tampered[middle] = 'A'; }
+    or                           { tampered[middle] = 'A'; }
     if (fixture.codec.decode(fixture.codec.ctx, ?tampered[0],
         encoded.written, view.view("tenant:a", 8), 100, ?id_output[0], 64,
         ?data_output[0], 2048, ?decoded).status != CODEC_AUTH_FAILED
@@ -3198,7 +3209,7 @@ test "laurel.session: authenticated codecs reject hostile tokens transactionally
         view.view("tenant:a", 8), 2005, ?id_output[0], 64,
         ?data_output[0], 2048, ?decoded).status != CODEC_EXPIRED) { ret 10; }
 
-    fixture.entropy.seed = 90;
+    fixture.entropy.seed   = 90;
     fixture.entropy.repeat = true;
     var another: [4096]u8;
     if (fixture.codec.encode(fixture.codec.ctx, ?value,
@@ -3231,13 +3242,13 @@ test "laurel.session: clocks, rotation, algorithms, and fixation are bounded" {
     }
     var value: Session = sample_session();
     value.not_before_unix = 110;
-    var token: [4096]u8;
+    var token:   [4096]u8;
     val encoded: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
         ?value, view.view("binding", 7), 100, ?token[0], 4096);
     if (encoded.status != CODEC_OK) { ret 2; }
-    var id_output: [64]u8;
+    var id_output:   [64]u8;
     var data_output: [2048]u8;
-    var decoded: Session;
+    var decoded:     Session;
     if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
         view.view("binding", 7), 104, ?id_output[0], 64,
         ?data_output[0], 2048, ?decoded).status != CODEC_NOT_YET_VALID) {
@@ -3264,11 +3275,11 @@ test "laurel.session: clocks, rotation, algorithms, and fixation are bounded" {
         ret 9;
     }
 
-    var raw: [3072]u8;
+    var raw:     [3072]u8;
     val raw_len: usize = base64.decode(?token[0], encoded.written,
         ?raw[0], 3072);
     write_u32_public(?raw[0], 4, 99);
-    var unknown: [4097]u8;
+    var unknown:     [4097]u8;
     val unknown_len: usize = base64.encode_url(?raw[0], raw_len,
         ?unknown[0], 4097);
     if (fixture.codec.decode(fixture.codec.ctx, ?unknown[0], unknown_len,
@@ -3282,10 +3293,10 @@ test "laurel.session: clocks, rotation, algorithms, and fixation are bounded" {
         ret 11;
     }
 
-    fixture.entropy.seed = 33;
+    fixture.entropy.seed   = 33;
     fixture.entropy.repeat = true;
     var regenerated_id: [64]u8;
-    var regenerated: Session;
+    var regenerated:    Session;
     if (regenerate_id(?fixture.protected, ?value, ?regenerated_id[0], 64,
         ?regenerated) != CODEC_OK || regenerated.id.len != 43
         || regenerated.version != 0 || regenerated.generation != 0
@@ -3313,9 +3324,9 @@ test "laurel.session: clocks, rotation, algorithms, and fixation are bounded" {
         ?value, view.view("binding", 7), 100, ?token[0], 4096);
     if (chacha_encoded.status != CODEC_OK
         || chacha.codec.decode(chacha.codec.ctx, ?token[0],
-            chacha_encoded.written, view.view("binding", 7), 100,
-            ?id_output[0], 64, ?data_output[0], 2048,
-            ?decoded).status != CODEC_OK) { ret 16; }
+        chacha_encoded.written, view.view("binding", 7), 100,
+        ?id_output[0], 64, ?data_output[0], 2048,
+        ?decoded).status != CODEC_OK) { ret 16; }
     token[chacha_encoded.written / 2] = 'A';
     if (chacha.codec.decode(chacha.codec.ctx, ?token[0],
         chacha_encoded.written, view.view("binding", 7), 100,
@@ -3345,13 +3356,13 @@ test "laurel.session: guard horizons and regeneration ownership fail closed" {
     }
     var short: Session = sample_session();
     short.expires_at_unix = 200;
-    var token: [4096]u8;
+    var token:   [4096]u8;
     val encoded: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
         ?short, view.view("binding", 7), 100, ?token[0], 4096);
     if (encoded.status != CODEC_OK) { ret 2; }
-    var id_output: [64]u8;
+    var id_output:   [64]u8;
     var data_output: [2048]u8;
-    var decoded: Session;
+    var decoded:     Session;
     if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
         view.view("binding", 7), 100, ?id_output[0], 64,
         ?data_output[0], 2048, ?decoded).status != CODEC_OK) { ret 3; }
@@ -3362,10 +3373,10 @@ test "laurel.session: guard horizons and regeneration ownership fail closed" {
         view.view("binding", 7), 205, ?id_output[0], 64,
         ?data_output[0], 2048, ?decoded).status != CODEC_EXPIRED) { ret 5; }
 
-    fixture.entropy.seed = 1;
+    fixture.entropy.seed   = 1;
     fixture.entropy.repeat = true;
     var later: Session = sample_session();
-    later.issued_at_unix = 201;
+    later.issued_at_unix  = 201;
     later.not_before_unix = 201;
     later.expires_at_unix = 400;
     if (fixture.codec.encode(fixture.codec.ctx, ?later,
@@ -3373,7 +3384,7 @@ test "laurel.session: guard horizons and regeneration ownership fail closed" {
         != CODEC_NONCE_REUSED) { ret 6; }
 
     var rejected: ProtectedCodec;
-    rejected.active = false;
+    rejected.active    = false;
     rejected.algorithm = 77;
     val entropy: Entropy = Entropy{ctx: (?fixture.entropy)::ptr,
         aliases: test_entropy_aliases, fill: test_entropy_fill};
@@ -3383,19 +3394,19 @@ test "laurel.session: guard horizons and regeneration ownership fail closed" {
         MAX_CONTEXT_BYTES) || rejected.active || rejected.ring != nil
         || rejected.algorithm != 77) { ret 7; }
 
-    var source: Session = sample_session();
+    var source:         Session = sample_session();
     var regenerated_id: [64]u8;
     regenerated_id[0] = 0xa5;
     var regenerated: Session = Session{version: 91, id: view.view(nil, 0), data: view.view(nil, 0), issued_at_unix: 0, not_before_unix: 0, expires_at_unix: 0, generation: 0};
-    val calls: usize = fixture.entropy.calls;
+    val calls:       usize   = fixture.entropy.calls;
     if (regenerate_id(?fixture.protected, ?source, source.data.data, 64,
-            ?regenerated) != CODEC_INVALID
+        ?regenerated) != CODEC_INVALID
         || regenerate_id(?fixture.protected, ?source,
-            (?regenerated)::*u8, 64, ?regenerated) != CODEC_INVALID
+        (?regenerated)::*u8, 64, ?regenerated) != CODEC_INVALID
         || regenerate_id(?fixture.protected, ?source, ?regenerated_id[0],
-            64, ?source) != CODEC_INVALID
+        64, ?source) != CODEC_INVALID
         || regenerate_id(?fixture.protected, ?source, source.id.data, 64,
-            ?regenerated) != CODEC_INVALID
+        ?regenerated) != CODEC_INVALID
         || regenerated_id[0] != 0xa5 || regenerated.version != 91
         || fixture.entropy.calls != calls) { ret 8; }
 
@@ -3407,11 +3418,12 @@ test "laurel.session: guard horizons and regeneration ownership fail closed" {
     }
 
     var mutation: MutatingEntropyState = MutatingEntropyState{
-        source: ?source, calls: 0};
+        source: ?source, calls: 0
+    };
     fixture.protected.entropy = Entropy{ctx: (?mutation)::ptr,
         aliases: mutating_entropy_aliases, fill: mutating_entropy_fill};
-    val original_data: view.View = source.data;
-    val original_issued: i64 = source.issued_at_unix;
+    val original_data:   view.View = source.data;
+    val original_issued: i64       = source.issued_at_unix;
     if (regenerate_id(?fixture.protected, ?source, ?regenerated_id[0], 64,
         ?regenerated) != CODEC_OK || mutation.calls != 1
         || regenerated.data.data != original_data.data
@@ -3440,9 +3452,9 @@ test "laurel.session: key and guard domains survive hostile providers" {
     }
     val entropy: Entropy = Entropy{ctx: (?fixture.entropy)::ptr,
         aliases: test_entropy_aliases, fill: test_entropy_fill};
-    val nonce: Guard = memory_guard(?fixture.nonce_guard);
+    val nonce:     Guard = memory_guard(?fixture.nonce_guard);
     var candidate: ProtectedCodec;
-    candidate.active = false;
+    candidate.active    = false;
     candidate.algorithm = 77;
     var same_domain: Guard = memory_guard(?fixture.replay_guard);
     same_domain.domain = nonce.domain;
@@ -3478,35 +3490,36 @@ test "laurel.session: callbacks cannot change staged codec operations" {
     if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_ALLOW, 8, 8)) {
         ret 1;
     }
-    var value: Session = sample_session();
-    val original_data: view.View = value.data;
-    var mutation: MutatingEntropyState = MutatingEntropyState{
-        source: ?value, calls: 0};
+    var value:         Session              = sample_session();
+    val original_data: view.View            = value.data;
+    var mutation:      MutatingEntropyState = MutatingEntropyState{
+        source: ?value, calls: 0
+    };
     fixture.protected.entropy = Entropy{ctx: (?mutation)::ptr,
         aliases: mutating_entropy_aliases, fill: mutating_entropy_fill};
-    var token: [4096]u8;
+    var token:   [4096]u8;
     val encoded: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
         ?value, view.view("binding", 7), 100, ?token[0], 4096);
     if (encoded.status != CODEC_OK || mutation.calls != 1
         || value.data.len != ~(0::usize)) { ret 2; }
-    var id_output: [64]u8;
+    var id_output:   [64]u8;
     var data_output: [2048]u8;
-    var decoded: Session;
+    var decoded:     Session;
     if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
-            view.view("binding", 7), 100, ?id_output[0], 64,
-            ?data_output[0], 2048, ?decoded).status != CODEC_OK
+        view.view("binding", 7), 100, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_OK
         || decoded.data.len != original_data.len
         || !public_equal(?data_output[0], original_data.data,
-            original_data.len)) { ret 3; }
+        original_data.len)) { ret 3; }
     fixture.protected.entropy = Entropy{ctx: (?fixture.entropy)::ptr,
         aliases: test_entropy_aliases, fill: test_entropy_fill};
-    value = sample_session();
+    value                 = sample_session();
     value.expires_at_unix = 100;
     val calls: usize = fixture.entropy.calls;
     token[0] = 0xa5;
     if (fixture.codec.encode(fixture.codec.ctx, ?value,
-            view.view("binding", 7), 100, ?token[0], 4096).status
-            != CODEC_INVALID
+        view.view("binding", 7), 100, ?token[0], 4096).status
+        != CODEC_INVALID
         || fixture.entropy.calls != calls || token[0] != 0xa5) { ret 4; }
     ret (!release_codec_fixture(?fixture))::i32;
 }
@@ -3517,63 +3530,64 @@ test "laurel.session: codec ownership and replay claims fail closed" {
         ret 1;
     }
     var value: Session = sample_session();
-    val calls: usize = fixture.entropy.calls;
+    val calls: usize   = fixture.entropy.calls;
     if (fixture.codec.encode(fixture.codec.ctx, ?value,
-            view.view("binding", 7), 100, (?fixture.ring)::*u8,
-            4096).status != CODEC_INVALID
+        view.view("binding", 7), 100, (?fixture.ring)::*u8,
+        4096).status != CODEC_INVALID
         || fixture.codec.encode(fixture.codec.ctx, ?value,
-            view.view("binding", 7), 100, (?fixture.keys[0])::*u8,
-            4096).status != CODEC_INVALID
+        view.view("binding", 7), 100, (?fixture.keys[0])::*u8,
+        4096).status != CODEC_INVALID
         || fixture.codec.encode(fixture.codec.ctx, ?value,
-            view.view("binding", 7), 100, (?fixture.nonce_guard)::*u8,
-            4096).status != CODEC_INVALID
+        view.view("binding", 7), 100, (?fixture.nonce_guard)::*u8,
+        4096).status != CODEC_INVALID
         || fixture.entropy.calls != calls || fixture.ring.current_id != 1) {
         ret 2;
     }
     var candidate: ProtectedCodec;
-    candidate.active = false;
+    candidate.active    = false;
     candidate.algorithm = 77;
     val entropy: Entropy = Entropy{ctx: (?fixture.entropy)::ptr,
         aliases: test_entropy_aliases, fill: test_entropy_fill};
     val nonce: Guard = memory_guard(?fixture.nonce_guard);
     if (init_protected_codec(?candidate, ?fixture.ring, entropy, nonce,
-            REPLAY_REJECT, memory_guard(?fixture.replay_guard),
-            CHACHA20_POLY1305, 5, 3600, MAX_CONTEXT_BYTES)
+        REPLAY_REJECT, memory_guard(?fixture.replay_guard),
+        CHACHA20_POLY1305, 5, 3600, MAX_CONTEXT_BYTES)
         || init_protected_codec(?candidate, ?fixture.ring, entropy,
-            memory_guard(?fixture.replay_guard), REPLAY_ALLOW,
-            Guard{ctx: nil, domain: nil, aliases: nil, overlaps: nil,
-                claim: nil, forget: nil},
-            AES_256_GCM, 5, 3600, MAX_CONTEXT_BYTES)
+        memory_guard(?fixture.replay_guard), REPLAY_ALLOW,
+        Guard{ctx: nil, domain: nil, aliases: nil, overlaps: nil,
+        claim: nil, forget: nil},
+        AES_256_GCM, 5, 3600, MAX_CONTEXT_BYTES)
         || candidate.active || candidate.algorithm != 77) { ret 3; }
     if (!release_protected_codec(?fixture.protected)) { ret 4; }
     var mutation: MutatingGuardState = MutatingGuardState{
-        inner: memory_guard(?fixture.replay_guard), mutations: 0};
+        inner: memory_guard(?fixture.replay_guard), mutations: 0
+    };
     if (!init_protected_codec(?fixture.protected, ?fixture.ring, entropy,
-            nonce, REPLAY_REJECT, mutating_guard(?mutation), AES_256_GCM,
-            5, 3600, MAX_CONTEXT_BYTES)) { ret 5; }
+        nonce, REPLAY_REJECT, mutating_guard(?mutation), AES_256_GCM,
+        5, 3600, MAX_CONTEXT_BYTES)) { ret 5; }
     fixture.codec = protected_codec(?fixture.protected);
-    var token: [4096]u8;
+    var token:   [4096]u8;
     val encoded: CodecOperation = fixture.codec.encode(fixture.codec.ctx,
         ?value, view.view("binding", 7), 100, ?token[0], 4096);
     if (encoded.status != CODEC_OK) { ret 6; }
-    var id_output: [64]u8;
+    var id_output:   [64]u8;
     var data_output: [2048]u8;
-    var decoded: Session = Session{version: 99, id: view.view(nil, 0), data: view.view(nil, 0), issued_at_unix: 0, not_before_unix: 0, expires_at_unix: 0, generation: 0};
+    var decoded:     Session = Session{version: 99, id: view.view(nil, 0), data: view.view(nil, 0), issued_at_unix: 0, not_before_unix: 0, expires_at_unix: 0, generation: 0};
     if (fixture.codec.decode(fixture.codec.ctx, ?token[0], encoded.written,
-            view.view("binding", 7), 100, ?id_output[0], 64,
-            ?data_output[0], 2048, ?decoded).status != CODEC_INVALID
+        view.view("binding", 7), 100, ?id_output[0], 64,
+        ?data_output[0], 2048, ?decoded).status != CODEC_INVALID
         || decoded.version != 99 || mutation.mutations != 1) { ret 7; }
-    var raw: [3072]u8;
+    var raw:     [3072]u8;
     val raw_len: usize = base64.decode(?token[0], encoded.written,
         ?raw[0], 3072);
     if (raw_len == 0 || mutation.inner.claim(mutation.inner.ctx, 1,
-            ?raw[8], 12, 2005, 100) != GUARD_SEEN) { ret 8; }
+        ?raw[8], 12, 2005, 100) != GUARD_SEEN) { ret 8; }
     ret (!release_codec_fixture(?fixture))::i32;
 }
 
 test "laurel.session: every public range and array product is checked" {
-    val maximum: usize = ~(0::usize);
-    val near_end: *u8 = (maximum - 1)::*u8;
+    val maximum:  usize = ~(0::usize);
+    val near_end: *u8   = (maximum - 1)::*u8;
 
     var invalid_store: MemoryStore;
     invalid_store.active = false;
@@ -3587,7 +3601,7 @@ test "laurel.session: every public range and array product is checked" {
         guard_overflow)) { ret 2; }
     var invalid_ring: KeyRing;
     invalid_ring.initialized = false;
-    invalid_ring.active = false;
+    invalid_ring.active      = false;
     val key_overflow: usize = maximum / $size_of(KeyGeneration) + 1;
     if (init_key_ring(?invalid_ring, (1::usize)::*KeyGeneration,
         key_overflow, 1, maximum, AES_256_GCM, (?invalid_ring)::ptr)) {
@@ -3595,35 +3609,35 @@ test "laurel.session: every public range and array product is checked" {
     }
 
     var one_key: KeyGeneration;
-    one_key.id = 1;
-    one_key.key_len = 32;
+    one_key.id           = 1;
+    one_key.key_len      = 32;
     one_key.activated_at = 0;
     one_key.encode_until = 100;
     one_key.decode_until = 200;
     var key_index: usize = 0;
     for (key_index < 32) {
         one_key.key[key_index] = 0x20 + key_index::u8;
-        key_index = key_index + 1;
+        key_index              = key_index + 1;
     }
     if (!init_key_ring(?invalid_ring, ?one_key, 1, 1, maximum,
-            AES_256_GCM, (?invalid_ring)::ptr)
+        AES_256_GCM, (?invalid_ring)::ptr)
         || !release_key_ring(?invalid_ring)) { ret 4; }
 
-    var slots: [1]MemorySlot;
+    var slots:  [1]MemorySlot;
     var memory: MemoryStore;
     memory.active = false;
     if (!init_memory_store(?memory, ?slots[0], 1)) { ret 5; }
     val store: Store = memory_store(?memory);
     if (store.start(store.ctx) != STORE_OK) { ret 5; }
     var data_output: [2048]u8;
-    var loaded: Session = Session{version: 99, id: view.view(nil, 0), data: view.view(nil, 0), issued_at_unix: 0, not_before_unix: 0, expires_at_unix: 0, generation: 0};
-    val invalid_id: view.View = view.view(near_end, 4);
+    var loaded:      Session   = Session{version: 99, id: view.view(nil, 0), data: view.view(nil, 0), issued_at_unix: 0, not_before_unix: 0, expires_at_unix: 0, generation: 0};
+    val invalid_id:  view.View = view.view(near_end, 4);
     if (store.load(store.ctx, invalid_id, 1, ?data_output[0], 2048,
-            ?loaded, nil) != STORE_INVALID
+        ?loaded, nil) != STORE_INVALID
         || store.delete(store.ctx, invalid_id, 1, 1, nil) != STORE_INVALID
         || loaded.version != 99) { ret 6; }
 
-    var guard_slots: [2]GuardSlot;
+    var guard_slots:   [2]GuardSlot;
     var guard_storage: MemoryGuard;
     guard_storage.active = false;
     if (!init_memory_guard(?guard_storage, ?guard_slots[0], 2)) { ret 7; }
@@ -3635,15 +3649,15 @@ test "laurel.session: every public range and array product is checked" {
     if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_ALLOW, 8, 8)) {
         ret 9;
     }
-    var value: Session = sample_session();
-    var token: [4096]u8;
-    val entropy_calls: usize = fixture.entropy.calls;
+    var value:         Session = sample_session();
+    var token:         [4096]u8;
+    val entropy_calls: usize   = fixture.entropy.calls;
     if (fixture.codec.encode(fixture.codec.ctx, ?value,
-            view.view(near_end, 4), 100, ?token[0], 4096).status
-            != CODEC_INVALID
+        view.view(near_end, 4), 100, ?token[0], 4096).status
+        != CODEC_INVALID
         || fixture.codec.decode(fixture.codec.ctx, near_end, 4,
-            view.view("binding", 7), 100, ?data_output[0], 64,
-            ?data_output[64], 1984, ?loaded).status != CODEC_INVALID
+        view.view("binding", 7), 100, ?data_output[0], 64,
+        ?data_output[64], 1984, ?loaded).status != CODEC_INVALID
         || fixture.entropy.calls != entropy_calls) { ret 10; }
     value.data = view.view(near_end, 4);
     if (fixture.codec.encode(fixture.codec.ctx, ?value,
@@ -3657,19 +3671,19 @@ test "laurel.session: every public range and array product is checked" {
 }
 
 test "laurel.session: inclusive maximum overlap arithmetic never wraps" {
-    val maximum: usize = ~(0::usize);
-    val at_maximum: *u8 = maximum::*u8;
-    val before_maximum: *u8 = (maximum - 1)::*u8;
+    val maximum:        usize = ~(0::usize);
+    val at_maximum:     *u8   = maximum::*u8;
+    val before_maximum: *u8   = (maximum - 1)::*u8;
     if (!range_valid(at_maximum, 1)
         || !ranges_overlap(at_maximum, 1, at_maximum, 1)
         || ranges_overlap(at_maximum, 1, before_maximum, 1)
         || ranges_overlap(before_maximum, 1, at_maximum, 1)
         || !ranges_overlap(before_maximum, 2, at_maximum, 1)) { ret 1; }
 
-    var slots: [1]MemorySlot;
+    var slots:  [1]MemorySlot;
     var memory: MemoryStore;
     memory.initialized = false;
-    memory.active = false;
+    memory.active      = false;
     if (!init_memory_store(?memory, ?slots[0], 1)) { ret 2; }
     val store: Store = memory_store(?memory);
     var scope: cancel.Scope;
@@ -3682,10 +3696,10 @@ test "laurel.session: inclusive maximum overlap arithmetic never wraps" {
 }
 
 rec UpdateAttempt {
-    store:   *MemoryStore;
-    value:   Session;
-    status:  StoreStatus;
-    result:  SaveResult;
+    store:  *MemoryStore;
+    value:  Session;
+    status: StoreStatus;
+    result: SaveResult;
 }
 
 fun concurrent_update(arg: *u8) {
@@ -3696,20 +3710,20 @@ fun concurrent_update(arg: *u8) {
 }
 
 rec DurableProbe {
-    starts:  usize;
-    stops:   usize;
-    loads:   usize;
-    saves:   usize;
-    deletes: usize;
-    replaces: usize;
-    reaps:   usize;
-    active:  bool;
-    manager: *Manager;
-    reenter: bool;
-    fail_start: bool;
-    fail_stop: bool;
+    starts:        usize;
+    stops:         usize;
+    loads:         usize;
+    saves:         usize;
+    deletes:       usize;
+    replaces:      usize;
+    reaps:         usize;
+    active:        bool;
+    manager:       *Manager;
+    reenter:       bool;
+    fail_start:    bool;
+    fail_stop:     bool;
     start_reentry: StoreStatus;
-    stop_reentry: StoreStatus;
+    stop_reentry:  StoreStatus;
 }
 
 fun durable_aliases(ctx: ptr, data: *u8, len: usize) bool {
@@ -3747,7 +3761,7 @@ fun durable_load(ctx: ptr, id: view.View, now: i64, data_output: *u8,
     scope: *cancel.Scope) StoreStatus {
     val probe: *DurableProbe = ctx::*DurableProbe;
     if (probe == nil || !probe.active) { ret STORE_UNAVAILABLE; }
-    if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
+    if (scope_cancelled(scope))        { ret STORE_CANCELLED; }
     probe.loads = probe.loads + 1;
     ret STORE_NOT_FOUND;
 }
@@ -3756,14 +3770,14 @@ fun durable_save(ctx: ptr, value: *Session, expected_version: u64,
     now: i64, result: *SaveResult, scope: *cancel.Scope) StoreStatus {
     val probe: *DurableProbe = ctx::*DurableProbe;
     if (probe == nil || !probe.active) { ret STORE_UNAVAILABLE; }
-    if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
+    if (scope_cancelled(scope))        { ret STORE_CANCELLED; }
     if (now < 0 || !session_valid(value) || result == nil
         || expected_version != 0
         || value.version != 0 || value.generation != 0) {
         ret STORE_CONFLICT;
     }
     probe.saves = probe.saves + 1;
-    @result = SaveResult{version: 1, generation: 77};
+    @result     = SaveResult{version: 1, generation: 77};
     ret STORE_OK;
 }
 
@@ -3772,7 +3786,7 @@ fun durable_replace(ctx: ptr, old_id: view.View, expected_version: u64,
     result: *SaveResult, scope: *cancel.Scope) StoreStatus {
     val probe: *DurableProbe = ctx::*DurableProbe;
     if (probe == nil || !probe.active) { ret STORE_UNAVAILABLE; }
-    if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
+    if (scope_cancelled(scope))        { ret STORE_CANCELLED; }
     probe.replaces = probe.replaces + 1;
     ret STORE_NOT_FOUND;
 }
@@ -3785,7 +3799,7 @@ fun durable_reap(ctx: ptr, now: i64, result: *usize,
     }
     if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
     probe.reaps = probe.reaps + 1;
-    @result = 0;
+    @result     = 0;
     ret STORE_OK;
 }
 
@@ -3793,35 +3807,37 @@ fun durable_delete(ctx: ptr, id: view.View, expected_version: u64,
     generation: u64, scope: *cancel.Scope) StoreStatus {
     val probe: *DurableProbe = ctx::*DurableProbe;
     if (probe == nil || !probe.active) { ret STORE_UNAVAILABLE; }
-    if (scope_cancelled(scope)) { ret STORE_CANCELLED; }
+    if (scope_cancelled(scope))        { ret STORE_CANCELLED; }
     probe.deletes = probe.deletes + 1;
     ret STORE_NOT_FOUND;
 }
 
 fun durable_store(probe: *DurableProbe) Store {
-    if (probe == nil) { ret Store{ctx: nil, aliases: nil, start: nil, stop: nil, load: nil,
-        save: nil, delete: nil, replace: nil, reap: nil}; }
+    if (probe == nil) {
+        ret Store{ctx: nil, aliases: nil, start: nil, stop: nil, load: nil,
+            save: nil, delete: nil, replace: nil, reap: nil};
+    }
     ret Store{ctx: probe::ptr, aliases: durable_aliases,
-        start: durable_start, stop: durable_stop, load: durable_load,
-        save: durable_save, delete: durable_delete,
+        start:   durable_start, stop: durable_stop, load: durable_load,
+        save:    durable_save, delete: durable_delete,
         replace: durable_replace, reap: durable_reap};
 }
 
 test "laurel.session: stores enforce versions, generations, capacity, and release" {
-    var slots: [2]MemorySlot;
+    var slots:  [2]MemorySlot;
     var memory: MemoryStore;
     memory.active = false;
     if (!init_memory_store(?memory, ?slots[0], 2)) { ret 1; }
     val store: Store = memory_store(?memory);
     if (store.start(store.ctx) != STORE_OK) { ret 1; }
     var value: Session = Session{id: view.view("alpha", 5),
-        data: view.view("one", 3), issued_at_unix: 1,
+        data:            view.view("one", 3), issued_at_unix: 1,
         not_before_unix: 1, expires_at_unix: 100,
-        version: 0, generation: 0};
+        version:         0, generation: 0};
     var saved: SaveResult = SaveResult{version: 99, generation: 99};
     if (store.save(store.ctx, ?value, 0, 1, ?saved, nil) != STORE_OK
         || saved.version != 1 || saved.generation == 0) { ret 2; }
-    var data: [2048]u8;
+    var data:   [2048]u8;
     var loaded: Session;
     if (store.load(store.ctx, value.id, 1, ?data[0], 2048, ?loaded, nil)
         != STORE_OK || loaded.version != 1 || loaded.generation == 0
@@ -3838,7 +3854,7 @@ test "laurel.session: stores enforce versions, generations, capacity, and releas
     if (store.save(store.ctx, ?loaded, 1, 1, ?saved, nil) != STORE_CONFLICT) {
         ret 5;
     }
-    loaded.version = 2;
+    loaded.version    = 2;
     loaded.generation = first_generation + 1;
     if (store.save(store.ctx, ?loaded, 2, 1, ?saved, nil)
         != STORE_STALE_GENERATION) { ret 6; }
@@ -3853,16 +3869,16 @@ test "laurel.session: stores enforce versions, generations, capacity, and releas
         || !operation_ok(cancel.destroy(?cancelled))) { ret 8; }
 
     var second: Session = Session{id: view.view("beta", 4),
-        data: view.view("second", 6), issued_at_unix: 1,
+        data:            view.view("second", 6), issued_at_unix: 1,
         not_before_unix: 1, expires_at_unix: 100,
-        version: 0, generation: 0};
+        version:         0, generation: 0};
     if (store.save(store.ctx, ?second, 0, 1, ?saved, nil) != STORE_OK) {
         ret 9;
     }
     var third: Session = Session{id: view.view("gamma", 5),
-        data: view.view("third", 5), issued_at_unix: 1,
+        data:            view.view("third", 5), issued_at_unix: 1,
         not_before_unix: 1, expires_at_unix: 100,
-        version: 0, generation: 0};
+        version:         0, generation: 0};
     if (store.save(store.ctx, ?third, 0, 1, ?saved, nil) != STORE_CAPACITY) {
         ret 10;
     }
@@ -3872,17 +3888,17 @@ test "laurel.session: stores enforce versions, generations, capacity, and releas
     if (store.delete(store.ctx, second.id, 0, second_loaded.generation,
         nil) != STORE_CONFLICT
         || store.delete(store.ctx, second.id, second_loaded.version,
-            second_loaded.generation + 1, nil) != STORE_STALE_GENERATION
+        second_loaded.generation + 1, nil) != STORE_STALE_GENERATION
         || store.delete(store.ctx, second.id, second_loaded.version,
-            second_loaded.generation, nil) != STORE_OK) { ret 12; }
+        second_loaded.generation, nil) != STORE_OK) { ret 12; }
 
     if (store.delete(store.ctx, value.id, 2, first_generation, nil)
         != STORE_OK) { ret 13; }
-    value.version = 0;
+    value.version    = 0;
     value.generation = 0;
     if (store.save(store.ctx, ?value, 0, 1, ?saved, nil) != STORE_OK
         || store.load(store.ctx, value.id, 1, ?data[0], 2048, ?loaded, nil)
-            != STORE_OK || loaded.generation == first_generation) { ret 14; }
+        != STORE_OK || loaded.generation == first_generation) { ret 14; }
     if (store.delete(store.ctx, value.id, 1, first_generation, nil)
         != STORE_STALE_GENERATION) { ret 15; }
     if (store.stop(store.ctx) != STORE_OK || memory.active || memory.len != 0) {
@@ -3898,22 +3914,22 @@ test "laurel.session: stores enforce versions, generations, capacity, and releas
 }
 
 test "laurel.session: store scopes are disjoint from every operation range" {
-    var slots: [2]MemorySlot;
+    var slots:  [2]MemorySlot;
     var memory: MemoryStore;
     memory.initialized = false;
-    memory.active = false;
+    memory.active      = false;
     if (!init_memory_store(?memory, ?slots[0], 2)) { ret 1; }
     val store: Store = memory_store(?memory);
     if (store.start(store.ctx) != STORE_OK) { ret 2; }
     var value: Session = Session{id: view.view("scope-source", 12),
-        data: view.view("state", 5), issued_at_unix: 1,
+        data:            view.view("state", 5), issued_at_unix: 1,
         not_before_unix: 1, expires_at_unix: 100,
-        version: 0, generation: 0};
+        version:         0, generation: 0};
     var saved: SaveResult;
     if (store.save(store.ctx, ?value, 0, 1, ?saved, nil) != STORE_OK) {
         ret 3;
     }
-    var data: [2048]u8;
+    var data:   [2048]u8;
     var loaded: Session;
     if (store.load(store.ctx, value.id, 1, ?data[0], 2048, ?loaded, nil)
         != STORE_OK) { ret 4; }
@@ -3923,28 +3939,28 @@ test "laurel.session: store scopes are disjoint from every operation range" {
     }
     val scope_bytes: *u8 = (?scope)::*u8;
     if (store.load(store.ctx, value.id, 1, scope_bytes,
-            $size_of(cancel.Scope), ?loaded, ?scope) != STORE_INVALID
+        $size_of(cancel.Scope), ?loaded, ?scope) != STORE_INVALID
         || store.load(store.ctx, value.id, 1, ?data[0], 2048,
-            scope_bytes::*Session, ?scope) != STORE_INVALID
+        scope_bytes::*Session, ?scope) != STORE_INVALID
         || store.save(store.ctx, ?loaded, loaded.version, 1,
-            scope_bytes::*SaveResult, ?scope) != STORE_INVALID) {
+        scope_bytes::*SaveResult, ?scope) != STORE_INVALID) {
         ret 6;
     }
     var replacement: Session = Session{id: view.view("scope-target", 12),
-        data: view.view("replacement", 11), issued_at_unix: 1,
+        data:            view.view("replacement", 11), issued_at_unix: 1,
         not_before_unix: 1, expires_at_unix: 100,
-        version: 0, generation: 0};
+        version:         0, generation: 0};
     if (store.replace(store.ctx, loaded.id, loaded.version,
-            loaded.generation, ?replacement, 1, scope_bytes::*SaveResult,
-            ?scope) != STORE_INVALID
+        loaded.generation, ?replacement, 1, scope_bytes::*SaveResult,
+        ?scope) != STORE_INVALID
         || store.reap(store.ctx, 1, scope_bytes::*usize, ?scope)
-            != STORE_INVALID
+        != STORE_INVALID
         || !scope_active(?scope) || memory.len != 1) {
         ret 7;
     }
     var unchanged: Session;
     if (store.load(store.ctx, value.id, 1, ?data[0], 2048, ?unchanged, nil)
-            != STORE_OK
+        != STORE_OK
         || unchanged.version != loaded.version
         || unchanged.generation != loaded.generation
         || !operation_ok(cancel.destroy(?scope)) || store.stop(store.ctx) != STORE_OK) {
@@ -3954,54 +3970,54 @@ test "laurel.session: store scopes are disjoint from every operation range" {
 }
 
 test "laurel.session: stores reclaim and replace identities atomically" {
-    var slots: [2]MemorySlot;
+    var slots:  [2]MemorySlot;
     var memory: MemoryStore;
     memory.initialized = false;
-    memory.active = false;
+    memory.active      = false;
     if (!init_memory_store(?memory, ?slots[0], 2)) { ret 1; }
     val store: Store = memory_store(?memory);
     if (store.start(store.ctx) != STORE_OK) { ret 2; }
     var expired_value: Session = Session{id: view.view("expired", 7),
-        data: view.view("old", 3), issued_at_unix: 1,
+        data:            view.view("old", 3), issued_at_unix: 1,
         not_before_unix: 1, expires_at_unix: 10,
-        version: 0, generation: 0};
+        version:         0, generation: 0};
     var live: Session = Session{id: view.view("live", 4),
-        data: view.view("state", 5), issued_at_unix: 1,
+        data:            view.view("state", 5), issued_at_unix: 1,
         not_before_unix: 1, expires_at_unix: 300,
-        version: 0, generation: 0};
+        version:         0, generation: 0};
     var saved: SaveResult;
     if (store.save(store.ctx, ?expired_value, 0, 1, ?saved, nil)
-            != STORE_OK
+        != STORE_OK
         || store.save(store.ctx, ?live, 0, 1, ?saved, nil) != STORE_OK) {
         ret 3;
     }
-    val live_generation: u64 = saved.generation;
-    var replacement: Session = Session{id: view.view("fixed", 5),
-        data: view.view("new state", 9), issued_at_unix: 10,
+    val live_generation: u64     = saved.generation;
+    var replacement:     Session = Session{id: view.view("fixed", 5),
+        data:            view.view("new state", 9), issued_at_unix: 10,
         not_before_unix: 10, expires_at_unix: 400,
-        version: 0, generation: 0};
+        version:         0, generation: 0};
     if (store.replace(store.ctx, live.id, 1, live_generation,
-            ?replacement, 10, ?saved, nil) != STORE_OK
+        ?replacement, 10, ?saved, nil) != STORE_OK
         || saved.version != 1 || saved.generation == live_generation
         || memory.len != 1) { ret 4; }
-    var data: [2048]u8;
+    var data:   [2048]u8;
     var loaded: Session;
     if (store.load(store.ctx, expired_value.id, 10, ?data[0], 2048,
-            ?loaded, nil) != STORE_NOT_FOUND
+        ?loaded, nil) != STORE_NOT_FOUND
         || store.load(store.ctx, live.id, 10, ?data[0], 2048, ?loaded,
-            nil) != STORE_NOT_FOUND
+        nil) != STORE_NOT_FOUND
         || store.load(store.ctx, replacement.id, 10, ?data[0], 2048,
-            ?loaded, nil) != STORE_OK
+        ?loaded, nil) != STORE_OK
         || loaded.generation != saved.generation) { ret 5; }
     if (store.replace(store.ctx, replacement.id, loaded.version,
-            loaded.generation, ?replacement, 10, ?saved, nil)
-            != STORE_INVALID
+        loaded.generation, ?replacement, 10, ?saved, nil)
+        != STORE_INVALID
         || store.load(store.ctx, replacement.id, 10,
-            (?memory.lock)::*u8, 16, ?loaded, nil) != STORE_INVALID
+        (?memory.lock)::*u8, 16, ?loaded, nil) != STORE_INVALID
         || store.load(store.ctx, replacement.id, 10, ?data[0], 2048,
-            (?slots[0])::*Session, nil) != STORE_INVALID
+        (?slots[0])::*Session, nil) != STORE_INVALID
         || store.save(store.ctx, ?loaded, loaded.version, 10,
-            (?memory.len)::*SaveResult, nil) != STORE_INVALID) { ret 6; }
+        (?memory.len)::*SaveResult, nil) != STORE_INVALID) { ret 6; }
     var reaped: usize = 99;
     if (store.reap(store.ctx, 399, ?reaped, nil) != STORE_OK || reaped != 0
         || store.reap(store.ctx, 400, ?reaped, nil) != STORE_OK || reaped != 1
@@ -4021,7 +4037,7 @@ fun store_lifecycle_worker(arg: *u8) {
     atomic.store(race.started, 1);
     var i: usize = 0;
     for (i < 10000) {
-        var data: [2048]u8;
+        var data:   [2048]u8;
         var loaded: Session;
         val status: StoreStatus = memory_load(race.store::ptr,
             view.view("shared", 6), 1, ?data[0], 2048, ?loaded, nil);
@@ -4035,24 +4051,24 @@ fun store_lifecycle_worker(arg: *u8) {
 }
 
 test "laurel.session: store lifecycle serializes with active operations" {
-    var slots: [1]MemorySlot;
+    var slots:  [1]MemorySlot;
     var memory: MemoryStore;
     memory.initialized = false;
-    memory.active = false;
+    memory.active      = false;
     if (!init_memory_store(?memory, ?slots[0], 1)) { ret 1; }
     val store: Store = memory_store(?memory);
     if (store.start(store.ctx) != STORE_OK) { ret 2; }
     var value: Session = Session{id: view.view("shared", 6),
-        data: view.view("state", 5), issued_at_unix: 1,
+        data:            view.view("state", 5), issued_at_unix: 1,
         not_before_unix: 1, expires_at_unix: 100,
-        version: 0, generation: 0};
+        version:         0, generation: 0};
     var saved: SaveResult;
     if (store.save(store.ctx, ?value, 0, 1, ?saved, nil) != STORE_OK) {
         ret 3;
     }
-    var started: i64 = 0;
-    var failures: i64 = 0;
-    var race: StoreLifecycleRace = StoreLifecycleRace{store: ?memory,
+    var started:  i64                = 0;
+    var failures: i64                = 0;
+    var race:     StoreLifecycleRace = StoreLifecycleRace{store: ?memory,
         started: ?started, failures: ?failures};
     var worker: thread.Thread;
     thread.spawn_with(store_lifecycle_worker, (?race)::*u8, ?worker);
@@ -4077,7 +4093,8 @@ fun manager_transition_worker(arg: *u8) {
     val attempt: *ManagerAttempt = arg::*ManagerAttempt;
     if (attempt.start) {
         attempt.status = start_manager(attempt.manager);
-    } or {
+    }
+    or {
         attempt.status = stop_manager(attempt.manager);
     }
 }
@@ -4087,33 +4104,33 @@ test "laurel.session: manager ownership and lifecycle fail closed" {
     if (!init_codec_fixture(?codec_fixture, AES_256_GCM, REPLAY_ALLOW, 8, 8)) {
         ret 1;
     }
-    var slots: [1]MemorySlot;
+    var slots:  [1]MemorySlot;
     var memory: MemoryStore;
     memory.initialized = false;
-    memory.active = false;
+    memory.active      = false;
     if (!init_memory_store(?memory, ?slots[0], 1)) { ret 2; }
     slots[0].id[0] = 0x5a;
     val aliased_manager: *Manager = (?slots[0])::*Manager;
     if (init_manager(aliased_manager, memory_store(?memory),
-            codec_fixture.codec, secure_cookie("__Host-aliased"), "laurel.test")
+        codec_fixture.codec, secure_cookie("__Host-aliased"), "laurel.test")
         || slots[0].id[0] != 0x5a) { ret 3; }
 
-    var probe: DurableProbe;
+    var probe:   DurableProbe;
     var manager: Manager;
-    manager.state = MANAGER_EMPTY;
-    probe.manager = ?manager;
+    manager.state    = MANAGER_EMPTY;
+    probe.manager    = ?manager;
     probe.fail_start = true;
     if (!init_manager(?manager, durable_store(?probe), codec_fixture.codec,
-            secure_cookie("__Host-managed"), "laurel.test")
+        secure_cookie("__Host-managed"), "laurel.test")
         || init_manager(?manager, durable_store(?probe), codec_fixture.codec,
-            secure_cookie("__Host-managed"), "laurel.test")
+        secure_cookie("__Host-managed"), "laurel.test")
         || !manager_valid(?manager) || manager_active(?manager)
         || start_manager(?manager) != STORE_UNAVAILABLE
         || manager.state != MANAGER_STOPPED || manager_active(?manager)) {
         ret 4;
     }
     probe.fail_start = false;
-    probe.reenter = true;
+    probe.reenter    = true;
     if (start_manager(?manager) != STORE_OK
         || probe.start_reentry != STORE_INVALID || !manager_active(?manager)
         || !manager_valid(?manager)) { ret 5; }
@@ -4130,7 +4147,7 @@ test "laurel.session: manager ownership and lifecycle fail closed" {
         start: true, status: STORE_UNAVAILABLE};
     var second: ManagerAttempt = ManagerAttempt{manager: ?manager,
         start: true, status: STORE_UNAVAILABLE};
-    var first_thread: thread.Thread;
+    var first_thread:  thread.Thread;
     var second_thread: thread.Thread;
     thread.spawn_with(manager_transition_worker, (?first)::*u8,
         ?first_thread);
@@ -4140,14 +4157,14 @@ test "laurel.session: manager ownership and lifecycle fail closed" {
         || !thread_ok(thread.join(?first_thread))
         || !thread_ok(thread.join(?second_thread))
         || ((first.status == STORE_OK)::usize
-            + (second.status == STORE_OK)::usize) != 1
+        + (second.status == STORE_OK)::usize) != 1
         || ((first.status == STORE_INVALID)::usize
-            + (second.status == STORE_INVALID)::usize) != 1
+        + (second.status == STORE_INVALID)::usize) != 1
         || !manager_active(?manager)) { ret 8; }
 
-    first.start = false;
-    first.status = STORE_UNAVAILABLE;
-    second.start = false;
+    first.start   = false;
+    first.status  = STORE_UNAVAILABLE;
+    second.start  = false;
     second.status = STORE_UNAVAILABLE;
     thread.spawn_with(manager_transition_worker, (?first)::*u8,
         ?first_thread);
@@ -4157,32 +4174,32 @@ test "laurel.session: manager ownership and lifecycle fail closed" {
         || !thread_ok(thread.join(?first_thread))
         || !thread_ok(thread.join(?second_thread))
         || ((first.status == STORE_OK)::usize
-            + (second.status == STORE_OK)::usize) != 1
+        + (second.status == STORE_OK)::usize) != 1
         || ((first.status == STORE_INVALID)::usize
-            + (second.status == STORE_INVALID)::usize) != 1
+        + (second.status == STORE_INVALID)::usize) != 1
         || manager_active(?manager) || !manager_valid(?manager)
         || !release_codec_fixture(?codec_fixture)) { ret 9; }
     ret 0;
 }
 
 test "laurel.session: concurrent updates conflict and durable stores inject cleanly" {
-    var slots: [1]MemorySlot;
+    var slots:  [1]MemorySlot;
     var memory: MemoryStore;
     memory.active = false;
     if (!init_memory_store(?memory, ?slots[0], 1)) { ret 1; }
     val store: Store = memory_store(?memory);
     if (store.start(store.ctx) != STORE_OK) { ret 1; }
     var initial: Session = Session{id: view.view("shared", 6),
-        data: view.view("initial", 7), issued_at_unix: 1,
+        data:            view.view("initial", 7), issued_at_unix: 1,
         not_before_unix: 1, expires_at_unix: 100,
-        version: 0, generation: 0};
+        version:         0, generation: 0};
     var saved: SaveResult;
     if (store.save(store.ctx, ?initial, 0, 1, ?saved, nil) != STORE_OK
         || saved.version != 1 || saved.generation == 0) {
         ret 2;
     }
     var loaded_data: [2048]u8;
-    var loaded: Session;
+    var loaded:      Session;
     if (store.load(store.ctx, initial.id, 1, ?loaded_data[0], 2048,
         ?loaded, nil) != STORE_OK) { ret 3; }
     var first: UpdateAttempt = UpdateAttempt{store: ?memory, value: loaded,
@@ -4191,7 +4208,7 @@ test "laurel.session: concurrent updates conflict and durable stores inject clea
     var second: UpdateAttempt = UpdateAttempt{store: ?memory, value: loaded,
         status: STORE_INVALID, result: SaveResult{version: 0, generation: 0}};
     second.value.data = view.view("second", 6);
-    var first_thread: thread.Thread;
+    var first_thread:  thread.Thread;
     var second_thread: thread.Thread;
     thread.spawn_with(concurrent_update, (?first)::*u8, ?first_thread);
     thread.spawn_with(concurrent_update, (?second)::*u8, ?second_thread);
@@ -4202,7 +4219,7 @@ test "laurel.session: concurrent updates conflict and durable stores inject clea
         + (second.status == STORE_OK)::usize;
     val conflicts: usize = (first.status == STORE_CONFLICT)::usize
         + (second.status == STORE_CONFLICT)::usize;
-    if (successes != 1 || conflicts != 1) { ret 5; }
+    if (successes != 1 || conflicts != 1)  { ret 5; }
     if (store.stop(store.ctx) != STORE_OK) { ret 6; }
 
     var codec_fixture: CodecFixture;
@@ -4210,7 +4227,7 @@ test "laurel.session: concurrent updates conflict and durable stores inject clea
         ret 7;
     }
     var probe: DurableProbe = DurableProbe{starts: 0, stops: 0,
-        loads: 0, saves: 0, deletes: 0, replaces: 0, reaps: 0,
+        loads:  0, saves: 0, deletes: 0, replaces: 0, reaps: 0,
         active: false, manager: nil, reenter: false, fail_start: false, fail_stop: false, start_reentry: 0, stop_reentry: 0};
     val durable: Store = durable_store(?probe);
     var manager: Manager;
@@ -4224,9 +4241,9 @@ test "laurel.session: concurrent updates conflict and durable stores inject clea
     if (manager.store.save(manager.store.ctx, ?initial, 0, 1, ?saved, nil)
         != STORE_OK || saved.version != 1 || saved.generation != 77
         || manager.store.load(manager.store.ctx, initial.id, 1,
-            ?loaded_data[0], 2048, ?loaded, nil) != STORE_NOT_FOUND
+        ?loaded_data[0], 2048, ?loaded, nil) != STORE_NOT_FOUND
         || manager.store.delete(manager.store.ctx, initial.id, 1, 1, nil)
-            != STORE_NOT_FOUND) { ret 9; }
+        != STORE_NOT_FOUND) { ret 9; }
     if (stop_manager(?manager) != STORE_OK || manager_active(?manager)
         || probe.starts != 1 || probe.stops != 1 || probe.loads != 1
         || probe.saves != 1 || probe.deletes != 1) { ret 10; }
