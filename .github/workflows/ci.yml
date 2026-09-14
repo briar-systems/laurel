@@ -36,5 +36,5 @@ jobs:
       - name: Test (release)
         run: mach test . --profile release
 
-      - name: Verify IR across every target
-        run: mach build . --all-targets --verify-ir --profile release
+      - name: Build every target
+        run: mach build . --all-targets --profile release

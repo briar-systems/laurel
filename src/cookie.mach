@@ -89,18 +89,18 @@ rec Pair {
 }
 
 fun range_valid(data: *u8, len: usize) bool {
-    if (len == 0) { ret true; }
+    if (len == 0)    { ret true; }
     if (data == nil) { ret false; }
     ret len - 1 <= ~(0::usize) - data::usize;
 }
 
 fun range_overlap(a: *u8, a_len: usize, b: *u8, b_len: usize) bool {
-    if (a_len == 0 || b_len == 0) { ret false; }
+    if (a_len == 0 || b_len == 0)                         { ret false; }
     if (!range_valid(a, a_len) || !range_valid(b, b_len)) { ret true; }
     val a_start: usize = a::usize;
     val b_start: usize = b::usize;
-    val a_end: usize = a_start + (a_len - 1);
-    val b_end: usize = b_start + (b_len - 1);
+    val a_end:   usize = a_start + (a_len - 1);
+    val b_end:   usize = b_start + (b_len - 1);
     ret a_start <= b_end && b_start <= a_end;
 }
 
@@ -118,14 +118,14 @@ fun view_range_valid(value: view.View) bool {
 
 pub fun limits_default() Limits {
     ret Limits{
-        max_count: 64,
-        max_name_bytes: 128,
-        max_value_bytes: 4096,
-        max_attribute_count: 16,
-        max_attribute_name_bytes: 128,
+        max_count:                 64,
+        max_name_bytes:            128,
+        max_value_bytes:           4096,
+        max_attribute_count:       16,
+        max_attribute_name_bytes:  128,
         max_attribute_value_bytes: 1024,
-        max_cookie_bytes: 4096,
-        max_total_bytes: 16384,
+        max_cookie_bytes:          4096,
+        max_total_bytes:           16384,
     };
 }
 
@@ -237,18 +237,19 @@ fun next_pair(input: view.View, offset: *usize, pair: *Pair) bool {
     if (equal == start || equal == trimmed_end) { ret false; }
     pair.name = view.view(?input.data[start], equal - start);
     val value_start: usize = equal + 1;
-    val value_end: usize = trimmed_end;
+    val value_end:   usize = trimmed_end;
     if (value_end > value_start && input.data[value_start] == '"') {
         if (value_end - value_start < 2 || input.data[value_end - 1] != '"') {
             ret false;
         }
         pair.value = view.view(?input.data[value_start + 1],
             value_end - value_start - 2);
-    } or {
+    }
+    or {
         pair.value = view.view(?input.data[value_start], value_end - value_start);
     }
     if (!name_valid(pair.name) || !value_valid(pair.value)) { ret false; }
-    if (end == input.len) { @offset = end; }
+    if (end == input.len)                                   { @offset = end; }
     or {
         @offset = end + 1;
         if (@offset == input.len) { ret false; }
@@ -262,23 +263,23 @@ fun request_syntax(input: view.View, limits: Limits, pair_count: *usize) Status 
     }
     if (input.len > limits.max_total_bytes) { ret TOTAL_LIMIT; }
     var offset: usize = 0;
-    var count: usize = 0;
+    var count:  usize = 0;
     for (offset < input.len) {
-        var pair: Pair;
+        var pair:   Pair;
         val before: usize = offset;
         if (!next_pair(input, ?offset, ?pair) || offset <= before) {
             ret INVALID_INPUT;
         }
         if (count >= limits.max_count) { ret COUNT_LIMIT; }
         count = count + 1;
-        if (pair.name.len > limits.max_name_bytes) { ret NAME_LIMIT; }
+        if (pair.name.len > limits.max_name_bytes)   { ret NAME_LIMIT; }
         if (pair.value.len > limits.max_value_bytes) { ret VALUE_LIMIT; }
         var cookie_bytes: usize = 0;
         if (!add_length(?cookie_bytes, pair.name.len,
-                limits.max_cookie_bytes)
+            limits.max_cookie_bytes)
             || !add_length(?cookie_bytes, 1, limits.max_cookie_bytes)
             || !add_length(?cookie_bytes, pair.value.len,
-                limits.max_cookie_bytes)) {
+            limits.max_cookie_bytes)) {
             ret COOKIE_LIMIT;
         }
     }
@@ -289,10 +290,10 @@ fun request_syntax(input: view.View, limits: Limits, pair_count: *usize) Status 
 fun duplicate_before(input: view.View, stop: usize, name: view.View) bool {
     var offset: usize = 0;
     for (offset < stop) {
-        var pair: Pair;
+        var pair:   Pair;
         val before: usize = offset;
         if (!next_pair(input, ?offset, ?pair) || offset <= before) { ret false; }
-        if (view_equal(pair.name, name)) { ret true; }
+        if (view_equal(pair.name, name))                           { ret true; }
     }
     ret false;
 }
@@ -313,15 +314,15 @@ pub fun parse_request(input: view.View, jar: *Jar, limits: Limits,
         || range_overlap(input.data, input.len, jar::*u8, $size_of(Jar))
         || range_overlap(input.data, input.len, jar.items::*u8, item_bytes)
         || range_overlap(jar::*u8, $size_of(Jar), jar.items::*u8,
-            item_bytes)) { ret INVALID_INPUT; }
-    var pair_count: usize = 0;
-    val syntax: Status = request_syntax(input, limits, ?pair_count);
-    if (syntax != OK) { ret syntax; }
+        item_bytes)) { ret INVALID_INPUT; }
+    var pair_count: usize  = 0;
+    val syntax:     Status = request_syntax(input, limits, ?pair_count);
+    if (syntax != OK)         { ret syntax; }
     if (pair_count > jar.cap) { ret STORAGE_LIMIT; }
     var offset: usize = 0;
     for (offset < input.len) {
         val before: usize = offset;
-        var pair: Pair;
+        var pair:   Pair;
         if (!next_pair(input, ?offset, ?pair)) { ret INVALID_INPUT; }
         if (duplicate_policy == DUPLICATE_REJECT
             && duplicate_before(input, before, pair.name)) {
@@ -334,7 +335,7 @@ pub fun parse_request(input: view.View, jar: *Jar, limits: Limits,
         var pair: Pair;
         if (!next_pair(input, ?offset, ?pair)) { ret INVALID_INPUT; }
         var existing: usize = written;
-        var i: usize = 0;
+        var i:        usize = 0;
         for (i < written) {
             if (view_equal(jar.items[i].name, pair.name)) { existing = i; }
             i = i + 1;
@@ -343,20 +344,21 @@ pub fun parse_request(input: view.View, jar: *Jar, limits: Limits,
             if (duplicate_policy == DUPLICATE_LAST_WINS) {
                 jar.items[existing].value = pair.value;
             }
-        } or {
+        }
+        or {
             jar.items[written] = Cookie{name: view.view(nil, 0),
-                value: view.view(nil, 0), path: view.view(nil, 0),
-                domain: view.view(nil, 0), has_max_age: false, max_age_s: 0,
+                value:       view.view(nil, 0), path: view.view(nil, 0),
+                domain:      view.view(nil, 0), has_max_age: false, max_age_s: 0,
                 has_expires: false, expires_unix: 0, secure: false,
-                http_only: false, partitioned: false, same_site: 0,
-                attributes: nil, attribute_len: 0};
-            jar.items[written].name = pair.name;
-            jar.items[written].value = pair.value;
+                http_only:   false, partitioned: false, same_site: 0,
+                attributes:  nil, attribute_len: 0};
+            jar.items[written].name      = pair.name;
+            jar.items[written].value     = pair.value;
             jar.items[written].same_site = SAME_SITE_DEFAULT;
-            written = written + 1;
+            written                      = written + 1;
         }
     }
-    jar.len = written;
+    jar.len         = written;
     jar.total_bytes = input.len;
     ret OK;
 }
@@ -370,7 +372,7 @@ pub fun find(jar: *Jar, name: view.View) *Cookie {
     if (!array_bytes(jar.cap, $size_of(Cookie), ?item_bytes)
         || !range_valid(jar.items::*u8, item_bytes)
         || range_overlap(jar::*u8, $size_of(Jar), jar.items::*u8,
-            item_bytes)) { ret nil; }
+        item_bytes)) { ret nil; }
     var i: usize = 0;
     for (i < jar.len) {
         if (!cookie_ranges_valid(?jar.items[i])) { ret nil; }
@@ -385,7 +387,7 @@ fun domain_valid(domain: view.View) bool {
     if (domain.data == nil || domain.len > 253 || domain.data[0] == '.'
         || domain.data[domain.len - 1] == '.') { ret false; }
     var label_start: usize = 0;
-    var i: usize = 0;
+    var i:           usize = 0;
     for (i <= domain.len) {
         if (i == domain.len || domain.data[i] == '.') {
             if (i == label_start || domain.data[label_start] == '-'
@@ -393,7 +395,8 @@ fun domain_valid(domain: view.View) bool {
                 ret false;
             }
             label_start = i + 1;
-        } or {
+        }
+        or {
             val c: u8 = domain.data[i];
             if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z')
                 || (c >= 'a' && c <= 'z') || c == '-')) { ret false; }
@@ -404,7 +407,7 @@ fun domain_valid(domain: view.View) bool {
 }
 
 fun path_valid(path: view.View) bool {
-    if (path.len == 0) { ret true; }
+    if (path.len == 0)                           { ret true; }
     if (path.data == nil || path.data[0] != '/') { ret false; }
     var i: usize = 0;
     for (i < path.len) {
@@ -475,16 +478,16 @@ fun standard_status(cookie: *Cookie, limits: Limits) Status {
         || (cookie.secure && limits.max_attribute_name_bytes < 6)
         || (cookie.http_only && limits.max_attribute_name_bytes < 8)
         || (cookie.same_site != SAME_SITE_DEFAULT
-            && limits.max_attribute_name_bytes < 8)
+        && limits.max_attribute_name_bytes < 8)
         || (cookie.partitioned && limits.max_attribute_name_bytes < 11)) {
         ret ATTRIBUTE_NAME_LIMIT;
     }
     if ((cookie.path.len != 0
-            && cookie.path.len > limits.max_attribute_value_bytes)
+        && cookie.path.len > limits.max_attribute_value_bytes)
         || (cookie.domain.len != 0
-            && cookie.domain.len > limits.max_attribute_value_bytes)
+        && cookie.domain.len > limits.max_attribute_value_bytes)
         || (cookie.has_max_age && decimal_len(cookie.max_age_s)
-            > limits.max_attribute_value_bytes)
+        > limits.max_attribute_value_bytes)
         || (cookie.has_expires && limits.max_attribute_value_bytes < 29)) {
         ret ATTRIBUTE_VALUE_LIMIT;
     }
@@ -504,14 +507,14 @@ fun standard_status(cookie: *Cookie, limits: Limits) Status {
 }
 
 fun decimal_len(value: i64) usize {
-    var magnitude: u64 = value::u64;
-    var len: usize = 0;
+    var magnitude: u64   = value::u64;
+    var len:       usize = 0;
     if (value < 0) {
         magnitude = (0 - (value + 1))::u64 + 1;
-        len = 1;
+        len       = 1;
     }
     for (true) {
-        len = len + 1;
+        len       = len + 1;
         magnitude = magnitude / 10;
         if (magnitude == 0) { ret len; }
     }
@@ -522,8 +525,8 @@ fun append(output: *u8, offset: *usize, value: view.View) {
     var i: usize = 0;
     for (i < value.len) {
         output[@offset] = value.data[i];
-        @offset = @offset + 1;
-        i = i + 1;
+        @offset         = @offset + 1;
+        i               = i + 1;
     }
 }
 
@@ -531,36 +534,36 @@ fun append_decimal(output: *u8, offset: *usize, value: i64) {
     var magnitude: u64 = value::u64;
     if (value < 0) {
         output[@offset] = '-';
-        @offset = @offset + 1;
-        magnitude = (0 - (value + 1))::u64 + 1;
+        @offset         = @offset + 1;
+        magnitude       = (0 - (value + 1))::u64 + 1;
     }
     var digits: [20]u8;
-    var count: usize = 0;
+    var count:  usize = 0;
     for (true) {
         digits[count] = (magnitude % 10)::u8 + '0';
-        count = count + 1;
-        magnitude = magnitude / 10;
+        count         = count + 1;
+        magnitude     = magnitude / 10;
         if (magnitude == 0) { brk; }
     }
     for (count > 0) {
-        count = count - 1;
+        count           = count - 1;
         output[@offset] = digits[count];
-        @offset = @offset + 1;
+        @offset         = @offset + 1;
     }
 }
 
 fun append_two(output: *u8, offset: *usize, value: i64) {
-    output[@offset] = '0' + (value / 10)::u8;
+    output[@offset]     = '0' + (value / 10)::u8;
     output[@offset + 1] = '0' + (value % 10)::u8;
-    @offset = @offset + 2;
+    @offset             = @offset + 2;
 }
 
 fun append_four(output: *u8, offset: *usize, value: i64) {
-    output[@offset] = '0' + (value / 1000)::u8;
+    output[@offset]     = '0' + (value / 1000)::u8;
     output[@offset + 1] = '0' + ((value / 100) % 10)::u8;
     output[@offset + 2] = '0' + ((value / 10) % 10)::u8;
     output[@offset + 3] = '0' + (value % 10)::u8;
-    @offset = @offset + 4;
+    @offset             = @offset + 4;
 }
 
 fun append_weekday(output: *u8, offset: *usize, weekday: i64) {
@@ -570,57 +573,57 @@ fun append_weekday(output: *u8, offset: *usize, weekday: i64) {
     or (weekday == 3) { append(output, offset, view.view("Wed", 3)); }
     or (weekday == 4) { append(output, offset, view.view("Thu", 3)); }
     or (weekday == 5) { append(output, offset, view.view("Fri", 3)); }
-    or { append(output, offset, view.view("Sat", 3)); }
+    or                { append(output, offset, view.view("Sat", 3)); }
 }
 
 fun append_month(output: *u8, offset: *usize, month: i64) {
-    if (month == 1) { append(output, offset, view.view("Jan", 3)); }
-    or (month == 2) { append(output, offset, view.view("Feb", 3)); }
-    or (month == 3) { append(output, offset, view.view("Mar", 3)); }
-    or (month == 4) { append(output, offset, view.view("Apr", 3)); }
-    or (month == 5) { append(output, offset, view.view("May", 3)); }
-    or (month == 6) { append(output, offset, view.view("Jun", 3)); }
-    or (month == 7) { append(output, offset, view.view("Jul", 3)); }
-    or (month == 8) { append(output, offset, view.view("Aug", 3)); }
-    or (month == 9) { append(output, offset, view.view("Sep", 3)); }
+    if (month == 1)  { append(output, offset, view.view("Jan", 3)); }
+    or (month == 2)  { append(output, offset, view.view("Feb", 3)); }
+    or (month == 3)  { append(output, offset, view.view("Mar", 3)); }
+    or (month == 4)  { append(output, offset, view.view("Apr", 3)); }
+    or (month == 5)  { append(output, offset, view.view("May", 3)); }
+    or (month == 6)  { append(output, offset, view.view("Jun", 3)); }
+    or (month == 7)  { append(output, offset, view.view("Jul", 3)); }
+    or (month == 8)  { append(output, offset, view.view("Aug", 3)); }
+    or (month == 9)  { append(output, offset, view.view("Sep", 3)); }
     or (month == 10) { append(output, offset, view.view("Oct", 3)); }
     or (month == 11) { append(output, offset, view.view("Nov", 3)); }
-    or { append(output, offset, view.view("Dec", 3)); }
+    or               { append(output, offset, view.view("Dec", 3)); }
 }
 
 fun append_imf_date(output: *u8, offset: *usize, unix_seconds: i64) {
-    val days: i64 = unix_seconds / 86400;
-    val seconds: i64 = unix_seconds % 86400;
-    val z: i64 = days + 719468;
-    val era: i64 = z / 146097;
-    val day_of_era: i64 = z - era * 146097;
+    val days:        i64 = unix_seconds / 86400;
+    val seconds:     i64 = unix_seconds % 86400;
+    val z:           i64 = days + 719468;
+    val era:         i64 = z / 146097;
+    val day_of_era:  i64 = z - era * 146097;
     val year_of_era: i64 = (day_of_era - day_of_era / 1460
         + day_of_era / 36524 - day_of_era / 146096) / 365;
-    var year: i64 = year_of_era + era * 400;
+    var year:        i64 = year_of_era + era * 400;
     val day_of_year: i64 = day_of_era
         - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     val month_prime: i64 = (5 * day_of_year + 2) / 153;
-    val day: i64 = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    var month: i64 = month_prime + 3;
+    val day:         i64 = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    var month:       i64 = month_prime + 3;
     if (month_prime >= 10) { month = month_prime - 9; }
-    if (month <= 2) { year = year + 1; }
+    if (month <= 2)        { year = year + 1; }
     append_weekday(output, offset, (days + 4) % 7);
     append(output, offset, view.view(", ", 2));
     append_two(output, offset, day);
     output[@offset] = ' ';
-    @offset = @offset + 1;
+    @offset         = @offset + 1;
     append_month(output, offset, month);
     output[@offset] = ' ';
-    @offset = @offset + 1;
+    @offset         = @offset + 1;
     append_four(output, offset, year);
     output[@offset] = ' ';
-    @offset = @offset + 1;
+    @offset         = @offset + 1;
     append_two(output, offset, seconds / 3600);
     output[@offset] = ':';
-    @offset = @offset + 1;
+    @offset         = @offset + 1;
     append_two(output, offset, (seconds / 60) % 60);
     output[@offset] = ':';
-    @offset = @offset + 1;
+    @offset         = @offset + 1;
     append_two(output, offset, seconds % 60);
     append(output, offset, view.view(" GMT", 4));
 }
@@ -679,25 +682,25 @@ fun output_aliases_cookie(output: *u8, output_len: usize,
     cookie: *Cookie) bool {
     if (range_overlap(output, output_len, cookie::*u8, $size_of(Cookie))
         || range_overlap(output, output_len, cookie.name.data,
-            cookie.name.len)
+        cookie.name.len)
         || range_overlap(output, output_len, cookie.value.data,
-            cookie.value.len)
+        cookie.value.len)
         || range_overlap(output, output_len, cookie.path.data,
-            cookie.path.len)
+        cookie.path.len)
         || range_overlap(output, output_len, cookie.domain.data,
-            cookie.domain.len)) { ret true; }
+        cookie.domain.len)) { ret true; }
     var attribute_bytes: usize = 0;
     if (!array_bytes(cookie.attribute_len, $size_of(Attribute),
         ?attribute_bytes)
         || range_overlap(output, output_len, cookie.attributes::*u8,
-            attribute_bytes)) { ret true; }
+        attribute_bytes)) { ret true; }
     var i: usize = 0;
     for (i < cookie.attribute_len) {
         if (range_overlap(output, output_len, cookie.attributes[i].name.data,
-                cookie.attributes[i].name.len)
+            cookie.attributes[i].name.len)
             || range_overlap(output, output_len,
-                cookie.attributes[i].value.data,
-                cookie.attributes[i].value.len)) { ret true; }
+            cookie.attributes[i].value.data,
+            cookie.attributes[i].value.len)) { ret true; }
         i = i + 1;
     }
     ret false;
@@ -719,16 +722,16 @@ pub fun serialize_set_cookie(cookie: *Cookie, output: *u8,
         ret Operation{status: VALUE_LIMIT, written: 0};
     }
     var standard_count: usize = 0;
-    if (cookie.path.len != 0) { standard_count = standard_count + 1; }
+    if (cookie.path.len != 0)   { standard_count = standard_count + 1; }
     if (cookie.domain.len != 0) { standard_count = standard_count + 1; }
-    if (cookie.has_max_age) { standard_count = standard_count + 1; }
+    if (cookie.has_max_age)     { standard_count = standard_count + 1; }
     if (cookie.has_expires) {
         if (cookie.expires_unix < 0 || cookie.expires_unix > 253402300799) {
             ret Operation{status: INVALID_INPUT, written: 0};
         }
         standard_count = standard_count + 1;
     }
-    if (cookie.secure) { standard_count = standard_count + 1; }
+    if (cookie.secure)    { standard_count = standard_count + 1; }
     if (cookie.http_only) { standard_count = standard_count + 1; }
     if (cookie.same_site != SAME_SITE_DEFAULT) {
         standard_count = standard_count + 1;
@@ -738,7 +741,7 @@ pub fun serialize_set_cookie(cookie: *Cookie, output: *u8,
     if (standards != OK) { ret Operation{status: standards, written: 0}; }
     if (standard_count > limits.max_attribute_count
         || cookie.attribute_len
-            > limits.max_attribute_count - standard_count) {
+        > limits.max_attribute_count - standard_count) {
         ret Operation{status: ATTRIBUTE_COUNT_LIMIT, written: 0};
     }
     if (!attribute_storage_valid(cookie)) {
@@ -760,7 +763,7 @@ pub fun serialize_set_cookie(cookie: *Cookie, output: *u8,
     }
     if (starts_with(cookie.name, "__Host-", 7)
         && (!cookie.secure || !view_equal(cookie.path, view.view("/", 1))
-            || cookie.domain.len != 0)) {
+        || cookie.domain.len != 0)) {
         ret Operation{status: PREFIX_VIOLATION, written: 0};
     }
     if (starts_with(cookie.name, "__Http-", 7)
@@ -769,8 +772,8 @@ pub fun serialize_set_cookie(cookie: *Cookie, output: *u8,
     }
     if (starts_with(cookie.name, "__Host-Http-", 12)
         && (!cookie.secure || !cookie.http_only
-            || !view_equal(cookie.path, view.view("/", 1))
-            || cookie.domain.len != 0)) {
+        || !view_equal(cookie.path, view.view("/", 1))
+        || cookie.domain.len != 0)) {
         ret Operation{status: PREFIX_VIOLATION, written: 0};
     }
     if ((cookie.same_site == SAME_SITE_NONE || cookie.partitioned)
@@ -786,17 +789,17 @@ pub fun serialize_set_cookie(cookie: *Cookie, output: *u8,
     if (cookie.path.len != 0) {
         if (!add_length(?total, 7, limits.max_cookie_bytes)
             || !add_length(?total, cookie.path.len,
-                limits.max_cookie_bytes)) { ret Operation{status: COOKIE_LIMIT, written: 0}; }
+            limits.max_cookie_bytes)) { ret Operation{status: COOKIE_LIMIT, written: 0}; }
     }
     if (cookie.domain.len != 0) {
         if (!add_length(?total, 9, limits.max_cookie_bytes)
             || !add_length(?total, cookie.domain.len,
-                limits.max_cookie_bytes)) { ret Operation{status: COOKIE_LIMIT, written: 0}; }
+            limits.max_cookie_bytes)) { ret Operation{status: COOKIE_LIMIT, written: 0}; }
     }
     if (cookie.has_max_age) {
         if (!add_length(?total, 10, limits.max_cookie_bytes)
             || !add_length(?total, decimal_len(cookie.max_age_s),
-                limits.max_cookie_bytes)) { ret Operation{status: COOKIE_LIMIT, written: 0}; }
+            limits.max_cookie_bytes)) { ret Operation{status: COOKIE_LIMIT, written: 0}; }
     }
     if (cookie.has_expires
         && !add_length(?total, 39, limits.max_cookie_bytes)) {
@@ -811,10 +814,10 @@ pub fun serialize_set_cookie(cookie: *Cookie, output: *u8,
     if (cookie.same_site != SAME_SITE_DEFAULT) {
         var same_site_len: usize = 3;
         if (cookie.same_site == SAME_SITE_STRICT) { same_site_len = 6; }
-        or (cookie.same_site == SAME_SITE_NONE) { same_site_len = 4; }
+        or (cookie.same_site == SAME_SITE_NONE)   { same_site_len = 4; }
         if (!add_length(?total, 11, limits.max_cookie_bytes)
             || !add_length(?total, same_site_len,
-                limits.max_cookie_bytes)) { ret Operation{status: COOKIE_LIMIT, written: 0}; }
+            limits.max_cookie_bytes)) { ret Operation{status: COOKIE_LIMIT, written: 0}; }
     }
     if (cookie.partitioned
         && !add_length(?total, 13, limits.max_cookie_bytes)) {
@@ -824,19 +827,19 @@ pub fun serialize_set_cookie(cookie: *Cookie, output: *u8,
     for (i < cookie.attribute_len) {
         if (!add_length(?total, 2, limits.max_cookie_bytes)
             || !add_length(?total, cookie.attributes[i].name.len,
-                limits.max_cookie_bytes)) {
+            limits.max_cookie_bytes)) {
             ret Operation{status: COOKIE_LIMIT, written: 0};
         }
         if (cookie.attributes[i].has_value
             && (!add_length(?total, 1, limits.max_cookie_bytes)
-                || !add_length(?total, cookie.attributes[i].value.len,
-                    limits.max_cookie_bytes))) {
+            || !add_length(?total, cookie.attributes[i].value.len,
+            limits.max_cookie_bytes))) {
             ret Operation{status: COOKIE_LIMIT, written: 0};
         }
         i = i + 1;
     }
     if (total > limits.max_total_bytes) { ret Operation{status: TOTAL_LIMIT, written: 0}; }
-    if (total > output_capacity) { ret Operation{status: OUTPUT_TOO_SMALL, written: 0}; }
+    if (total > output_capacity)        { ret Operation{status: OUTPUT_TOO_SMALL, written: 0}; }
     if (!range_valid(output, total)
         || output_aliases_cookie(output, total, cookie)) {
         ret Operation{status: INVALID_INPUT, written: 0};
@@ -844,7 +847,7 @@ pub fun serialize_set_cookie(cookie: *Cookie, output: *u8,
     var offset: usize = 0;
     append(output, ?offset, cookie.name);
     output[offset] = '=';
-    offset = offset + 1;
+    offset         = offset + 1;
     append(output, ?offset, cookie.value);
     if (cookie.path.len != 0) {
         append(output, ?offset, view.view("; Path=", 7));
@@ -870,9 +873,11 @@ pub fun serialize_set_cookie(cookie: *Cookie, output: *u8,
         append(output, ?offset, view.view("; SameSite=", 11));
         if (cookie.same_site == SAME_SITE_LAX) {
             append(output, ?offset, view.view("Lax", 3));
-        } or (cookie.same_site == SAME_SITE_STRICT) {
+        }
+        or (cookie.same_site == SAME_SITE_STRICT) {
             append(output, ?offset, view.view("Strict", 6));
-        } or {
+        }
+        or {
             append(output, ?offset, view.view("None", 4));
         }
     }
@@ -885,7 +890,7 @@ pub fun serialize_set_cookie(cookie: *Cookie, output: *u8,
         append(output, ?offset, cookie.attributes[i].name);
         if (cookie.attributes[i].has_value) {
             output[offset] = '=';
-            offset = offset + 1;
+            offset         = offset + 1;
             append(output, ?offset, cookie.attributes[i].value);
         }
         i = i + 1;
@@ -910,10 +915,10 @@ fun bytes_equal(actual: *u8, actual_len: usize, expected: *u8,
 # so an unset field is observable rather than coincidentally zero
 fun dirty_frame(depth: usize) usize {
     var scratch: [24]usize;
-    var i: usize = 0;
+    var i:       usize = 0;
     for (i < 24) {
         scratch[i] = 0x5a5a5a5a5a5a5a5a;
-        i = i + 1;
+        i          = i + 1;
     }
     if (depth > 0) { ret dirty_frame(depth - 1) + scratch[0]; }
     ret scratch[23];
@@ -922,13 +927,13 @@ fun dirty_frame(depth: usize) usize {
 # every field of a public result is set on every path, because a caller that
 # reads a length without checking the status would otherwise get stack contents
 test "laurel.cookie: a refused serialization still reports a written count" {
-    var output: [256]u8;
+    var output:   [256]u8;
     var response: Cookie;
-    response.name = view.view("id", 2);
-    response.value = view.view("1", 1);
+    response.name      = view.view("id", 2);
+    response.value     = view.view("1", 1);
     response.same_site = SAME_SITE_DEFAULT;
     val configured: Limits = limits_default();
-    var narrow: Limits = limits_default();
+    var narrow:     Limits = limits_default();
     narrow.max_cookie_bytes = 1;
     if (dirty_frame(3) == 0) { ret 1; }
     val refused: Operation = serialize_set_cookie(?response, ?output[0], 256,
@@ -953,9 +958,9 @@ test "laurel.cookie: a refused serialization still reports a written count" {
 
 test "laurel.cookie: request parsing is bounded with explicit duplicates" {
     val configured: Limits = limits_default();
-    var items: [4]Cookie;
-    var jar: Jar = init(?items[0], 4);
-    val parsed: Status = parse_request(view.view(
+    var items:      [4]Cookie;
+    var jar:        Jar    = init(?items[0], 4);
+    val parsed:     Status = parse_request(view.view(
         "sid=one; theme=\"dark\"", 21), ?jar, configured,
         DUPLICATE_REJECT);
     if (parsed != OK || jar.len != 2 || jar.total_bytes != 21
@@ -974,25 +979,25 @@ test "laurel.cookie: request parsing is bounded with explicit duplicates" {
         configured, DUPLICATE_REJECT) != INVALID_INPUT
         || invalid_jar.len != 0) { ret 4; }
     val tight: Limits = Limits{max_count: 1, max_name_bytes: 2,
-        max_value_bytes: 1, max_attribute_count: 1,
+        max_value_bytes:          1, max_attribute_count: 1,
         max_attribute_name_bytes: 1, max_attribute_value_bytes: 1,
-        max_cookie_bytes: 4, max_total_bytes: 5};
+        max_cookie_bytes:         4, max_total_bytes: 5};
     if (parse_request(view.view("sid=a", 5), ?invalid_jar, tight,
         DUPLICATE_REJECT) != NAME_LIMIT) { ret 5; }
     ret 0;
 }
 
 test "laurel.cookie: response serialization enforces security and attributes" {
-    val configured: Limits = limits_default();
-    var output: [256]u8;
-    var extension: Attribute = Attribute{name: view.view("Priority", 8),
+    val configured: Limits    = limits_default();
+    var output:     [256]u8;
+    var extension:  Attribute = Attribute{name: view.view("Priority", 8),
         value: view.view("High", 4), has_value: true};
     var response_cookie: Cookie = Cookie{name: view.view("__Host-session", 14),
-        value: view.view("abc", 3), path: view.view("/", 1),
-        domain: view.view(nil, 0), has_max_age: true, max_age_s: 3600,
+        value:       view.view("abc", 3), path: view.view("/", 1),
+        domain:      view.view(nil, 0), has_max_age: true, max_age_s: 3600,
         has_expires: false, expires_unix: 0,
-        secure: true, http_only: true, partitioned: true,
-        same_site: SAME_SITE_LAX, attributes: ?extension, attribute_len: 1};
+        secure:      true, http_only: true, partitioned: true,
+        same_site:   SAME_SITE_LAX, attributes: ?extension, attribute_len: 1};
     val serialized: Operation = serialize_set_cookie(?response_cookie,
         ?output[0], 256, configured);
     val expected: *u8 = "__Host-session=abc; Path=/; Max-Age=3600; Secure; HttpOnly; SameSite=Lax; Partitioned; Priority=High";
@@ -1011,14 +1016,14 @@ test "laurel.cookie: response serialization enforces security and attributes" {
         value: view.view("High", 4), has_value: true};
     duplicates[1] = Attribute{name: view.view("priority", 8),
         value: view.view("Low", 3), has_value: true};
-    response_cookie.attributes = ?duplicates[0];
+    response_cookie.attributes    = ?duplicates[0];
     response_cookie.attribute_len = 2;
     if (serialize_set_cookie(?response_cookie, ?output[0], 256,
         configured).status != DUPLICATE_ATTRIBUTE) { ret 4; }
     duplicates[1].name = view.view("Secure", 6);
     if (serialize_set_cookie(?response_cookie, ?output[0], 256,
         configured).status != DUPLICATE_ATTRIBUTE) { ret 5; }
-    response_cookie.attributes = ?extension;
+    response_cookie.attributes    = ?extension;
     response_cookie.attribute_len = 1;
     var untouched: [4]u8;
     untouched[0] = 0xa5;
@@ -1027,11 +1032,11 @@ test "laurel.cookie: response serialization enforces security and attributes" {
         ret 6;
     }
     var dated: Cookie = Cookie{name: view.view("a", 1),
-        value: view.view("b", 1), path: view.view(nil, 0),
-        domain: view.view(nil, 0), has_max_age: false, max_age_s: 0,
+        value:       view.view("b", 1), path: view.view(nil, 0),
+        domain:      view.view(nil, 0), has_max_age: false, max_age_s: 0,
         has_expires: true, expires_unix: 784111777, secure: false,
-        http_only: false, partitioned: false,
-        same_site: SAME_SITE_DEFAULT, attributes: nil, attribute_len: 0};
+        http_only:   false, partitioned: false,
+        same_site:   SAME_SITE_DEFAULT, attributes: nil, attribute_len: 0};
     val dated_result: Operation = serialize_set_cookie(?dated,
         ?output[0], 256, configured);
     if (dated_result.status != OK || !bytes_equal(?output[0],
@@ -1055,25 +1060,25 @@ test "laurel.cookie: response serialization enforces security and attributes" {
 
 test "laurel.cookie: every independent limit and prefix fails closed" {
     val configured: Limits = limits_default();
-    var items: [2]Cookie;
-    var jar: Jar = init(?items[0], 2);
-    var bounded: Limits = configured;
+    var items:      [2]Cookie;
+    var jar:        Jar    = init(?items[0], 2);
+    var bounded:    Limits = configured;
     bounded.max_count = 1;
     if (parse_request(view.view("a=1; b=2", 8), ?jar, bounded,
         DUPLICATE_REJECT) != COUNT_LIMIT || jar.len != 0) { ret 1; }
-    bounded = configured;
+    bounded                = configured;
     bounded.max_name_bytes = 2;
     if (parse_request(view.view("sid=1", 5), ?jar, bounded,
         DUPLICATE_REJECT) != NAME_LIMIT || jar.len != 0) { ret 2; }
-    bounded = configured;
+    bounded                 = configured;
     bounded.max_value_bytes = 1;
     if (parse_request(view.view("a=12", 4), ?jar, bounded,
         DUPLICATE_REJECT) != VALUE_LIMIT || jar.len != 0) { ret 3; }
-    bounded = configured;
+    bounded                  = configured;
     bounded.max_cookie_bytes = 4;
     if (parse_request(view.view("sid=1", 5), ?jar, bounded,
         DUPLICATE_REJECT) != COOKIE_LIMIT || jar.len != 0) { ret 4; }
-    bounded = configured;
+    bounded                 = configured;
     bounded.max_total_bytes = 7;
     if (parse_request(view.view("a=1; b=2", 8), ?jar, bounded,
         DUPLICATE_REJECT) != TOTAL_LIMIT || jar.len != 0) { ret 5; }
@@ -1095,56 +1100,56 @@ test "laurel.cookie: every independent limit and prefix fails closed" {
     attributes[1] = Attribute{name: view.view("Future", 6),
         value: view.view("yes", 3), has_value: true};
     var response: Cookie = Cookie{name: view.view("session", 7),
-        value: view.view("value", 5), path: view.view("/", 1),
-        domain: view.view(nil, 0), has_max_age: false, max_age_s: 0,
-        has_expires: false, expires_unix: 0,
-        secure: true, http_only: true, partitioned: false,
-        same_site: SAME_SITE_LAX, attributes: ?attributes[0],
+        value:         view.view("value", 5), path: view.view("/", 1),
+        domain:        view.view(nil, 0), has_max_age: false, max_age_s: 0,
+        has_expires:   false, expires_unix: 0,
+        secure:        true, http_only: true, partitioned: false,
+        same_site:     SAME_SITE_LAX, attributes: ?attributes[0],
         attribute_len: 2};
     var output: [256]u8;
-    bounded = configured;
+    bounded                     = configured;
     bounded.max_attribute_count = 1;
     if (serialize_set_cookie(?response, ?output[0], 256, bounded).status
         != ATTRIBUTE_COUNT_LIMIT) {
         ret 9;
     }
-    bounded = configured;
+    bounded                          = configured;
     bounded.max_attribute_name_bytes = 7;
     if (serialize_set_cookie(?response, ?output[0], 256, bounded).status
         != ATTRIBUTE_NAME_LIMIT) { ret 10; }
-    bounded = configured;
+    bounded                           = configured;
     bounded.max_attribute_value_bytes = 3;
     if (serialize_set_cookie(?response, ?output[0], 256, bounded).status
         != ATTRIBUTE_VALUE_LIMIT) { ret 11; }
-    bounded = configured;
+    bounded                  = configured;
     bounded.max_cookie_bytes = 10;
     if (serialize_set_cookie(?response, ?output[0], 256, bounded).status
         != COOKIE_LIMIT) { ret 12; }
-    bounded = configured;
+    bounded                 = configured;
     bounded.max_total_bytes = 10;
     if (serialize_set_cookie(?response, ?output[0], 256, bounded).status
         != TOTAL_LIMIT) { ret 13; }
-    response.name = view.view("__Secure-session", 16);
+    response.name   = view.view("__Secure-session", 16);
     response.secure = false;
     if (serialize_set_cookie(?response, ?output[0], 256, configured).status
         != PREFIX_VIOLATION) { ret 14; }
-    response.name = view.view("session", 7);
+    response.name      = view.view("session", 7);
     response.same_site = SAME_SITE_NONE;
     if (serialize_set_cookie(?response, ?output[0], 256, configured).status
         != SECURITY_VIOLATION) { ret 15; }
-    response.same_site = SAME_SITE_LAX;
+    response.same_site   = SAME_SITE_LAX;
     response.partitioned = true;
     if (serialize_set_cookie(?response, ?output[0], 256, configured).status
         != SECURITY_VIOLATION) { ret 16; }
     response.partitioned = false;
-    response.name = view.view("__Http-session", 14);
-    response.secure = true;
-    response.http_only = false;
+    response.name        = view.view("__Http-session", 14);
+    response.secure      = true;
+    response.http_only   = false;
     if (serialize_set_cookie(?response, ?output[0], 256, configured).status
         != PREFIX_VIOLATION) { ret 17; }
-    response.name = view.view("__Host-Http-session", 19);
+    response.name      = view.view("__Host-Http-session", 19);
     response.http_only = true;
-    response.path = view.view("/sub", 4);
+    response.path      = view.view("/sub", 4);
     if (serialize_set_cookie(?response, ?output[0], 256, configured).status
         != PREFIX_VIOLATION) { ret 18; }
     ret 0;
@@ -1152,94 +1157,94 @@ test "laurel.cookie: every independent limit and prefix fails closed" {
 
 test "laurel.cookie: standard attributes honor independent bounds" {
     val configured: Limits = limits_default();
-    var output: [256]u8;
-    val base: Cookie = Cookie{name: view.view("a", 1),
-        value: view.view("b", 1), path: view.view(nil, 0),
-        domain: view.view(nil, 0), has_max_age: false, max_age_s: 0,
+    var output:     [256]u8;
+    val base:       Cookie = Cookie{name: view.view("a", 1),
+        value:       view.view("b", 1), path: view.view(nil, 0),
+        domain:      view.view(nil, 0), has_max_age: false, max_age_s: 0,
         has_expires: false, expires_unix: 0, secure: false,
-        http_only: false, partitioned: false,
-        same_site: SAME_SITE_DEFAULT, attributes: nil, attribute_len: 0};
+        http_only:   false, partitioned: false,
+        same_site:   SAME_SITE_DEFAULT, attributes: nil, attribute_len: 0};
     var standard: Cookie = base;
-    var bounded: Limits = configured;
+    var bounded:  Limits = configured;
 
-    standard.path = view.view("/x", 2);
+    standard.path                    = view.view("/x", 2);
     bounded.max_attribute_name_bytes = 3;
     if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
         != ATTRIBUTE_NAME_LIMIT) { ret 1; }
-    bounded = configured;
+    bounded                           = configured;
     bounded.max_attribute_value_bytes = 1;
     if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
         != ATTRIBUTE_VALUE_LIMIT) { ret 2; }
 
-    standard = base;
-    standard.domain = view.view("example.com", 11);
-    bounded = configured;
+    standard                         = base;
+    standard.domain                  = view.view("example.com", 11);
+    bounded                          = configured;
     bounded.max_attribute_name_bytes = 5;
     if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
         != ATTRIBUTE_NAME_LIMIT) { ret 3; }
-    bounded = configured;
+    bounded                           = configured;
     bounded.max_attribute_value_bytes = 10;
     if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
         != ATTRIBUTE_VALUE_LIMIT) { ret 4; }
 
-    standard = base;
-    standard.has_max_age = true;
-    standard.max_age_s = -123;
-    bounded = configured;
+    standard                         = base;
+    standard.has_max_age             = true;
+    standard.max_age_s               = -123;
+    bounded                          = configured;
     bounded.max_attribute_name_bytes = 6;
     if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
         != ATTRIBUTE_NAME_LIMIT) { ret 5; }
-    bounded = configured;
+    bounded                           = configured;
     bounded.max_attribute_value_bytes = 3;
     if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
         != ATTRIBUTE_VALUE_LIMIT) { ret 6; }
 
-    standard = base;
-    standard.has_expires = true;
-    standard.expires_unix = 0;
-    bounded = configured;
+    standard                         = base;
+    standard.has_expires             = true;
+    standard.expires_unix            = 0;
+    bounded                          = configured;
     bounded.max_attribute_name_bytes = 6;
     if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
         != ATTRIBUTE_NAME_LIMIT) { ret 7; }
-    bounded = configured;
+    bounded                           = configured;
     bounded.max_attribute_value_bytes = 28;
     if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
         != ATTRIBUTE_VALUE_LIMIT) { ret 8; }
 
-    standard = base;
-    standard.secure = true;
-    bounded = configured;
+    standard                         = base;
+    standard.secure                  = true;
+    bounded                          = configured;
     bounded.max_attribute_name_bytes = 5;
     if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
         != ATTRIBUTE_NAME_LIMIT) { ret 9; }
-    bounded = configured;
+    bounded                           = configured;
     bounded.max_attribute_value_bytes = 1;
     if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
         != OK) { ret 10; }
 
-    standard = base;
-    standard.http_only = true;
-    bounded = configured;
+    standard                         = base;
+    standard.http_only               = true;
+    bounded                          = configured;
     bounded.max_attribute_name_bytes = 7;
     if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
         != ATTRIBUTE_NAME_LIMIT) { ret 11; }
 
-    standard = base;
-    standard.secure = true;
-    standard.same_site = SAME_SITE_STRICT;
-    bounded = configured;
+    standard                         = base;
+    standard.secure                  = true;
+    standard.same_site               = SAME_SITE_STRICT;
+    bounded                          = configured;
     bounded.max_attribute_name_bytes = 7;
     if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
         != ATTRIBUTE_NAME_LIMIT) { ret 12; }
-    bounded = configured;
+    bounded                           = configured;
     bounded.max_attribute_value_bytes = 5;
     if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
         != ATTRIBUTE_VALUE_LIMIT) { ret 13; }
 
-    standard = base;
-    standard.secure = true;
-    standard.partitioned = true;
-    bounded = configured;
+    standard                         = base;
+    standard.secure                  = true;
+    standard.partitioned             = true;
+    bounded                          = configured;
     bounded.max_attribute_name_bytes = 10;
     if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
         != ATTRIBUTE_NAME_LIMIT) { ret 14; }
@@ -1248,8 +1253,8 @@ test "laurel.cookie: standard attributes honor independent bounds" {
 
 test "laurel.cookie: parser and serializer reject every output alias" {
     val configured: Limits = limits_default();
-    var items: [2]Cookie;
-    val item_bytes: *u8 = (?items[0])::*u8;
+    var items:      [2]Cookie;
+    val item_bytes: *u8    = (?items[0])::*u8;
     item_bytes[0] = 'a';
     item_bytes[1] = '=';
     item_bytes[2] = '1';
@@ -1270,12 +1275,12 @@ test "laurel.cookie: parser and serializer reject every output alias" {
     value[0] = 'b';
     var path: [64]u8;
     path[0] = '/';
-    var domain: [64]u8;
-    val domain_text: *u8 = "example.com";
-    var copied: usize = 0;
+    var domain:      [64]u8;
+    val domain_text: *u8   = "example.com";
+    var copied:      usize = 0;
     for (copied < 11) {
         domain[copied] = domain_text[copied];
-        copied = copied + 1;
+        copied         = copied + 1;
     }
     var attribute_name: [16]u8;
     attribute_name[0] = 'X';
@@ -1284,33 +1289,33 @@ test "laurel.cookie: parser and serializer reject every output alias" {
     var attribute: Attribute = Attribute{name: view.view(?attribute_name[0], 1),
         value: view.view(?attribute_value[0], 1), has_value: true};
     var response: Cookie = Cookie{name: view.view(?name[0], 1),
-        value: view.view(?value[0], 1), path: view.view(nil, 0),
-        domain: view.view(nil, 0), has_max_age: false, max_age_s: 0,
-        has_expires: false, expires_unix: 0, secure: false,
-        http_only: false, partitioned: false,
-        same_site: SAME_SITE_DEFAULT, attributes: ?attribute,
+        value:         view.view(?value[0], 1), path: view.view(nil, 0),
+        domain:        view.view(nil, 0), has_max_age: false, max_age_s: 0,
+        has_expires:   false, expires_unix: 0, secure: false,
+        http_only:     false, partitioned: false,
+        same_site:     SAME_SITE_DEFAULT, attributes: ?attribute,
         attribute_len: 1};
     if (serialize_set_cookie(?response, ?name[0], 64, configured).status
-            != INVALID_INPUT || name[0] != 'a'
+        != INVALID_INPUT || name[0] != 'a'
         || serialize_set_cookie(?response, ?value[0], 64, configured).status
-            != INVALID_INPUT || value[0] != 'b'
+        != INVALID_INPUT || value[0] != 'b'
         || serialize_set_cookie(?response, (?attribute)::*u8, 256,
-            configured).status != INVALID_INPUT
+        configured).status != INVALID_INPUT
         || attribute.name.data != ?attribute_name[0]
         || serialize_set_cookie(?response, ?attribute_name[0], 64,
-            configured).status != INVALID_INPUT
+        configured).status != INVALID_INPUT
         || attribute_name[0] != 'X'
         || serialize_set_cookie(?response, ?attribute_value[0], 64,
-            configured).status != INVALID_INPUT
+        configured).status != INVALID_INPUT
         || attribute_value[0] != 'y'
         || serialize_set_cookie(?response, (?response)::*u8, 256,
-            configured).status != INVALID_INPUT
+        configured).status != INVALID_INPUT
         || response.name.data != ?name[0]) { ret 3; }
 
     response.path = view.view(?path[0], 1);
     if (serialize_set_cookie(?response, ?path[0], 64, configured).status
         != INVALID_INPUT || path[0] != '/') { ret 4; }
-    response.path = view.view(nil, 0);
+    response.path   = view.view(nil, 0);
     response.domain = view.view(?domain[0], 11);
     if (serialize_set_cookie(?response, ?domain[0], 64, configured).status
         != INVALID_INPUT || domain[0] != 'e') { ret 5; }
@@ -1323,7 +1328,7 @@ test "laurel.cookie: parser and serializer reject every output alias" {
     response.name = view.view(?name[0], 1);
     if (serialize_set_cookie(?response, near_end, 64, configured).status
         != INVALID_INPUT || name[0] != 'a') { ret 7; }
-    response.attributes = (~(0::usize) - 1)::*Attribute;
+    response.attributes    = (~(0::usize) - 1)::*Attribute;
     response.attribute_len = 2;
     if (serialize_set_cookie(?response, ?name[0], 64, configured).status
         != INVALID_INPUT || name[0] != 'a') { ret 8; }
@@ -1331,34 +1336,34 @@ test "laurel.cookie: parser and serializer reject every output alias" {
 }
 
 test "laurel.cookie: lookup rejects forged jars and nested ranges" {
-    val maximum: usize = ~(0::usize);
-    val near_end: *u8 = (maximum - 1)::*u8;
+    val maximum:  usize = ~(0::usize);
+    val near_end: *u8   = (maximum - 1)::*u8;
     if (find((maximum - 1)::*Jar, view.view("a", 1)) != nil) { ret 1; }
     var item: Cookie = Cookie{name: view.view("a", 1),
-        value: view.view("b", 1), path: view.view(nil, 0),
-        domain: view.view(nil, 0), same_site: SAME_SITE_DEFAULT,
+        value:      view.view("b", 1), path: view.view(nil, 0),
+        domain:     view.view(nil, 0), same_site: SAME_SITE_DEFAULT,
         attributes: nil, attribute_len: 0, has_max_age: false, max_age_s: 0, has_expires: false, expires_unix: 0, secure: false, http_only: false, partitioned: false};
     var jar: Jar = Jar{items: ?item, len: 1, cap: 1, total_bytes: 3};
     if (find(?jar, view.view(near_end, 4)) != nil) { ret 2; }
     item.name = view.view(near_end, 4);
     if (find(?jar, view.view("a", 1)) != nil) { ret 3; }
-    item.name = view.view("a", 1);
-    item.attributes = near_end::*Attribute;
+    item.name          = view.view("a", 1);
+    item.attributes    = near_end::*Attribute;
     item.attribute_len = 2;
     if (find(?jar, view.view("a", 1)) != nil) { ret 4; }
     jar.items = near_end::*Cookie;
-    jar.cap = 2;
+    jar.cap   = 2;
     if (find(?jar, view.view("a", 1)) != nil) { ret 5; }
     jar.items = (?jar)::usize::*Cookie;
-    jar.cap = 1;
+    jar.cap   = 1;
     if (find(?jar, view.view("a", 1)) != nil) { ret 6; }
     ret 0;
 }
 
 test "laurel.cookie: inclusive maximum overlap arithmetic never wraps" {
-    val maximum: usize = ~(0::usize);
-    val at_maximum: *u8 = maximum::*u8;
-    val before_maximum: *u8 = (maximum - 1)::*u8;
+    val maximum:        usize = ~(0::usize);
+    val at_maximum:     *u8   = maximum::*u8;
+    val before_maximum: *u8   = (maximum - 1)::*u8;
     if (!range_valid(at_maximum, 1)
         || !range_overlap(at_maximum, 1, at_maximum, 1)
         || range_overlap(at_maximum, 1, before_maximum, 1)
@@ -1366,8 +1371,8 @@ test "laurel.cookie: inclusive maximum overlap arithmetic never wraps" {
         || !range_overlap(before_maximum, 2, at_maximum, 1)) { ret 1; }
 
     var value: Cookie = Cookie{name: view.view("a", 1),
-        value: view.view("b", 1), path: view.view(nil, 0),
-        domain: view.view(nil, 0), same_site: SAME_SITE_DEFAULT,
+        value:      view.view("b", 1), path: view.view(nil, 0),
+        domain:     view.view(nil, 0), same_site: SAME_SITE_DEFAULT,
         attributes: nil, attribute_len: 0, has_max_age: false, max_age_s: 0, has_expires: false, expires_unix: 0, secure: false, http_only: false, partitioned: false};
     if (output_aliases_cookie(at_maximum, 1, ?value)
         || !output_aliases_cookie(value.name.data, 1, ?value)) { ret 2; }
@@ -1376,15 +1381,15 @@ test "laurel.cookie: inclusive maximum overlap arithmetic never wraps" {
 
 test "laurel.cookie: scalar limits precede traversal and sums never wrap" {
     val configured: Limits = limits_default();
-    val maximum: usize = ~(0::usize);
-    val near_end: *u8 = (maximum - 1)::*u8;
-    var output: [256]u8;
-    var response: Cookie = Cookie{name: view.view(near_end, 129),
-        value: view.view("b", 1), path: view.view(nil, 0),
-        domain: view.view(nil, 0), has_max_age: false, max_age_s: 0,
+    val maximum:    usize  = ~(0::usize);
+    val near_end:   *u8    = (maximum - 1)::*u8;
+    var output:     [256]u8;
+    var response:   Cookie = Cookie{name: view.view(near_end, 129),
+        value:       view.view("b", 1), path: view.view(nil, 0),
+        domain:      view.view(nil, 0), has_max_age: false, max_age_s: 0,
         has_expires: false, expires_unix: 0, secure: false,
-        http_only: false, partitioned: false,
-        same_site: SAME_SITE_DEFAULT, attributes: nil, attribute_len: 0};
+        http_only:   false, partitioned: false,
+        same_site:   SAME_SITE_DEFAULT, attributes: nil, attribute_len: 0};
     if (serialize_set_cookie(?response, ?output[0], 256, configured).status
         != NAME_LIMIT) { ret 1; }
 
@@ -1392,20 +1397,20 @@ test "laurel.cookie: scalar limits precede traversal and sums never wrap" {
     response.path = view.view(near_end, 1025);
     if (serialize_set_cookie(?response, ?output[0], 256, configured).status
         != ATTRIBUTE_VALUE_LIMIT) { ret 2; }
-    response.path = view.view(nil, 0);
-    response.attributes = near_end::usize::*Attribute;
+    response.path          = view.view(nil, 0);
+    response.attributes    = near_end::usize::*Attribute;
     response.attribute_len = maximum;
     if (serialize_set_cookie(?response, ?output[0], 256, configured).status
         != ATTRIBUTE_COUNT_LIMIT) { ret 3; }
 
     var hostile: Attribute = Attribute{name: view.view(near_end, 129),
         value: view.view(nil, 0), has_value: false};
-    response.attributes = ?hostile;
+    response.attributes    = ?hostile;
     response.attribute_len = 1;
     if (serialize_set_cookie(?response, ?output[0], 256, configured).status
         != ATTRIBUTE_NAME_LIMIT) { ret 4; }
-    hostile.name = view.view("X", 1);
-    hostile.value = view.view(near_end, 1025);
+    hostile.name      = view.view("X", 1);
+    hostile.value     = view.view(near_end, 1025);
     hostile.has_value = true;
     if (serialize_set_cookie(?response, ?output[0], 256, configured).status
         != ATTRIBUTE_VALUE_LIMIT) { ret 5; }

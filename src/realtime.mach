@@ -1,14 +1,5 @@
 # streaming and realtime response boundary
 
-use std.chrono.time;
-use std.memory;
-use std.sync.cancel;
-use std.text.utf8;
-use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
-use std.types.size.usize;
-use std.types.view;
 use http.core.body;
 use http.core.exchange;
 use http.core.field;
@@ -18,6 +9,23 @@ use http.core.target;
 use http.websocket;
 use http.websocket.negotiation;
 use laurel.render;
+use std.chrono.time;
+use std.memory;
+use std.sync.cancel;
+use std.text.utf8;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+use std.types.view;
+
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}
+
+fun transition_ok(outcome: cancel.Transition) bool {
+    ret (sel outcome.ok) && outcome.ok;
+}
 
 pub val KIND_STREAM:    u8 = 1;
 pub val KIND_SSE:       u8 = 2;
@@ -156,10 +164,10 @@ pub fun close(channel: Channel, code: u16, reason: view.View) Sent {
 
 pub fun init_queue(queue: *Queue, bytes: *u8, capacity: usize) bool {
     if (queue == nil || bytes == nil || capacity == 0) { ret false; }
-    queue.bytes = bytes;
+    queue.bytes    = bytes;
     queue.capacity = capacity;
-    queue.start = 0;
-    queue.end = 0;
+    queue.start    = 0;
+    queue.end      = 0;
     ret true;
 }
 
@@ -181,16 +189,16 @@ pub fun queue_free(queue: *Queue) usize {
 # compaction is the only way the tail grows, so encoded bytes stay contiguous
 fun queue_reserve(queue: *Queue, length: usize) bool {
     if (!queue_valid(queue) || length > queue_free(queue)) { ret false; }
-    if (queue.capacity - queue.end >= length) { ret true; }
+    if (queue.capacity - queue.end >= length)              { ret true; }
     val held: usize = queue.end - queue.start;
     if (held != 0) { memory.raw_move(queue.bytes::ptr, ?queue.bytes[queue.start], held); }
     queue.start = 0;
-    queue.end = held;
+    queue.end   = held;
     ret queue.capacity - queue.end >= length;
 }
 
 fun queue_append(queue: *Queue, data: *u8, length: usize) bool {
-    if (length == 0) { ret true; }
+    if (length == 0)                                  { ret true; }
     if (data == nil || !queue_reserve(queue, length)) { ret false; }
     memory.raw_copy(?queue.bytes[queue.end], data::ptr, length);
     queue.end = queue.end + length;
@@ -201,12 +209,12 @@ pub fun queue_take(queue: *Queue, output: *u8, capacity: usize) usize {
     if (!queue_valid(queue) || (capacity != 0 && output == nil)) { ret 0; }
     var count: usize = queue.end - queue.start;
     if (count > capacity) { count = capacity; }
-    if (count == 0) { ret 0; }
+    if (count == 0)       { ret 0; }
     memory.raw_copy(output::ptr, ?queue.bytes[queue.start], count);
     queue.start = queue.start + count;
     if (queue.start == queue.end) {
         queue.start = 0;
-        queue.end = 0;
+        queue.end   = 0;
     }
     ret count;
 }
@@ -262,7 +270,7 @@ fun single_line(value: view.View, limit: usize) bool {
     var i: usize = 0;
     for (i < value.len) {
         var codepoint: utf8.Codepoint;
-        val consumed: usize = utf8.decode(?value.data[i], value.len - i, ?codepoint);
+        val consumed:  usize = utf8.decode(?value.data[i], value.len - i, ?codepoint);
         if (consumed == 0 || codepoint < 0x20 || codepoint == 0x7f
             || (codepoint >= 0x80 && codepoint <= 0x9f)) { ret false; }
         i = i + consumed;
@@ -277,11 +285,11 @@ fun multi_line(value: view.View, limit: usize) bool {
     var i: usize = 0;
     for (i < value.len) {
         var codepoint: utf8.Codepoint;
-        val consumed: usize = utf8.decode(?value.data[i], value.len - i, ?codepoint);
+        val consumed:  usize = utf8.decode(?value.data[i], value.len - i, ?codepoint);
         if (consumed == 0) { ret false; }
         if (codepoint != 10 && codepoint != 13
             && (codepoint < 0x20 || codepoint == 0x7f
-                || (codepoint >= 0x80 && codepoint <= 0x9f))) { ret false; }
+            || (codepoint >= 0x80 && codepoint <= 0x9f))) { ret false; }
         i = i + consumed;
     }
     ret true;
@@ -290,10 +298,14 @@ fun multi_line(value: view.View, limit: usize) bool {
 fun line_end(value: view.View, from: usize, next: *usize) usize {
     var i: usize = from;
     for (i < value.len && value.data[i] != 10 && value.data[i] != 13) { i = i + 1; }
-    if (i == value.len) { @next = i; ret i; }
+    if (i == value.len) {
+        @next = i;
+        ret i;
+    }
     if (value.data[i] == 13 && i + 1 < value.len && value.data[i + 1] == 10) {
         @next = i + 2;
-    } or {
+    }
+    or {
         @next = i + 1;
     }
     ret i;
@@ -301,21 +313,21 @@ fun line_end(value: view.View, from: usize, next: *usize) usize {
 
 fun decimal_bytes(value: u64) usize {
     var digits: usize = 1;
-    var rest: u64 = value / 10;
+    var rest:   u64   = value / 10;
     for (rest != 0) {
         digits = digits + 1;
-        rest = rest / 10;
+        rest   = rest / 10;
     }
     ret digits;
 }
 
 fun write_decimal(value: u64, output: *u8, length: usize) {
-    var rest: u64 = value;
-    var i: usize = length;
+    var rest: u64   = value;
+    var i:    usize = length;
     for (i != 0) {
-        i = i - 1;
+        i         = i - 1;
         output[i] = '0' + (rest % 10)::u8;
-        rest = rest / 10;
+        rest      = rest / 10;
     }
 }
 
@@ -324,10 +336,10 @@ fun event_size(sse: Event, size: *usize) bool {
         || !single_line(sse.id, MAX_EVENT_ID_BYTES)) { ret false; }
     var total: usize = 1;
     if (sse.name.len != 0) { total = total + 7 + sse.name.len + 1; }
-    if (sse.id.len != 0) { total = total + 4 + sse.id.len + 1; }
+    if (sse.id.len != 0)   { total = total + 4 + sse.id.len + 1; }
     if (sse.retry_ms != 0) { total = total + 7 + decimal_bytes(sse.retry_ms) + 1; }
     var cursor: usize = 0;
-    var done: bool = false;
+    var done:   bool  = false;
     for (!done) {
         var next: usize = 0;
         val stop: usize = line_end(sse.data, cursor, ?next);
@@ -337,7 +349,7 @@ fun event_size(sse: Event, size: *usize) bool {
             cursor = next;
             if (cursor == sse.data.len) {
                 total = total + 6 + 1;
-                done = true;
+                done  = true;
             }
         }
     }
@@ -349,7 +361,7 @@ fun emit_label(output: *u8, cursor: usize, label: view.View) usize {
     var i: usize = 0;
     for (i < label.len) {
         output[cursor + i] = label.data[i];
-        i = i + 1;
+        i                  = i + 1;
     }
     ret cursor + label.len;
 }
@@ -362,42 +374,42 @@ fun emit_range(output: *u8, cursor: usize, data: *u8, from: usize, length: usize
 fun event_encode(sse: Event, output: *u8) usize {
     var cursor: usize = 0;
     if (sse.name.len != 0) {
-        cursor = emit_label(output, cursor, view.view("event: ", 7));
-        cursor = emit_range(output, cursor, sse.name.data, 0, sse.name.len);
+        cursor         = emit_label(output, cursor, view.view("event: ", 7));
+        cursor         = emit_range(output, cursor, sse.name.data, 0, sse.name.len);
         output[cursor] = 10;
-        cursor = cursor + 1;
+        cursor         = cursor + 1;
     }
     if (sse.id.len != 0) {
-        cursor = emit_label(output, cursor, view.view("id: ", 4));
-        cursor = emit_range(output, cursor, sse.id.data, 0, sse.id.len);
+        cursor         = emit_label(output, cursor, view.view("id: ", 4));
+        cursor         = emit_range(output, cursor, sse.id.data, 0, sse.id.len);
         output[cursor] = 10;
-        cursor = cursor + 1;
+        cursor         = cursor + 1;
     }
     if (sse.retry_ms != 0) {
         cursor = emit_label(output, cursor, view.view("retry: ", 7));
         val digits: usize = decimal_bytes(sse.retry_ms);
         write_decimal(sse.retry_ms, ?output[cursor], digits);
-        cursor = cursor + digits;
+        cursor         = cursor + digits;
         output[cursor] = 10;
-        cursor = cursor + 1;
+        cursor         = cursor + 1;
     }
     var position: usize = 0;
-    var done: bool = false;
+    var done:     bool  = false;
     for (!done) {
         var next: usize = 0;
         val stop: usize = line_end(sse.data, position, ?next);
-        cursor = emit_label(output, cursor, view.view("data: ", 6));
-        cursor = emit_range(output, cursor, sse.data.data, position, stop - position);
+        cursor         = emit_label(output, cursor, view.view("data: ", 6));
+        cursor         = emit_range(output, cursor, sse.data.data, position, stop - position);
         output[cursor] = 10;
-        cursor = cursor + 1;
+        cursor         = cursor + 1;
         if (stop == sse.data.len) { done = true; }
         or {
             position = next;
             if (position == sse.data.len) {
-                cursor = emit_label(output, cursor, view.view("data: ", 6));
+                cursor         = emit_label(output, cursor, view.view("data: ", 6));
                 output[cursor] = 10;
-                cursor = cursor + 1;
-                done = true;
+                cursor         = cursor + 1;
+                done           = true;
             }
         }
     }
@@ -407,7 +419,7 @@ fun event_encode(sse: Event, output: *u8) usize {
 
 fun stream_scope_status(stream: *Stream) SendStatus {
     val reason: cancel.Reason = cancel.reason(stream.scope);
-    if (reason == cancel.ACTIVE) { ret SEND_OK; }
+    if (sel reason.active) { ret SEND_OK; }
     ret SEND_CANCELLED;
 }
 
@@ -415,7 +427,7 @@ fun stream_writable(stream: *Stream) SendStatus {
     if (stream == nil || !stream.initialized || !queue_valid(?stream.queue)) {
         ret SEND_INVALID;
     }
-    if (stream.state == STATE_FAILED) { ret SEND_INVALID; }
+    if (stream.state == STATE_FAILED)                  { ret SEND_INVALID; }
     if (stream.state != STATE_OPEN || stream.finished) { ret SEND_CLOSED; }
     ret stream_scope_status(stream);
 }
@@ -436,16 +448,16 @@ fun stream_read(ctx: ptr, output: *u8, capacity: usize,
     }
     val count: usize = queue_take(?state.queue, output, capacity);
     if (count != 0) {
-        state.pending_output = nil;
+        state.pending_output   = nil;
         state.pending_capacity = 0;
-        state.pending_token = 0;
+        state.pending_token    = 0;
         ret body.data(count);
     }
     if (state.finished) {
-        state.pending_output = nil;
+        state.pending_output   = nil;
         state.pending_capacity = 0;
-        state.pending_token = 0;
-        state.state = STATE_CLOSED;
+        state.pending_token    = 0;
+        state.state            = STATE_CLOSED;
         ret body.complete(body.REUSE_ALLOWED);
     }
     if (capacity == 0) {
@@ -454,10 +466,10 @@ fun stream_read(ctx: ptr, output: *u8, capacity: usize,
     if (state.token_counter == 18446744073709551615) {
         ret body.failed("realtime token space exhausted", body.REUSE_FORBIDDEN);
     }
-    state.token_counter = state.token_counter + 1;
-    state.pending_output = output;
+    state.token_counter    = state.token_counter + 1;
+    state.pending_output   = output;
     state.pending_capacity = capacity;
-    state.pending_token = state.token_counter;
+    state.pending_token    = state.token_counter;
     ret body.pending(state.pending_token);
 }
 
@@ -475,14 +487,14 @@ fun stream_finish_body(ctx: ptr, mode: body.Mode, trailers: *field.Fields) body.
     if (state == nil || !state.initialized) {
         ret body.failed("invalid realtime stream body", body.REUSE_FORBIDDEN);
     }
-    state.pending_output = nil;
+    state.pending_output   = nil;
     state.pending_capacity = 0;
-    state.pending_token = 0;
-    state.finished = true;
+    state.pending_token    = 0;
+    state.finished         = true;
     if (mode == body.DRAIN) {
         state.queue.start = 0;
-        state.queue.end = 0;
-        state.state = STATE_CLOSED;
+        state.queue.end   = 0;
+        state.state       = STATE_CLOSED;
         ret body.complete(body.REUSE_ALLOWED);
     }
     if (mode == body.REJECT) {
@@ -514,22 +526,22 @@ pub fun init_stream(stream: *Stream, kind: u8, policy: Policy, bytes: *u8, capac
         || max_bytes > configured.response_body.max_bytes
         || configured.response_body.max_chunk_bytes == 0
         || configured.response_body.max_chunks == 0) { ret false; }
-    stream.kind = kind;
-    stream.policy = policy;
-    stream.scope = scope;
-    stream.generation = generation;
-    stream.max_bytes = max_bytes;
-    stream.sent_bytes = 0;
-    stream.state = STATE_OPEN;
-    stream.finished = false;
-    stream.pending_output = nil;
+    stream.kind             = kind;
+    stream.policy           = policy;
+    stream.scope            = scope;
+    stream.generation       = generation;
+    stream.max_bytes        = max_bytes;
+    stream.sent_bytes       = 0;
+    stream.state            = STATE_OPEN;
+    stream.finished         = false;
+    stream.pending_output   = nil;
     stream.pending_capacity = 0;
-    stream.pending_token = 0;
-    stream.token_counter = 0;
-    stream.last_send_ns = start_ns;
-    stream.close_code = 0;
-    stream.initialized = true;
-    stream.reader = body.init_reader(stream::ptr, stream_read, stream_finish_body,
+    stream.pending_token    = 0;
+    stream.token_counter    = 0;
+    stream.last_send_ns     = start_ns;
+    stream.close_code       = 0;
+    stream.initialized      = true;
+    stream.reader           = body.init_reader(stream::ptr, stream_read, stream_finish_body,
         stream_complete_read, stream_release_body, body.OWNER_APPLICATION, generation,
         false, 0, configured.response_body, trailers, scope);
     if (!stream.reader.valid) {
@@ -568,19 +580,19 @@ pub fun stream_pending(stream: *Stream) u64 {
 # a raw byte stream accepts a prefix so a full queue is visible as backpressure
 pub fun stream_send(stream: *Stream, payload: view.View, frame: FrameKind) Sent {
     val writable: SendStatus = stream_writable(stream);
-    if (writable != SEND_OK) { ret refuse(writable); }
-    if (!view_valid(payload) || payload.len == 0) { ret refuse(SEND_INVALID); }
+    if (writable != SEND_OK)                           { ret refuse(writable); }
+    if (!view_valid(payload) || payload.len == 0)      { ret refuse(SEND_INVALID); }
     if (payload.len > stream.policy.max_message_bytes) { ret refuse(SEND_LIMIT); }
     if (stream.kind == KIND_SSE) {
         if (frame == FRAME_COMMENT) { ret stream_comment(stream, payload); }
-        if (frame != FRAME_TEXT) { ret refuse(SEND_INVALID); }
+        if (frame != FRAME_TEXT)    { ret refuse(SEND_INVALID); }
         ret stream_event(stream, event(payload));
     }
     if (frame != FRAME_TEXT && (frame != FRAME_BINARY || !stream.policy.allow_binary)) {
         ret refuse(SEND_INVALID);
     }
     var count: usize = payload.len;
-    val room: usize = queue_free(?stream.queue);
+    val room:  usize = queue_free(?stream.queue);
     if (count > room) { count = room; }
     val remaining: u64 = stream.max_bytes - stream.sent_bytes;
     if (count::u64 > remaining) { count = remaining::usize; }
@@ -601,9 +613,9 @@ pub fun stream_event(stream: *Stream, sse: Event) Sent {
         ret refuse(SEND_INVALID);
     }
     var size: usize = 0;
-    if (!event_size(sse, ?size)) { ret refuse(SEND_INVALID); }
+    if (!event_size(sse, ?size))      { ret refuse(SEND_INVALID); }
     if (size > stream.queue.capacity) { ret refuse(SEND_LIMIT); }
-    if (!stream_admit(stream, size)) { ret refuse(SEND_LIMIT); }
+    if (!stream_admit(stream, size))  { ret refuse(SEND_LIMIT); }
     if (size > queue_free(?stream.queue) || !queue_reserve(?stream.queue, size)) {
         ret refuse(SEND_BLOCKED);
     }
@@ -611,7 +623,7 @@ pub fun stream_event(stream: *Stream, sse: Event) Sent {
         stream.state = STATE_FAILED;
         ret refuse(SEND_INVALID);
     }
-    stream.queue.end = stream.queue.end + size;
+    stream.queue.end  = stream.queue.end + size;
     stream.sent_bytes = stream.sent_bytes + size::u64;
     ret ok(size);
 }
@@ -629,10 +641,10 @@ pub fun stream_comment(stream: *Stream, text: view.View) Sent {
     }
     var cursor: usize = emit_label(?stream.queue.bytes[stream.queue.end], 0,
         view.view(": ", 2));
-    cursor = emit_range(?stream.queue.bytes[stream.queue.end], cursor, text.data, 0, text.len);
+    cursor                                        = emit_range(?stream.queue.bytes[stream.queue.end], cursor, text.data, 0, text.len);
     stream.queue.bytes[stream.queue.end + cursor] = 10;
-    stream.queue.end = stream.queue.end + size;
-    stream.sent_bytes = stream.sent_bytes + size::u64;
+    stream.queue.end                              = stream.queue.end + size;
+    stream.sent_bytes                             = stream.sent_bytes + size::u64;
     ret ok(size);
 }
 
@@ -660,8 +672,8 @@ pub fun stream_observe(stream: *Stream, now_ns: i64) bool {
 # finishing publishes end of body once the queued bytes have been read
 pub fun stream_finish(stream: *Stream) Sent {
     if (stream == nil || !stream.initialized) { ret refuse(SEND_INVALID); }
-    if (stream.state == STATE_FAILED) { ret refuse(SEND_INVALID); }
-    if (stream.finished) { ret refuse(SEND_CLOSED); }
+    if (stream.state == STATE_FAILED)         { ret refuse(SEND_INVALID); }
+    if (stream.finished)                      { ret refuse(SEND_CLOSED); }
     stream.finished = true;
     if (stream.state == STATE_OPEN) { stream.state = STATE_CLOSING; }
     ret ok(0);
@@ -674,8 +686,8 @@ pub fun stream_close(stream: *Stream, code: u16, reason: view.View) Sent {
     }
     val finished: Sent = stream_finish(stream);
     if (finished.status != SEND_OK) { ret finished; }
-    if (code != 0) { stream.close_code = code; }
-    or { stream.close_code = stream.policy.close_code; }
+    if (code != 0)                  { stream.close_code = code; }
+    or                              { stream.close_code = stream.policy.close_code; }
     ret finished;
 }
 
@@ -713,17 +725,17 @@ pub fun init_socket(socket: *Socket, policy: Policy, bytes: *u8, capacity: usize
         || policy.max_message_bytes::u64 > limits.max_frame_bytes
         || !websocket.encoder_init(?socket.encoder, websocket.SERVER, limits)
         || !websocket.decoder_init(?socket.decoder, websocket.SERVER, limits,
-            control, control_capacity)) { ret false; }
-    socket.policy = policy;
-    socket.scope = scope;
-    socket.state = STATE_OPEN;
-    socket.close_sent = false;
-    socket.close_received = false;
+        control, control_capacity)) { ret false; }
+    socket.policy          = policy;
+    socket.scope           = scope;
+    socket.state           = STATE_OPEN;
+    socket.close_sent      = false;
+    socket.close_received  = false;
     socket.peer_close_code = 0;
     socket.sent_close_code = 0;
-    socket.last_send_ns = start_ns;
-    socket.held = false;
-    socket.initialized = true;
+    socket.last_send_ns    = start_ns;
+    socket.held            = false;
+    socket.initialized     = true;
     ret true;
 }
 
@@ -753,7 +765,7 @@ pub fun socket_close_code(socket: *Socket) u16 {
 }
 
 fun header_bytes(length: u64) usize {
-    if (length < 126) { ret 2; }
+    if (length < 126)    { ret 2; }
     if (length <= 65535) { ret 4; }
     ret 10;
 }
@@ -762,10 +774,10 @@ fun socket_writable(socket: *Socket) SendStatus {
     if (socket == nil || !socket.initialized || !queue_valid(?socket.queue)) {
         ret SEND_INVALID;
     }
-    if (socket.state == STATE_FAILED) { ret SEND_INVALID; }
+    if (socket.state == STATE_FAILED)                      { ret SEND_INVALID; }
     if (socket.state == STATE_CLOSED || socket.close_sent) { ret SEND_CLOSED; }
     val reason: cancel.Reason = cancel.reason(socket.scope);
-    if (reason != cancel.ACTIVE) { ret SEND_CANCELLED; }
+    if (!(sel reason.active)) { ret SEND_CANCELLED; }
     ret SEND_OK;
 }
 
@@ -775,7 +787,7 @@ fun socket_frame(socket: *Socket, opcode: u8, payload: *u8, length: usize) Sent 
     if (needed > queue_free(?socket.queue) || !queue_reserve(?socket.queue, needed)) {
         ret refuse(SEND_BLOCKED);
     }
-    val room: usize = socket.queue.capacity - socket.queue.end;
+    val room:    usize           = socket.queue.capacity - socket.queue.end;
     val started: websocket.Write = websocket.begin(?socket.encoder, true, opcode,
         length::u64, nil, ?socket.queue.bytes[socket.queue.end], room);
     if (started.status != websocket.WRITE_OUTPUT || started.written == 0) {
@@ -783,8 +795,8 @@ fun socket_frame(socket: *Socket, opcode: u8, payload: *u8, length: usize) Sent 
         socket.state = STATE_FAILED;
         ret refuse(SEND_INVALID);
     }
-    val body_offset: usize = socket.queue.end + started.written;
-    val written: websocket.Write = websocket.write(?socket.encoder,
+    val body_offset: usize           = socket.queue.end + started.written;
+    val written:     websocket.Write = websocket.write(?socket.encoder,
         ?socket.queue.bytes[body_offset], room - started.written, payload, length);
     if (written.status != websocket.WRITE_DONE || written.written != length) {
         socket.state = STATE_FAILED;
@@ -795,29 +807,33 @@ fun socket_frame(socket: *Socket, opcode: u8, payload: *u8, length: usize) Sent 
         socket.close_sent = true;
         websocket.decoder_close_sent(?socket.decoder);
         if (socket.close_received) { socket.state = STATE_CLOSED; }
-        or { socket.state = STATE_CLOSING; }
+        or                         { socket.state = STATE_CLOSING; }
     }
     ret ok(length);
 }
 
 pub fun socket_send(socket: *Socket, payload: view.View, frame: FrameKind) Sent {
     val writable: SendStatus = socket_writable(socket);
-    if (writable != SEND_OK) { ret refuse(writable); }
+    if (writable != SEND_OK)  { ret refuse(writable); }
     if (!view_valid(payload)) { ret refuse(SEND_INVALID); }
     var opcode: u8 = websocket.OPCODE_TEXT;
     if (frame == FRAME_BINARY) {
         if (!socket.policy.allow_binary) { ret refuse(SEND_INVALID); }
         opcode = websocket.OPCODE_BINARY;
-    } or (frame == FRAME_PING) {
+    }
+    or (frame == FRAME_PING) {
         opcode = websocket.OPCODE_PING;
-    } or (frame == FRAME_PONG) {
+    }
+    or (frame == FRAME_PONG) {
         opcode = websocket.OPCODE_PONG;
-    } or (frame != FRAME_TEXT) {
+    }
+    or (frame != FRAME_TEXT) {
         ret refuse(SEND_INVALID);
     }
     if (opcode == websocket.OPCODE_PING || opcode == websocket.OPCODE_PONG) {
         if (payload.len > 125) { ret refuse(SEND_LIMIT); }
-    } or (payload.len > socket.policy.max_message_bytes) {
+    }
+    or (payload.len > socket.policy.max_message_bytes) {
         ret refuse(SEND_LIMIT);
     }
     ret socket_frame(socket, opcode, payload.data, payload.len);
@@ -830,13 +846,13 @@ pub fun socket_close(socket: *Socket, code: u16, reason: view.View) Sent {
         ret refuse(SEND_INVALID);
     }
     var selected: u16 = code;
-    if (selected == 0) { selected = socket.policy.close_code; }
+    if (selected == 0)                  { selected = socket.policy.close_code; }
     if (!close_code_sendable(selected)) { ret refuse(SEND_INVALID); }
     if (reason.len != 0 && !utf8.validate(reason.data, reason.len)) {
         ret refuse(SEND_INVALID);
     }
     var payload: [125]u8;
-    val length: usize = websocket.close_payload(selected, reason.data, reason.len,
+    val length:  usize = websocket.close_payload(selected, reason.data, reason.len,
         ?payload[0], CONTROL_SCRATCH_BYTES);
     if (length != reason.len + 2) { ret refuse(SEND_INVALID); }
     val result: Sent = socket_frame(socket, websocket.OPCODE_CLOSE, ?payload[0], length);
@@ -846,7 +862,7 @@ pub fun socket_close(socket: *Socket, code: u16, reason: view.View) Sent {
 
 pub fun socket_heartbeat(socket: *Socket, now_ns: i64) Sent {
     val writable: SendStatus = socket_writable(socket);
-    if (writable != SEND_OK) { ret refuse(writable); }
+    if (writable != SEND_OK)                                    { ret refuse(writable); }
     if (socket.policy.heartbeat_interval_ns == 0 || now_ns < 0) { ret refuse(SEND_INVALID); }
     if (now_ns < socket.last_send_ns
         || now_ns - socket.last_send_ns < socket.policy.heartbeat_interval_ns) {
@@ -878,10 +894,10 @@ pub fun socket_feed(socket: *Socket, input: *u8, length: usize,
         socket.held = true;
     }
     if (decoded.kind == websocket.EVENT_CLOSE) {
-        socket.close_received = true;
+        socket.close_received  = true;
         socket.peer_close_code = decoded.close_code;
         if (socket.close_sent) { socket.state = STATE_CLOSED; }
-        or { socket.state = STATE_CLOSING; }
+        or                     { socket.state = STATE_CLOSING; }
     }
     if (decoded.kind == websocket.EVENT_ERROR) { socket.state = STATE_FAILED; }
     ret decoded;
@@ -889,7 +905,7 @@ pub fun socket_feed(socket: *Socket, input: *u8, length: usize,
 
 pub fun socket_release(socket: *Socket) bool {
     if (socket == nil || !socket.initialized || !socket.held) { ret false; }
-    if (!websocket.release(?socket.decoder)) { ret false; }
+    if (!websocket.release(?socket.decoder))                  { ret false; }
     socket.held = false;
     ret true;
 }
@@ -924,38 +940,40 @@ rec Fixture {
 
 fun fixture_limits() message.Limits {
     var configured: message.Limits = message.limits_default();
-    configured.request_fields = field.limits(8, 1024, 64, 256);
-    configured.response_fields = field.limits(16, 1024, 64, 256);
+    configured.request_fields    = field.limits(8, 1024, 64, 256);
+    configured.response_fields   = field.limits(16, 1024, 64, 256);
     configured.response_trailers = field.limits(8, 512, 64, 256);
     ret configured;
 }
 
 fun init_fixture(state: *Fixture, generation: u64, upgrade: bool) bool {
-    if (state == nil || !cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0})) {
+    if (state == nil || !operation_ok(cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0}))) {
         ret false;
     }
     val configured: message.Limits = fixture_limits();
-    var fields: field.Fields = field.init(?state.request_fields[0], 8,
+    var fields:     field.Fields   = field.init(?state.request_fields[0], 8,
         configured.request_fields);
     var kind: method.Kind = method.GET;
     if (upgrade) {
         if (field.append(?fields, field.Field{name: view.view("host", 4),
-                value: view.view("example.test", 12), sensitive: false}) != field.ADD_OK
+            value: view.view("example.test", 12), sensitive: false}) != field.ADD_OK
             || field.append(?fields, field.Field{name: view.view("connection", 10),
-                value: view.view("Upgrade", 7), sensitive: false}) != field.ADD_OK
+            value: view.view("Upgrade", 7), sensitive: false}) != field.ADD_OK
             || field.append(?fields, field.Field{name: view.view("upgrade", 7),
-                value: view.view("websocket", 9), sensitive: false}) != field.ADD_OK
+            value: view.view("websocket", 9), sensitive: false}) != field.ADD_OK
             || field.append(?fields, field.Field{
-                name: view.view("sec-websocket-version", 21),
-                value: view.view("13", 2), sensitive: false}) != field.ADD_OK) { ret false; }
+            name:  view.view("sec-websocket-version", 21),
+            value: view.view("13", 2), sensitive: false
+        }) != field.ADD_OK) { ret false; }
     }
     val request_trailers: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
     state.request_body = body.empty_reader(generation);
     val metadata: message.Metadata = message.Metadata{
-        version: message.version_h1(1, 1), secure: true, early_data: false,
-        peer: message.unspecified_endpoint(), local: message.unspecified_endpoint(),
+        version:     message.version_h1(1, 1), secure: true, early_data: false,
+        peer:        message.unspecified_endpoint(), local: message.unspecified_endpoint(),
         received_at: time.Time{sec: 1, nsec: 0}, has_deadline: false,
-        deadline: time.Time{sec: 0, nsec: 0}, request_index: 1};
+        deadline:    time.Time{sec: 0, nsec: 0}, request_index: 1
+    };
     if (!message.init_request(?state.request, method.from_kind(kind),
         target.origin(view.view("/live", 5), view.view("/live", 5), view.view(nil, 0)),
         metadata, fields, request_trailers, ?state.request_body, generation, configured)) {
@@ -970,8 +988,9 @@ fun init_fixture(state: *Fixture, generation: u64, upgrade: bool) bool {
 
 fun add_key(state: *Fixture, key: view.View) bool {
     ret field.append(?state.request.fields, field.Field{
-        name: view.view("sec-websocket-key", 17), value: key,
-        sensitive: false}) == field.ADD_OK;
+        name:      view.view("sec-websocket-key", 17), value: key,
+        sensitive: false
+    }) == field.ADD_OK;
 }
 
 fun same(actual: *u8, length: usize, expected: view.View) bool {
@@ -1003,7 +1022,7 @@ fun repeated(output: *u8, length: usize, byte: u8) view.View {
     var i: usize = 0;
     for (i < length) {
         output[i] = byte;
-        i = i + 1;
+        i         = i + 1;
     }
     ret view.view(output, length);
 }
@@ -1012,19 +1031,19 @@ test "laurel.realtime: a slow consumer applies backpressure to a bounded stream"
     var state: Fixture;
     if (!init_fixture(?state, 61, false)) { ret 1; }
     var storage: [32]u8;
-    var stream: Stream;
+    var stream:  Stream;
     if (!init_stream(?stream, KIND_STREAM, stream_policy(), ?storage[0], 32, 4096, 61,
         fixture_limits(), ?state.response.trailers, ?state.scope, 0)) { ret 2; }
     var payload: [16]u8;
-    val first: Sent = stream_send(?stream, repeated(?payload[0], 16, 'a'), FRAME_TEXT);
-    val second: Sent = stream_send(?stream, repeated(?payload[0], 16, 'b'), FRAME_TEXT);
+    val first:   Sent = stream_send(?stream, repeated(?payload[0], 16, 'a'), FRAME_TEXT);
+    val second:  Sent = stream_send(?stream, repeated(?payload[0], 16, 'b'), FRAME_TEXT);
     if (first.status != SEND_OK || first.count != 16 || second.status != SEND_OK
         || second.count != 16 || stream_queued(?stream) != 32) { ret 3; }
     val blocked: Sent = stream_send(?stream, repeated(?payload[0], 4, 'c'), FRAME_TEXT);
     if (blocked.status != SEND_BLOCKED || blocked.count != 0
         || stream_queued(?stream) != 32) { ret 4; }
     var received: [64]u8;
-    val drained: body.Progress = body.read(?stream.reader, ?received[0], 8);
+    val drained:  body.Progress = body.read(?stream.reader, ?received[0], 8);
     if (drained.status != body.DATA || drained.count != 8
         || !same(?received[0], 8, view.view("aaaaaaaa", 8))
         || stream_queued(?stream) != 24) { ret 5; }
@@ -1039,7 +1058,7 @@ test "laurel.realtime: a slow consumer applies backpressure to a bounded stream"
     val rest: body.Progress = body.read(?stream.reader, ?received[8], 56);
     if (rest.status != body.DATA || rest.count != 32
         || !same(?received[0], 40,
-            view.view("aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbccccdddd", 40))) { ret 9; }
+        view.view("aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbccccdddd", 40))) { ret 9; }
     val suspended: body.Progress = body.read(?stream.reader, ?received[40], 16);
     if (suspended.status != body.PENDING || stream_pending(?stream) == 0
         || stream_readable(?stream)) { ret 10; }
@@ -1051,7 +1070,7 @@ test "laurel.realtime: a slow consumer applies backpressure to a bounded stream"
         || stream.reader.transferred != 40) { ret 12; }
     if (stream_send(?stream, repeated(?payload[0], 1, 'f'), FRAME_TEXT).status
         != SEND_CLOSED) { ret 13; }
-    if (!cancel.destroy(?state.scope)) { ret 14; }
+    if (!operation_ok(cancel.destroy(?state.scope))) { ret 14; }
     ret 0;
 }
 
@@ -1061,9 +1080,9 @@ test "laurel.realtime: server-sent events frame data, identity, and heartbeats" 
     var media: render.Media;
     if (!event_stream_media(?media)
         || !same(?media.header[0], media.header_len,
-            view.view("text/event-stream; charset=utf-8", 32))) { ret 2; }
+        view.view("text/event-stream; charset=utf-8", 32))) { ret 2; }
     var storage: [512]u8;
-    var stream: Stream;
+    var stream:  Stream;
     if (!init_stream(?stream, KIND_SSE, sse_test_policy(), ?storage[0], 512, 65536, 71,
         fixture_limits(), ?state.response.trailers, ?state.scope, 0)) { ret 3; }
     val named: Sent = stream_event(?stream,
@@ -1075,14 +1094,14 @@ test "laurel.realtime: server-sent events frame data, identity, and heartbeats" 
     if (trailing.status != SEND_OK || trailing.count != 16) { ret 6; }
     val identified: Sent = stream_event(?stream, Event{name: view.view(nil, 0),
         id: view.view("42", 2), data: view.view("x", 1), retry_ms: 3000});
-    if (identified.status != SEND_OK || identified.count != 28) { ret 7; }
+    if (identified.status != SEND_OK || identified.count != 28)          { ret 7; }
     if (stream_comment(?stream, view.view("ping", 4)).status != SEND_OK) { ret 8; }
-    if (stream_heartbeat(?stream, 500).status != SEND_NOT_DUE) { ret 9; }
+    if (stream_heartbeat(?stream, 500).status != SEND_NOT_DUE)           { ret 9; }
     val beat: Sent = stream_heartbeat(?stream, 1000);
     if (beat.status != SEND_OK || beat.count != 12
         || stream_heartbeat(?stream, 1500).status != SEND_NOT_DUE) { ret 10; }
     if (stream_event(?stream, named_event(view.view("bad\nname", 8),
-            view.view("x", 1))).status != SEND_INVALID) { ret 11; }
+        view.view("x", 1))).status != SEND_INVALID) { ret 11; }
     var control: [1]u8;
     control[0] = 1;
     if (stream_event(?stream, event(view.view(?control[0], 1))).status != SEND_INVALID) {
@@ -1095,7 +1114,7 @@ test "laurel.realtime: server-sent events frame data, identity, and heartbeats" 
         ret 14;
     }
     var received: [512]u8;
-    val drained: body.Progress = body.read(?stream.reader, ?received[0], 512);
+    val drained:  body.Progress = body.read(?stream.reader, ?received[0], 512);
     if (drained.status != body.DATA || drained.count != 105) { ret 15; }
     if (!same(?received[0], 25, view.view("event: tick\ndata: hello\n\n", 25))
         || !same(?received[25], 17, view.view("data: a\ndata: b\n\n", 17))
@@ -1103,7 +1122,7 @@ test "laurel.realtime: server-sent events frame data, identity, and heartbeats" 
         || !same(?received[58], 28, view.view("id: 42\nretry: 3000\ndata: x\n\n", 28))
         || !same(?received[86], 7, view.view(": ping\n", 7))
         || !same(?received[93], 12, view.view(": heartbeat\n", 12))) { ret 16; }
-    if (!cancel.destroy(?state.scope)) { ret 17; }
+    if (!operation_ok(cancel.destroy(?state.scope))) { ret 17; }
     ret 0;
 }
 
@@ -1111,12 +1130,12 @@ test "laurel.realtime: suspended readers resume and disconnects fail closed" {
     var state: Fixture;
     if (!init_fixture(?state, 81, false)) { ret 1; }
     var storage: [32]u8;
-    var stream: Stream;
+    var stream:  Stream;
     if (!init_stream(?stream, KIND_STREAM, stream_policy(), ?storage[0], 32, 4096, 81,
         fixture_limits(), ?state.response.trailers, ?state.scope, 0)) { ret 2; }
-    var received: [32]u8;
+    var received:  [32]u8;
     val suspended: body.Progress = body.read(?stream.reader, ?received[0], 16);
-    val token: u64 = stream_pending(?stream);
+    val token:     u64           = stream_pending(?stream);
     if (suspended.status != body.PENDING || token == 0 || suspended.token != token
         || stream_readable(?stream)) { ret 3; }
     var payload: [8]u8;
@@ -1130,7 +1149,7 @@ test "laurel.realtime: suspended readers resume and disconnects fail closed" {
     var disconnected: Fixture;
     if (!init_fixture(?disconnected, 82, false)) { ret 7; }
     var other_storage: [32]u8;
-    var other: Stream;
+    var other:         Stream;
     if (!init_stream(?other, KIND_STREAM, stream_policy(), ?other_storage[0], 32, 4096, 82,
         fixture_limits(), ?disconnected.response.trailers, ?disconnected.scope, 0)) { ret 8; }
     if (stream_send(?other, repeated(?payload[0], 8, 'q'), FRAME_TEXT).status != SEND_OK) {
@@ -1139,15 +1158,15 @@ test "laurel.realtime: suspended readers resume and disconnects fail closed" {
     if (body.cancel_reader(?other.reader).status != body.CANCELLED
         || stream_state(?other) != STATE_CLOSED
         || stream_send(?other, repeated(?payload[0], 1, 'q'), FRAME_TEXT).status
-            != SEND_CLOSED) { ret 10; }
-    if (!cancel.cancel(?state.scope)) { ret 11; }
+        != SEND_CLOSED) { ret 10; }
+    if (!transition_ok(cancel.cancel(?state.scope))) { ret 11; }
     if (stream_send(?stream, repeated(?payload[0], 1, 'y'), FRAME_TEXT).status
         != SEND_CANCELLED) { ret 12; }
     val aborted: body.Progress = body.read(?stream.reader, ?received[0], 16);
     if (aborted.status != body.CANCELLED || stream_state(?stream) != STATE_CLOSED) {
         ret 13;
     }
-    if (!cancel.destroy(?state.scope) || !cancel.destroy(?disconnected.scope)) { ret 14; }
+    if (!operation_ok(cancel.destroy(?state.scope)) || !operation_ok(cancel.destroy(?disconnected.scope))) { ret 14; }
     ret 0;
 }
 
@@ -1155,7 +1174,7 @@ fun mask_into(output: *u8, cursor: usize, key: *u8, payload: view.View) usize {
     var i: usize = 0;
     for (i < payload.len) {
         output[cursor + i] = payload.data[i] ^ key[i % 4];
-        i = i + 1;
+        i                  = i + 1;
     }
     ret cursor + payload.len;
 }
@@ -1165,7 +1184,7 @@ test "laurel.realtime: websocket channels carry frames and close cleanly" {
     if (!init_fixture(?state, 91, false)) { ret 1; }
     var storage: [256]u8;
     var control: [125]u8;
-    var socket: Socket;
+    var socket:  Socket;
     if (!init_socket(?socket, socket_test_policy(), ?storage[0], 256, ?control[0], 125,
         websocket.limits_default(), ?state.scope, 0)) { ret 2; }
     val channel: Channel = socket_channel(?socket);
@@ -1188,7 +1207,7 @@ test "laurel.realtime: websocket channels carry frames and close cleanly" {
     inbound[3] = key[1];
     inbound[4] = key[2];
     inbound[5] = key[3];
-    val length: usize = mask_into(?inbound[0], 6, ?key[0], view.view("abc", 3));
+    val length:  usize           = mask_into(?inbound[0], 6, ?key[0], view.view("abc", 3));
     val decoded: websocket.Event = socket_feed(?socket, ?inbound[0], length, false);
     if (decoded.kind != websocket.EVENT_DATA || decoded.data_length != 3
         || !same(decoded.data, 3, view.view("abc", 3)) || !decoded.message_final
@@ -1218,12 +1237,12 @@ test "laurel.realtime: websocket channels carry frames and close cleanly" {
     var code: [2]u8;
     code[0] = 0x03;
     code[1] = 0xe8;
-    val peer_length: usize = mask_into(?peer[0], 6, ?key[0], view.view(?code[0], 2));
-    val closed: websocket.Event = socket_feed(?socket, ?peer[0], peer_length, false);
+    val peer_length: usize           = mask_into(?peer[0], 6, ?key[0], view.view(?code[0], 2));
+    val closed:      websocket.Event = socket_feed(?socket, ?peer[0], peer_length, false);
     if (closed.kind != websocket.EVENT_CLOSE || closed.close_code != 1000
         || socket_state(?socket) != STATE_CLOSED
         || socket_peer_close_code(?socket) != 1000 || !socket_release(?socket)) { ret 13; }
-    if (!cancel.destroy(?state.scope)) { ret 14; }
+    if (!operation_ok(cancel.destroy(?state.scope))) { ret 14; }
     ret 0;
 }
 
@@ -1231,15 +1250,15 @@ test "laurel.realtime: websocket negotiation commits the mach-http handshake" {
     var state: Fixture;
     if (!init_fixture(?state, 101, true)) { ret 1; }
     var random: [16]u8;
-    var i: usize = 0;
+    var i:      usize = 0;
     for (i < 16) {
         random[i] = (i * 7 + 3)::u8;
-        i = i + 1;
+        i         = i + 1;
     }
     var encoded: [25]u8;
-    val key: view.View = negotiation.client_key(?random[0], 16, ?encoded[0], 25);
+    val key:     view.View = negotiation.client_key(?random[0], 16, ?encoded[0], 25);
     if (key.len != 24 || !add_key(?state, key)) { ret 2; }
-    var accept: [29]u8;
+    var accept:    [29]u8;
     val handshake: negotiation.Handshake = negotiate(?state.exchange, view.view(nil, 0),
         view.view(nil, 0), ?accept[0], 29);
     if (handshake.status != negotiation.NEGOTIATED
@@ -1253,9 +1272,9 @@ test "laurel.realtime: websocket negotiation commits the mach-http handshake" {
     var rejected: Fixture;
     if (!init_fixture(?rejected, 102, false)) { ret 5; }
     var other_accept: [29]u8;
-    val refused: negotiation.Handshake = negotiate(?rejected.exchange, view.view(nil, 0),
+    val refused:      negotiation.Handshake = negotiate(?rejected.exchange, view.view(nil, 0),
         view.view(nil, 0), ?other_accept[0], 29);
-    if (refused.status == negotiation.NEGOTIATED || rejected.response.committed) { ret 6; }
-    if (!cancel.destroy(?state.scope) || !cancel.destroy(?rejected.scope)) { ret 7; }
+    if (refused.status == negotiation.NEGOTIATED || rejected.response.committed)                       { ret 6; }
+    if (!operation_ok(cancel.destroy(?state.scope)) || !operation_ok(cancel.destroy(?rejected.scope))) { ret 7; }
     ret 0;
 }

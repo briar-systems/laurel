@@ -1,19 +1,5 @@
 # in-process application test harness contract
 
-use A: std.allocator;
-use O: std.types.option;
-use R: std.types.result;
-use fixed_allocator: std.allocator.fixed;
-use std.chrono.time;
-use std.memory;
-use std.sync.cancel;
-use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
-use std.types.size.usize;
-use std.types.string.str;
-use std.types.string.str_len;
-use std.types.view;
 use http.core.body;
 use http.core.exchange;
 use http.core.field;
@@ -21,29 +7,52 @@ use http.core.message;
 use http.core.method;
 use http.core.status;
 use http.core.target;
+use http_router: http.router.router;
 use laurel.app;
 use laurel.context;
+use laurel.cookie;
 use laurel.error;
+use laurel.form;
 use laurel.handler;
 use laurel.lifecycle;
 use laurel.middleware;
+use laurel.multipart;
 use laurel.observability;
 use laurel.provider;
+use laurel.realtime;
 use laurel.render;
 use laurel.router;
-use laurel.cookie;
-use laurel.form;
-use laurel.multipart;
-use laurel.realtime;
 use laurel.security;
 use laurel.security.csrf;
 use laurel.session;
 use laurel.upload;
-use http_router: http.router.router;
+use A:               std.allocator;
+use fixed_allocator: std.allocator.fixed;
+use std.chrono.time;
+use std.memory;
+use std.sync.cancel;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_len;
+use std.types.view;
+
+fun fixed_ok(outcome: err[A.Error]) bool {
+    ret sel outcome.ok;
+}
+
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}
 
 pub val DRAIN_SCRATCH_BYTES: usize = 256;
 pub val DEFAULT_BODY_POLLS:  usize = 64;
-pub val NO_DEADLINE:         i64 = -1;
+pub val NO_DEADLINE:         i64   = -1;
 
 pub def Status: u8;
 
@@ -81,24 +90,24 @@ pub rec Request {
 }
 
 pub rec Response {
-    status:     status.Status;
-    fields:     *field.Field;
-    field_len:  usize;
-    body:       *u8;
-    body_len:   usize;
-    truncated:  bool;
-    committed:  bool;
-    outcome:    exchange.Outcome;
-    bytes_in:   u64;
-    bytes_out:  u64;
+    status:    status.Status;
+    fields:    *field.Field;
+    field_len: usize;
+    body:      *u8;
+    body_len:  usize;
+    truncated: bool;
+    committed: bool;
+    outcome:   exchange.Outcome;
+    bytes_in:  u64;
+    bytes_out: u64;
 }
 
 pub rec Result {
-    status:     Status;
-    response:   Response;
-    execution:  middleware.ExecutionStatus;
-    dispatch:   router.DispatchStatus;
-    app_error:  error.AppError;
+    status:    Status;
+    response:  Response;
+    execution: middleware.ExecutionStatus;
+    dispatch:  router.DispatchStatus;
+    app_error: error.AppError;
 }
 
 pub rec Expectation {
@@ -187,10 +196,10 @@ pub fun storage_valid(storage: Storage) bool {
         || storage.informationals == nil || storage.informational_cap == 0
         || storage.arena == nil || storage.arena_bytes == 0
         || storage.captured == nil || storage.captured_capacity == 0) { ret false; }
-    var field_bytes: usize = 0;
-    var trailer_bytes: usize = 0;
+    var field_bytes:         usize = 0;
+    var trailer_bytes:       usize = 0;
     var informational_bytes: usize = 0;
-    val fields: *u8 = typed_range(storage.response_fields::ptr, storage.response_field_cap,
+    val fields:              *u8   = typed_range(storage.response_fields::ptr, storage.response_field_cap,
         $size_of(field.Field), ?field_bytes);
     val trailers: *u8 = typed_range(storage.response_trailers::ptr,
         storage.response_trailer_cap, $size_of(field.Field), ?trailer_bytes);
@@ -206,9 +215,9 @@ pub fun storage_valid(storage: Storage) bool {
         && disjoint(trailers, trailer_bytes, storage.captured, storage.captured_capacity)
         && disjoint(informationals, informational_bytes, storage.arena, storage.arena_bytes)
         && disjoint(informationals, informational_bytes, storage.captured,
-            storage.captured_capacity)
+        storage.captured_capacity)
         && disjoint(storage.arena, storage.arena_bytes, storage.captured,
-            storage.captured_capacity);
+        storage.captured_capacity);
 }
 
 fun body_read(ctx: ptr, output: *u8, capacity: usize,
@@ -223,23 +232,23 @@ fun body_read(ctx: ptr, output: *u8, capacity: usize,
         if (capacity == 0 || state.token == 18446744073709551615) {
             ret body.failed("harness request body cannot suspend", body.REUSE_FORBIDDEN);
         }
-        state.suspended = true;
-        state.token = state.token + 1;
-        state.pending_output = output;
+        state.suspended        = true;
+        state.token            = state.token + 1;
+        state.pending_output   = output;
         state.pending_capacity = capacity;
         ret body.pending(state.token);
     }
-    state.suspended = false;
-    state.pending_output = nil;
+    state.suspended        = false;
+    state.pending_output   = nil;
     state.pending_capacity = 0;
     var count: usize = state.content.len - state.offset;
     if (state.fragment != 0 && count > state.fragment) { count = state.fragment; }
-    if (count > capacity) { count = capacity; }
-    if (count == 0) { ret body.failed("empty harness body read", body.REUSE_FORBIDDEN); }
+    if (count > capacity)                              { count = capacity; }
+    if (count == 0)                                    { ret body.failed("empty harness body read", body.REUSE_FORBIDDEN); }
     var i: usize = 0;
     for (i < count) {
         output[i] = state.content.data[state.offset + i];
-        i = i + 1;
+        i         = i + 1;
     }
     state.offset = state.offset + count;
     ret body.data(count);
@@ -250,8 +259,8 @@ fun body_finish(ctx: ptr, mode: body.Mode, trailers: *field.Fields) body.Progres
     if (state == nil) {
         ret body.failed("invalid harness request body", body.REUSE_FORBIDDEN);
     }
-    state.suspended = false;
-    state.pending_output = nil;
+    state.suspended        = false;
+    state.pending_output   = nil;
     state.pending_capacity = 0;
     if (mode == body.DRAIN) {
         if (state.offset != state.content.len) {
@@ -259,8 +268,8 @@ fun body_finish(ctx: ptr, mode: body.Mode, trailers: *field.Fields) body.Progres
         }
         ret body.complete(body.REUSE_ALLOWED);
     }
-    if (mode == body.REJECT) { ret body.rejected(body.REUSE_ALLOWED); }
-    if (mode == body.CANCEL) { ret body.cancelled(body.REUSE_FORBIDDEN); }
+    if (mode == body.REJECT)  { ret body.rejected(body.REUSE_ALLOWED); }
+    if (mode == body.CANCEL)  { ret body.cancelled(body.REUSE_FORBIDDEN); }
     if (mode == body.TIMEOUT) { ret body.timed_out(body.REUSE_FORBIDDEN); }
     ret body.failed("invalid harness body finish", body.REUSE_FORBIDDEN);
 }
@@ -277,11 +286,11 @@ fun body_complete(ctx: ptr, token: u64, trailers: *field.Fields) body.Progress {
 fun body_release(ctx: ptr) {}
 
 fun terminal_call(ctx: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
+    request_context: *context.Context) res[u8, error.AppError] {
     val state: *RouteTerminal = ctx::*RouteTerminal;
     if (state == nil || state.routes == nil || state.fallback.call == nil) {
-        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-            "internal server error", "harness terminal handler is invalid", false));
+        ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+            "internal server error", "harness terminal handler is invalid", false)};
     }
     if (state.matched.status == router.DISPATCH_MATCH) {
         ret router.invoke(state.routes, ?state.matched, request_context);
@@ -289,7 +298,7 @@ fun terminal_call(ctx: ptr,
     if (state.matched.status == router.DISPATCH_NOT_FOUND) {
         ret state.fallback.call(state.fallback.ctx, request_context);
     }
-    ret R.err[u8, error.AppError](state.matched.app_error);
+    ret res[u8, error.AppError].err{state.matched.app_error};
 }
 
 pub fun init(harness: *Harness, application: *app.App, routes: *router.Router,
@@ -300,14 +309,14 @@ pub fun init(harness: *Harness, application: *app.App, routes: *router.Router,
         || storage.response_field_cap > limits.response_fields.max_count
         || storage.response_trailer_cap > limits.response_trailers.max_count
         || storage.informational_cap > limits.max_informational) { ret false; }
-    harness.application = application;
-    harness.routes = routes;
-    harness.storage = storage;
-    harness.limits = limits;
+    harness.application    = application;
+    harness.routes         = routes;
+    harness.storage        = storage;
+    harness.limits         = limits;
     harness.max_body_polls = max_body_polls;
-    harness.clock_ns = 0;
-    harness.active = false;
-    harness.initialized = true;
+    harness.clock_ns       = 0;
+    harness.active         = false;
+    harness.initialized    = true;
     ret true;
 }
 
@@ -330,7 +339,7 @@ pub fun stop(harness: *Harness) lifecycle.Transition {
 pub fun request(version: message.Version, request_method: method.Method,
     request_target: target.Target, fields: field.Fields, request_id: view.View) Request {
     ret Request{version: version, secure: true, method: request_method,
-        target: request_target, fields: fields, body: view.View{data: nil, len: 0},
+        target:   request_target, fields: fields, body: view.View{data: nil, len: 0},
         fragment: 0, suspend: false, request_id: request_id, deadline_ns: NO_DEADLINE};
 }
 
@@ -350,11 +359,11 @@ fun request_valid(one: Request) bool {
 }
 
 fun settle_request_body(harness: *Harness) bool {
-    var polls: usize = 0;
+    var polls:    usize         = 0;
     var progress: body.Progress = body.data(0);
     for (!body.reader_terminal_state(?harness.request_body.reader)
         && polls < harness.max_body_polls) {
-        polls = polls + 1;
+        polls    = polls + 1;
         progress = body.read(?harness.request_body.reader, ?harness.drain_scratch[0],
             DRAIN_SCRATCH_BYTES);
         if (progress.status == body.PENDING) {
@@ -372,17 +381,18 @@ fun capture_response_body(harness: *Harness, result: *Result) Status {
     if (harness.response.body_kind == message.BODY_NONE) { ret INVOKE_OK; }
     if (harness.response.body_kind != message.BODY_READER
         || harness.response.body_reader == nil) { ret INVOKE_INVALID; }
-    val reader: *body.Reader = harness.response.body_reader;
-    var polls: usize = 0;
+    val reader:   *body.Reader  = harness.response.body_reader;
+    var polls:    usize         = 0;
     var progress: body.Progress = body.data(0);
     for (!body.reader_terminal_state(reader) && polls < harness.max_body_polls) {
         polls = polls + 1;
-        var room: usize = harness.storage.captured_capacity - result.response.body_len;
-        var destination: *u8 = ?harness.drain_scratch[0];
+        var room:        usize = harness.storage.captured_capacity - result.response.body_len;
+        var destination: *u8   = ?harness.drain_scratch[0];
         if (room == 0) {
             result.response.truncated = true;
-            room = DRAIN_SCRATCH_BYTES;
-        } or {
+            room                      = DRAIN_SCRATCH_BYTES;
+        }
+        or {
             destination = ?harness.storage.captured[result.response.body_len];
         }
         progress = body.read(reader, destination, room);
@@ -409,61 +419,61 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
     if (harness == nil || !harness.initialized || harness.active || result == nil) {
         ret INVOKE_INVALID;
     }
-    result.status = INVOKE_INVALID;
-    result.response = empty_response();
+    result.status    = INVOKE_INVALID;
+    result.response  = empty_response();
     result.execution = 0;
-    result.dispatch = 0;
+    result.dispatch  = 0;
     result.app_error = error.make(error.INTERNAL, 500, "internal server error",
         "harness produced no application error", false);
     if (!request_valid(one) || !app.can_accept(harness.application)) {
         if (!request_valid(one)) { ret INVOKE_INVALID; }
         ret failure(result, INVOKE_REJECTED);
     }
-    val generation: u64 = harness.application.generation;
-    val has_deadline: bool = one.deadline_ns != NO_DEADLINE;
-    var deadline: time.Time = time.Time{sec: 0, nsec: 0};
+    val generation:   u64       = harness.application.generation;
+    val has_deadline: bool      = one.deadline_ns != NO_DEADLINE;
+    var deadline:     time.Time = time.Time{sec: 0, nsec: 0};
     if (has_deadline) {
         deadline = time.Time{sec: one.deadline_ns / 1000000000,
             nsec: one.deadline_ns % 1000000000};
     }
-    if (!cancel.make_root(?harness.scope, has_deadline, deadline)) { ret INVOKE_INVALID; }
-    harness.active = true;
-    harness.request_body.content = one.body;
-    harness.request_body.offset = 0;
-    harness.request_body.fragment = one.fragment;
-    harness.request_body.suspend = one.suspend;
-    harness.request_body.suspended = false;
-    harness.request_body.pending_output = nil;
+    if (!operation_ok(cancel.make_root(?harness.scope, has_deadline, deadline))) { ret INVOKE_INVALID; }
+    harness.active                        = true;
+    harness.request_body.content          = one.body;
+    harness.request_body.offset           = 0;
+    harness.request_body.fragment         = one.fragment;
+    harness.request_body.suspend          = one.suspend;
+    harness.request_body.suspended        = false;
+    harness.request_body.pending_output   = nil;
     harness.request_body.pending_capacity = 0;
-    harness.request_body.token = 0;
-    harness.request_body.reader = body.init_reader(?harness.request_body, body_read,
+    harness.request_body.token            = 0;
+    harness.request_body.reader           = body.init_reader(?harness.request_body, body_read,
         body_finish, body_complete, body_release, body.OWNER_APPLICATION, generation,
         true, one.body.len::u64, harness.limits.request_body, nil, ?harness.scope);
     val metadata: message.Metadata = message.Metadata{version: one.version,
-        secure: one.secure, early_data: false, peer: message.unspecified_endpoint(),
-        local: message.unspecified_endpoint(), received_at: time.Time{sec: 1, nsec: 0},
+        secure:       one.secure, early_data: false, peer: message.unspecified_endpoint(),
+        local:        message.unspecified_endpoint(), received_at: time.Time{sec: 1, nsec: 0},
         has_deadline: has_deadline, deadline: deadline, request_index: 1};
     val trailers: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
     if (!harness.request_body.reader.valid
         || !message.init_request(?harness.request, one.method, one.target, metadata,
-            one.fields, trailers, ?harness.request_body.reader, generation,
-            harness.limits)
+        one.fields, trailers, ?harness.request_body.reader, generation,
+        harness.limits)
         || !message.init_response(?harness.response, harness.storage.response_fields,
-            harness.storage.response_field_cap, harness.storage.response_trailers,
-            harness.storage.response_trailer_cap, generation, harness.limits)
+        harness.storage.response_field_cap, harness.storage.response_trailers,
+        harness.storage.response_trailer_cap, generation, harness.limits)
         || !exchange.init(?harness.exchange, ?harness.request, ?harness.response,
-            harness.storage.informationals, harness.storage.informational_cap,
-            ?harness.scope, generation, harness.limits)
+        harness.storage.informationals, harness.storage.informational_cap,
+        ?harness.scope, generation, harness.limits)
         || !exchange.begin(?harness.exchange)
-        || O.is_some[*u8](fixed_allocator.make(?harness.allocator, ?harness.allocation,
-            harness.storage.arena, harness.storage.arena_bytes))) {
+        || !fixed_ok(fixed_allocator.make(?harness.allocator, ?harness.allocation,
+        harness.storage.arena, harness.storage.arena_bytes))) {
         harness.active = false;
         cancel.destroy(?harness.scope);
         ret INVOKE_INVALID;
     }
-    harness.terminal.routes = harness.routes;
+    harness.terminal.routes   = harness.routes;
     harness.terminal.fallback = harness.application.fallback;
-    harness.terminal.matched = router.dispatch(harness.routes, ?harness.request,
+    harness.terminal.matched  = router.dispatch(harness.routes, ?harness.request,
         ?harness.allocator);
     result.dispatch = harness.terminal.matched.status;
     var params: context.Params = context.Params{items: nil, len: 0,
@@ -478,8 +488,8 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
     }
     if (!app.bind_context(harness.application, ?harness.request_context,
         ?harness.recorder, app.Admission{exchange: ?harness.exchange, params: params,
-            allocator: ?harness.allocator, request_id: one.request_id,
-            route_name: route_name, started_ns: harness.clock_ns})) {
+        allocator:  ?harness.allocator, request_id: one.request_id,
+        route_name: route_name, started_ns: harness.clock_ns})) {
         harness.active = false;
         cancel.destroy(?harness.scope);
         ret failure(result, INVOKE_REJECTED);
@@ -490,15 +500,17 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
     result.execution = outcome.status;
     result.app_error = outcome.app_error;
     harness.clock_ns = harness.clock_ns + 1;
-    val reason: cancel.Reason = cancel.reason(?harness.scope);
-    var status_value: Status = INVOKE_OK;
-    if (reason != cancel.ACTIVE || outcome.status == middleware.EXECUTION_CANCELLED) {
+    val reason:       cancel.Reason = cancel.reason(?harness.scope);
+    var status_value: Status        = INVOKE_OK;
+    if (!(sel reason.active) || outcome.status == middleware.EXECUTION_CANCELLED) {
         if (exchange.cancel_exchange(?harness.exchange) != exchange.FINISH_OK) {
             status_value = INVOKE_INVALID;
-        } or {
+        }
+        or {
             status_value = INVOKE_CANCELLED;
         }
-    } or {
+    }
+    or {
         if (!harness.response.committed
             && outcome.status == middleware.EXECUTION_ERROR_UNMAPPED
             && harness.response.body_kind == message.BODY_NONE) {
@@ -506,9 +518,10 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
         }
         if (!harness.response.committed
             && exchange.commit(?harness.exchange, harness.limits)
-                != message.RESPONSE_OK) {
+            != message.RESPONSE_OK) {
             status_value = INVOKE_INVALID;
-        } or {
+        }
+        or {
             status_value = capture_response_body(harness, result);
             if (status_value == INVOKE_OK && !settle_request_body(harness)) {
                 status_value = INVOKE_INVALID;
@@ -526,25 +539,25 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
     }
     if (status_value == INVOKE_OK
         && (outcome.status == middleware.EXECUTION_ERROR_RENDERED
-            || outcome.status == middleware.EXECUTION_ERROR_UNMAPPED)) {
+        || outcome.status == middleware.EXECUTION_ERROR_UNMAPPED)) {
         status_value = INVOKE_ERROR;
     }
-    result.response.status = harness.response.status;
-    result.response.fields = harness.response.fields.items;
+    result.response.status    = harness.response.status;
+    result.response.fields    = harness.response.fields.items;
     result.response.field_len = harness.response.fields.len;
-    result.response.body = harness.storage.captured;
+    result.response.body      = harness.storage.captured;
     result.response.committed = harness.response.committed;
-    result.response.outcome = harness.exchange.completion.outcome;
-    result.response.bytes_in = harness.exchange.completion.bytes_in;
+    result.response.outcome   = harness.exchange.completion.outcome;
+    result.response.bytes_in  = harness.exchange.completion.bytes_in;
     result.response.bytes_out = harness.exchange.completion.bytes_out;
     if (!app.release_context(harness.application, ?harness.request_context,
         app.Termination{outcome: outcome, reason: reason,
-            status: harness.response.status, transfer: harness.exchange.completion,
-            now_ns: harness.clock_ns})) {
+        status: harness.response.status, transfer: harness.exchange.completion,
+        now_ns: harness.clock_ns})) {
         status_value = INVOKE_INVALID;
     }
     harness.active = false;
-    if (!cancel.destroy(?harness.scope)) { status_value = INVOKE_INVALID; }
+    if (!operation_ok(cancel.destroy(?harness.scope))) { status_value = INVOKE_INVALID; }
     result.status = status_value;
     ret status_value;
 }
@@ -569,8 +582,8 @@ pub fun response_body(result: *Result) view.View {
 }
 
 fun matches(result: *Result, expect: Expectation) bool {
-    if (expect.status != 0 && result.status != expect.status) { ret false; }
-    if (expect.code != 0 && result.response.status != expect.code) { ret false; }
+    if (expect.status != 0 && result.status != expect.status)          { ret false; }
+    if (expect.code != 0 && result.response.status != expect.code)     { ret false; }
     if (expect.execution != 0 && result.execution != expect.execution) { ret false; }
     if (expect.error_kind != 0 && result.app_error.kind != expect.error_kind) {
         ret false;
@@ -589,10 +602,10 @@ pub fun run_suite(harness: *Harness, cases: *Case, case_len: usize,
     versions: *message.Version, version_len: usize, report: *Report) bool {
     if (harness == nil || report == nil || cases == nil || case_len == 0
         || versions == nil || version_len == 0) { ret false; }
-    report.ran = 0;
-    report.passed = 0;
-    report.failed = 0;
-    report.first_case = ~(0::usize);
+    report.ran           = 0;
+    report.passed        = 0;
+    report.failed        = 0;
+    report.first_case    = ~(0::usize);
     report.first_version = ~(0::usize);
     var v: usize = 0;
     for (v < version_len) {
@@ -605,10 +618,11 @@ pub fun run_suite(harness: *Harness, cases: *Case, case_len: usize,
             report.ran = report.ran + 1;
             if (run_case(harness, ?one, ?result)) {
                 report.passed = report.passed + 1;
-            } or {
+            }
+            or {
                 report.failed = report.failed + 1;
                 if (report.first_case == ~(0::usize)) {
-                    report.first_case = c;
+                    report.first_case    = c;
                     report.first_version = v;
                 }
             }
@@ -648,18 +662,18 @@ fun internal_error(detail: str) error.AppError {
 
 fun write_u64(value: u64, output: *u8, capacity: usize) usize {
     var digits: usize = 1;
-    var rest: u64 = value / 10;
+    var rest:   u64   = value / 10;
     for (rest != 0) {
         digits = digits + 1;
-        rest = rest / 10;
+        rest   = rest / 10;
     }
     if (digits > capacity) { ret 0; }
     var i: usize = digits;
     rest = value;
     for (i != 0) {
-        i = i - 1;
+        i         = i - 1;
         output[i] = '0' + (rest % 10)::u8;
-        rest = rest / 10;
+        rest      = rest / 10;
     }
     ret digits;
 }
@@ -669,7 +683,7 @@ fun set_text(state: *HandlerState, prefix: view.View, value: u64) bool {
     var i: usize = 0;
     for (i < prefix.len) {
         state.text[i] = prefix.data[i];
-        i = i + 1;
+        i             = i + 1;
     }
     val digits: usize = write_u64(value, ?state.text[prefix.len], 64 - prefix.len);
     if (digits == 0) { ret false; }
@@ -678,42 +692,42 @@ fun set_text(state: *HandlerState, prefix: view.View, value: u64) bool {
 }
 
 fun respond_text(state: *HandlerState,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
+    request_context: *context.Context) res[u8, error.AppError] {
     val response: *message.Response = context.response(request_context);
     if (response == nil || !render.release_fixed(?state.fixed)) {
-        ret R.err[u8, error.AppError](internal_error("response is unavailable"));
+        ret res[u8, error.AppError].err{internal_error("response is unavailable")};
     }
     if (!render.release_media(?state.media) || !render.text_plain(?state.media)
         || !render.init_fixed(?state.fixed, view.view(?state.text[0], state.text_len),
-            response.generation, state.limits, ?response.trailers,
-            context.cancellation(request_context))
+        response.generation, state.limits, ?response.trailers,
+        context.cancellation(request_context))
         || render.respond(request_context, status.OK, ?state.media,
-            render.fixed_body(?state.fixed), state.limits) != render.RESPOND_OK) {
-        ret R.err[u8, error.AppError](internal_error("fixed response installation failed"));
+        render.fixed_body(?state.fixed), state.limits) != render.RESPOND_OK) {
+        ret res[u8, error.AppError].err{internal_error("fixed response installation failed")};
     }
-    ret R.ok[u8, error.AppError](handler.RESPOND);
+    ret res[u8, error.AppError].ok{handler.RESPOND};
 }
 
 fun orders_show(ctx: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
-    val state: *HandlerState = ctx::*HandlerState;
-    val id: *context.Param = context.find_param(request_context, view.view("id", 2));
+    request_context: *context.Context) res[u8, error.AppError] {
+    val state: *HandlerState  = ctx::*HandlerState;
+    val id:    *context.Param = context.find_param(request_context, view.view("id", 2));
     if (state == nil || id == nil || id.kind != context.PARAM_U64) {
-        ret R.err[u8, error.AppError](internal_error("route parameter is missing"));
+        ret res[u8, error.AppError].err{internal_error("route parameter is missing")};
     }
     if (!set_text(state, view.view("order:", 6), id.unsigned_value)) {
-        ret R.err[u8, error.AppError](internal_error("order text does not fit"));
+        ret res[u8, error.AppError].err{internal_error("order text does not fit")};
     }
     ret respond_text(state, request_context);
 }
 
 fun upload_create(ctx: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
-    val state: *HandlerState = ctx::*HandlerState;
+    request_context: *context.Context) res[u8, error.AppError] {
+    val state:   *HandlerState    = ctx::*HandlerState;
     val request: *message.Request = context.request(request_context);
-    val scope: *cancel.Scope = context.cancellation(request_context);
+    val scope:   *cancel.Scope    = context.cancellation(request_context);
     if (state == nil || request == nil || request.body == nil || scope == nil) {
-        ret R.err[u8, error.AppError](internal_error("request is unavailable"));
+        ret res[u8, error.AppError].err{internal_error("request is unavailable")};
     }
     state.body_len = 0;
     var polls: usize = 0;
@@ -721,8 +735,8 @@ fun upload_create(ctx: ptr,
         polls = polls + 1;
         val room: usize = 256 - state.body_len;
         if (room == 0) {
-            ret R.err[u8, error.AppError](error.make(error.TOO_LARGE, 413,
-                "request too large", "harness body buffer is full", false));
+            ret res[u8, error.AppError].err{error.make(error.TOO_LARGE, 413,
+                "request too large", "harness body buffer is full", false)};
         }
         var progress: body.Progress = body.read(request.body,
             ?state.body_buffer[state.body_len], room);
@@ -735,43 +749,46 @@ fun upload_create(ctx: ptr,
     }
     if (!body.reader_terminal_state(request.body)
         || body.reader_result(request.body).status != body.COMPLETE) {
-        ret R.err[u8, error.AppError](error.make(error.BAD_REQUEST, 400,
-            "malformed request body", "request body did not complete", false));
+        ret res[u8, error.AppError].err{error.make(error.BAD_REQUEST, 400,
+            "malformed request body", "request body did not complete", false)};
     }
-    val resolved: R.Result[ptr, view.View] = provider.resolve(state.providers,
+    val resolved: res[ptr, view.View] = provider.resolve(state.providers,
         view.view("counter", 7));
-    if (R.is_err[ptr, view.View](resolved)
-        || R.unwrap_ok[ptr, view.View](resolved) == nil) {
-        ret R.err[u8, error.AppError](internal_error("counter provider is unavailable"));
+    if (sel resolved.err) {
+        ret res[u8, error.AppError].err{internal_error("counter provider is unavailable")};
+    }
+    if (resolved.ok == nil) {
+        ret res[u8, error.AppError].err{internal_error("counter provider is unavailable")};
     }
     state.provider_hits = state.provider_hits + 1;
     var loaded: session.Session;
-    val found: session.StoreStatus = state.store.load(state.store.ctx,
+    val found:  session.StoreStatus = state.store.load(state.store.ctx,
         view.view("harness-session", 15), 1, ?state.session_buffer[0], 2048, ?loaded,
         scope);
     if (found != session.STORE_OK && found != session.STORE_NOT_FOUND) {
-        ret R.err[u8, error.AppError](internal_error("session load failed"));
+        ret res[u8, error.AppError].err{internal_error("session load failed")};
     }
-    var expected_version: u64 = 0;
-    var record: session.Session = session.Session{
-        id: view.view("harness-session", 15),
-        data: view.view(?state.body_buffer[0], state.body_len),
+    var expected_version: u64             = 0;
+    var record:           session.Session = session.Session{
+        id:             view.view("harness-session", 15),
+        data:           view.view(?state.body_buffer[0], state.body_len),
         issued_at_unix: 1, not_before_unix: 1, expires_at_unix: 10000,
-        version: 0, generation: 0};
+        version:        0, generation: 0
+    };
     if (found == session.STORE_OK) {
         state.session_loads = state.session_loads + 1;
-        expected_version = loaded.version;
-        record.version = loaded.version;
-        record.generation = loaded.generation;
+        expected_version    = loaded.version;
+        record.version      = loaded.version;
+        record.generation   = loaded.generation;
     }
     var saved: session.SaveResult;
     if (state.store.save(state.store.ctx, ?record, expected_version, 1, ?saved, scope)
         != session.STORE_OK) {
-        ret R.err[u8, error.AppError](internal_error("session save failed"));
+        ret res[u8, error.AppError].err{internal_error("session save failed")};
     }
     state.session_saves = state.session_saves + 1;
     if (!set_text(state, view.view("stored:", 7), state.body_len::u64)) {
-        ret R.err[u8, error.AppError](internal_error("upload text does not fit"));
+        ret res[u8, error.AppError].err{internal_error("upload text does not fit")};
     }
     ret respond_text(state, request_context);
 }
@@ -779,11 +796,11 @@ fun upload_create(ctx: ptr,
 fun stream_produce(ctx: ptr, output: *u8, capacity: usize) render.Chunk {
     val state: *HandlerState = ctx::*HandlerState;
     if (state == nil || state.emitted >= state.chunks) { ret render.chunk_end(); }
-    if (capacity < 4) { ret render.chunk_failed(); }
-    output[0] = 'p';
-    output[1] = 'a';
-    output[2] = 'r';
-    output[3] = '0' + state.emitted;
+    if (capacity < 4)                                  { ret render.chunk_failed(); }
+    output[0]     = 'p';
+    output[1]     = 'a';
+    output[2]     = 'r';
+    output[3]     = '0' + state.emitted;
     state.emitted = state.emitted + 1;
     ret render.chunk_data(4);
 }
@@ -797,41 +814,43 @@ fun stream_settle(ctx: ptr, mode: body.Mode) bool {
 }
 
 fun stream_show(ctx: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
-    val state: *HandlerState = ctx::*HandlerState;
+    request_context: *context.Context) res[u8, error.AppError] {
+    val state:    *HandlerState     = ctx::*HandlerState;
     val response: *message.Response = context.response(request_context);
     if (state == nil || response == nil || !render.release_stream(?state.stream)) {
-        ret R.err[u8, error.AppError](internal_error("stream storage is busy"));
+        ret res[u8, error.AppError].err{internal_error("stream storage is busy")};
     }
     state.emitted = 0;
     if (!render.release_media(?state.media)) {
-        ret R.err[u8, error.AppError](internal_error("media storage is busy"));
+        ret res[u8, error.AppError].err{internal_error("media storage is busy")};
     }
     val source: render.Source = render.Source{ctx: state::ptr, produce: stream_produce,
         resume: stream_resume, settle: stream_settle};
     if (!render.text_plain(?state.media)
         || !render.init_stream(?state.stream, source, 4096, response.generation,
-            state.limits, ?response.trailers, context.cancellation(request_context))
+        state.limits, ?response.trailers, context.cancellation(request_context))
         || render.respond(request_context, status.OK, ?state.media,
-            render.stream_body(?state.stream), state.limits) != render.RESPOND_OK) {
-        ret R.err[u8, error.AppError](internal_error("stream installation failed"));
+        render.stream_body(?state.stream), state.limits) != render.RESPOND_OK) {
+        ret res[u8, error.AppError].err{internal_error("stream installation failed")};
     }
-    ret R.ok[u8, error.AppError](handler.RESPOND);
+    ret res[u8, error.AppError].ok{handler.RESPOND};
 }
 
 fun conflict_handler(ctx: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
-    ret R.err[u8, error.AppError](error.make(error.CONFLICT, 409, "conflict",
-        "private detail must never reach the wire", false));
+    request_context: *context.Context) res[u8, error.AppError] {
+    ret res[u8, error.AppError].err{error.make(error.CONFLICT, 409, "conflict",
+        "private detail must never reach the wire", false)};
 }
 
 fun secret_handler(ctx: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
-    ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-        "database dsn user:password@host", "private detail", false));
+    request_context: *context.Context) res[u8, error.AppError] {
+    ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+        "database dsn user:password@host", "private detail", false)};
 }
 
-fun harness_clock(ctx: ptr) i64 { ret 1000; }
+fun harness_clock(ctx: ptr) i64 {
+    ret 1000;
+}
 
 fun contains(haystack: view.View, needle: str) bool {
     val length: usize = str_len(needle);
@@ -840,8 +859,8 @@ fun contains(haystack: view.View, needle: str) bool {
     }
     var start: usize = 0;
     for (start + length <= haystack.len) {
-        var matched: bool = true;
-        var i: usize = 0;
+        var matched: bool  = true;
+        var i:       usize = 0;
         for (i < length) {
             if (haystack.data[start + i] != needle[i]) { matched = false; }
             i = i + 1;
@@ -855,87 +874,87 @@ fun contains(haystack: view.View, needle: str) bool {
 # the ordinary application path: a handler reaches its session through the
 # context, and never sees the binder, the manager, or a buffer
 fun session_login(ctx: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
+    request_context: *context.Context) res[u8, error.AppError] {
     val request_session: *session.RequestSession =
         session.from_context(request_context);
     if (request_session == nil) {
-        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-            "internal server error", "no session was bound", false));
+        ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+            "internal server error", "no session was bound", false)};
     }
     if (session.load(request_context, 1000) == session.REQUEST_INVALID) {
-        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-            "internal server error", "session load was refused", false));
+        ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+            "internal server error", "session load was refused", false)};
     }
     if (session.request_state(request_session) != session.SESSION_PRESENT
         && session.create_request(request_session, 600, 1000)
-            != session.REQUEST_OK) {
-        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-            "internal server error", "session creation was refused", false));
+        != session.REQUEST_OK) {
+        ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+            "internal server error", "session creation was refused", false)};
     }
     if (session.write_request(request_session, view.view("user=1", 6))
         != session.REQUEST_OK) {
-        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-            "internal server error", "session write was refused", false));
+        ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+            "internal server error", "session write was refused", false)};
     }
     val response: *message.Response = context.response(request_context);
     if (response == nil) {
-        ret R.err[u8, error.AppError](error.make(error.INTERNAL, 500,
-            "internal server error", "no response", false));
+        ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
+            "internal server error", "no response", false)};
     }
     message.set_status(response, status.OK);
-    ret R.ok[u8, error.AppError](handler.RESPOND);
+    ret res[u8, error.AppError].ok{handler.RESPOND};
 }
 
 fun fallback_handler(ctx: ptr,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
-    ret R.err[u8, error.AppError](error.make(error.NOT_FOUND, 404, "not found",
-        "no route matched the request target", false));
+    request_context: *context.Context) res[u8, error.AppError] {
+    ret res[u8, error.AppError].err{error.make(error.NOT_FOUND, 404, "not found",
+        "no route matched the request target", false)};
 }
 
 fun trace_middleware(ctx: ptr, next: middleware.Next,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
+    request_context: *context.Context) res[u8, error.AppError] {
     val state: *HandlerState = ctx::*HandlerState;
     if (state == nil || state.trace_len + 2 > 16) {
-        ret R.err[u8, error.AppError](internal_error("trace overflow"));
+        ret res[u8, error.AppError].err{internal_error("trace overflow")};
     }
     state.trace[state.trace_len] = 'T';
-    state.trace_len = state.trace_len + 1;
-    val result: R.Result[u8, error.AppError] = middleware.call(next, request_context);
+    state.trace_len              = state.trace_len + 1;
+    val result: res[u8, error.AppError] = middleware.call(next, request_context);
     state.trace[state.trace_len] = 't';
-    state.trace_len = state.trace_len + 1;
+    state.trace_len              = state.trace_len + 1;
     ret result;
 }
 
 # the outermost middleware also marks the start of one traced request
 fun headers_middleware(ctx: ptr, next: middleware.Next,
-    request_context: *context.Context) R.Result[u8, error.AppError] {
+    request_context: *context.Context) res[u8, error.AppError] {
     val state: *HandlerState = ctx::*HandlerState;
     if (state == nil) {
-        ret R.err[u8, error.AppError](internal_error("trace state is missing"));
+        ret res[u8, error.AppError].err{internal_error("trace state is missing")};
     }
-    state.trace_len = 0;
+    state.trace_len              = 0;
     state.trace[state.trace_len] = 'H';
-    state.trace_len = state.trace_len + 1;
-    val result: R.Result[u8, error.AppError] = middleware.call(next, request_context);
-    if (!R.is_err[u8, error.AppError](result) && context.active(request_context)) {
+    state.trace_len              = state.trace_len + 1;
+    val result: res[u8, error.AppError] = middleware.call(next, request_context);
+    if ((sel result.ok) && context.active(request_context)) {
         state.header_calls = state.header_calls + 1;
         security.apply_headers(state.headers, context.request(request_context),
             context.response(request_context));
     }
     state.trace[state.trace_len] = 'h';
-    state.trace_len = state.trace_len + 1;
+    state.trace_len              = state.trace_len + 1;
     ret result;
 }
 
-fun counter_resolve(ctx: ptr, key: view.View) R.Result[ptr, view.View] {
-    if (key.len == 7 && key.data[0] == 'c') { ret R.ok[ptr, view.View](ctx); }
-    ret R.ok[ptr, view.View](nil);
+fun counter_resolve(ctx: ptr, key: view.View) res[ptr, view.View] {
+    if (key.len == 7 && key.data[0] == 'c') { ret res[ptr, view.View].ok{ctx}; }
+    ret res[ptr, view.View].ok{nil};
 }
 
-fun service_start(ctx: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
+fun service_start(ctx: ptr) res[lifecycle.CallbackStatus, view.View] {
     val state: *usize = ctx::*usize;
     if (state != nil) { @state = @state + 1; }
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
 fun service_ready(ctx: ptr) lifecycle.Readiness {
@@ -943,12 +962,12 @@ fun service_ready(ctx: ptr) lifecycle.Readiness {
 }
 
 fun service_drain(ctx: ptr,
-    deadline_ns: i64) R.Result[lifecycle.CallbackStatus, view.View] {
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+    deadline_ns: i64) res[lifecycle.CallbackStatus, view.View] {
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
-fun service_stop(ctx: ptr) R.Result[lifecycle.CallbackStatus, view.View] {
-    ret R.ok[lifecycle.CallbackStatus, view.View](lifecycle.CALLBACK_DONE);
+fun service_stop(ctx: ptr) res[lifecycle.CallbackStatus, view.View] {
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
 rec EntropyState {
@@ -962,9 +981,9 @@ fun entropy_fill(ctx: ptr, output: *u8, length: usize) i64 {
     var i: usize = 0;
     for (i < length) {
         output[i] = state.seed + i::u8;
-        i = i + 1;
+        i         = i + 1;
     }
-    state.seed = state.seed + 17;
+    state.seed  = state.seed + 17;
     state.calls = state.calls + 1;
     ret 0;
 }
@@ -977,23 +996,23 @@ fun entropy_aliases(ctx: ptr, data: *u8, length: usize) bool {
 }
 
 rec Sink {
-    starts:     usize;
-    finishes:   usize;
-    errors:     usize;
-    status:     u16;
-    outcome:    observability.Outcome;
-    kind:       error.Kind;
-    bytes_in:   u64;
-    bytes_out:  u64;
-    route:      [32]u8;
-    route_len:  usize;
+    starts:    usize;
+    finishes:  usize;
+    errors:    usize;
+    status:    u16;
+    outcome:   observability.Outcome;
+    kind:      error.Kind;
+    bytes_in:  u64;
+    bytes_out: u64;
+    route:     [32]u8;
+    route_len: usize;
 }
 
 fun capture_event(state: *Sink, event: *observability.RequestEvent) {
-    state.status = event.status;
-    state.outcome = event.outcome;
-    state.kind = event.error_kind;
-    state.bytes_in = event.bytes_in;
+    state.status    = event.status;
+    state.outcome   = event.outcome;
+    state.kind      = event.error_kind;
+    state.bytes_in  = event.bytes_in;
     state.bytes_out = event.bytes_out;
     val name: view.View = observability.event_route_name(event);
     state.route_len = 0;
@@ -1001,7 +1020,7 @@ fun capture_event(state: *Sink, event: *observability.RequestEvent) {
         var i: usize = 0;
         for (i < name.len) {
             state.route[i] = name.data[i];
-            i = i + 1;
+            i              = i + 1;
         }
         state.route_len = name.len;
     }
@@ -1026,41 +1045,41 @@ fun sink_error(ctx: ptr, event: *observability.RequestEvent,
 }
 
 rec AppFixture {
-    parameters:      [1]router.Parameter;
-    routes:          [6]router.Route;
-    specifications:  [6]http_router.Route;
-    compiled:        [6]http_router.CompiledRoute;
-    segments:        [20]http_router.Segment;
-    matcher:         router.Router;
-    middlewares:     [3]middleware.Middleware;
-    stack:           middleware.Stack;
-    provider_items:  [1]provider.Provider;
-    providers:       provider.Set;
-    counter:         i64;
-    service_starts:  usize;
-    services:        [1]lifecycle.Lifecycle;
-    controller:      lifecycle.Controller;
-    headers:         security.HeadersPolicy;
-    store_slots:     [2]session.MemorySlot;
-    memory:          session.MemoryStore;
-    keys:            [1]session.KeyGeneration;
-    ring:            session.KeyRing;
-    nonce_slots:     [4]session.GuardSlot;
-    nonce_guard:     session.MemoryGuard;
-    replay_slots:    [4]session.GuardSlot;
-    replay_guard:    session.MemoryGuard;
-    entropy_state:   EntropyState;
-    codec:           session.ProtectedCodec;
-    manager:         session.Manager;
-    binder:          session.Binder;
-    errors:          error.Default;
-    sink:            Sink;
-    label_values:    [2]observability.Term;
-    label_specs:     [1]observability.LabelSpec;
-    vocabulary:      observability.Vocabulary;
-    observer:        observability.Observer;
-    handlers:        HandlerState;
-    application:     app.App;
+    parameters:     [1]router.Parameter;
+    routes:         [6]router.Route;
+    specifications: [6]http_router.Route;
+    compiled:       [6]http_router.CompiledRoute;
+    segments:       [20]http_router.Segment;
+    matcher:        router.Router;
+    middlewares:    [3]middleware.Middleware;
+    stack:          middleware.Stack;
+    provider_items: [1]provider.Provider;
+    providers:      provider.Set;
+    counter:        i64;
+    service_starts: usize;
+    services:       [1]lifecycle.Lifecycle;
+    controller:     lifecycle.Controller;
+    headers:        security.HeadersPolicy;
+    store_slots:    [2]session.MemorySlot;
+    memory:         session.MemoryStore;
+    keys:           [1]session.KeyGeneration;
+    ring:           session.KeyRing;
+    nonce_slots:    [4]session.GuardSlot;
+    nonce_guard:    session.MemoryGuard;
+    replay_slots:   [4]session.GuardSlot;
+    replay_guard:   session.MemoryGuard;
+    entropy_state:  EntropyState;
+    codec:          session.ProtectedCodec;
+    manager:        session.Manager;
+    binder:         session.Binder;
+    errors:         error.Default;
+    sink:           Sink;
+    label_values:   [2]observability.Term;
+    label_specs:    [1]observability.LabelSpec;
+    vocabulary:     observability.Vocabulary;
+    observer:       observability.Observer;
+    handlers:       HandlerState;
+    application:    app.App;
 }
 
 rec HarnessStorage {
@@ -1074,16 +1093,16 @@ rec HarnessStorage {
 fun harness_storage(state: *HarnessStorage) Storage {
     ret Storage{response_fields: ?state.response_fields[0], response_field_cap: 16,
         response_trailers: ?state.response_trailers[0], response_trailer_cap: 8,
-        informationals: ?state.informationals[0], informational_cap: 4,
-        arena: ?state.arena[0], arena_bytes: 16384,
-        captured: ?state.captured[0], captured_capacity: 4096};
+        informationals:    ?state.informationals[0], informational_cap: 4,
+        arena:             ?state.arena[0], arena_bytes: 16384,
+        captured:          ?state.captured[0], captured_capacity: 4096};
 }
 
 fun test_route(method_rule: router.Method, route_path: router.Path, name: str,
     parameters: *router.Parameter, parameter_len: usize,
     call: handler.HandlerFun, ctx: ptr) router.Route {
     ret router.Route{method: method_rule, host: router.any_host(), path: route_path,
-        name: name, parameters: parameters, parameter_len: parameter_len,
+        name:    name, parameters: parameters, parameter_len: parameter_len,
         handler: handler.Handler{ctx: ctx, call: call}};
 }
 
@@ -1096,17 +1115,17 @@ fun init_sessions(fixture: *AppFixture) bool {
         || !session.init_memory_guard(?fixture.replay_guard, ?fixture.replay_slots[0], 4)) {
         ret false;
     }
-    fixture.keys[0].id = 1;
-    fixture.keys[0].key_len = 32;
+    fixture.keys[0].id           = 1;
+    fixture.keys[0].key_len      = 32;
     fixture.keys[0].activated_at = 0;
     fixture.keys[0].encode_until = 100000;
     fixture.keys[0].decode_until = 200000;
     var i: usize = 0;
     for (i < 32) {
         fixture.keys[0].key[i] = 0x20 + i::u8;
-        i = i + 1;
+        i                      = i + 1;
     }
-    val nonce: session.Guard = session.memory_guard(?fixture.nonce_guard);
+    val nonce:  session.Guard = session.memory_guard(?fixture.nonce_guard);
     val replay: session.Guard = session.memory_guard(?fixture.replay_guard);
     if (!session.init_key_ring(?fixture.ring, ?fixture.keys[0], 1, 1, 0,
         session.AES_256_GCM, nonce.domain)) { ret false; }
@@ -1128,9 +1147,9 @@ fun init_sessions(fixture: *AppFixture) bool {
 
 fun init_application(fixture: *AppFixture, limits: message.Limits) bool {
     if (fixture == nil) { ret false; }
-    fixture.handlers.limits = limits;
+    fixture.handlers.limits  = limits;
     fixture.handlers.headers = ?fixture.headers;
-    fixture.handlers.chunks = 3;
+    fixture.handlers.chunks  = 3;
     if (!security.secure_headers(?fixture.headers) || !init_sessions(fixture)) {
         ret false;
     }
@@ -1161,9 +1180,10 @@ fun init_application(fixture: *AppFixture, limits: message.Limits) bool {
         router.path(view.view("/login", 6)), "session.login", nil, 0,
         session_login, (?fixture.handlers)::ptr);
     val route_storage: router.Storage = router.Storage{
-        specifications: ?fixture.specifications[0], specification_cap: 6,
+        specifications:  ?fixture.specifications[0], specification_cap: 6,
         compiled_routes: ?fixture.compiled[0], compiled_route_cap: 6,
-        segments: ?fixture.segments[0], segment_cap: 20};
+        segments:        ?fixture.segments[0], segment_cap: 20
+    };
     if (router.compile(?fixture.matcher, ?fixture.routes[0], 6, route_storage,
         router.limits_default()).status != router.COMPILE_OK) { ret false; }
     fixture.middlewares[0] = middleware.Middleware{ctx: (?fixture.handlers)::ptr,
@@ -1174,8 +1194,8 @@ fun init_application(fixture: *AppFixture, limits: message.Limits) bool {
     if (!session.init_binder(?fixture.binder, ?fixture.manager,
         session.Clock{ctx: nil, now: harness_clock},
         session.request_limits_default())) { ret false; }
-    fixture.middlewares[2] = session.binder_middleware(?fixture.binder);
-    fixture.stack = middleware.Stack{items: ?fixture.middlewares[0], len: 3};
+    fixture.middlewares[2]    = session.binder_middleware(?fixture.binder);
+    fixture.stack             = middleware.Stack{items: ?fixture.middlewares[0], len: 3};
     fixture.provider_items[0] = provider.Provider{ctx: (?fixture.counter)::ptr,
         resolve: counter_resolve};
     fixture.counter = 7;
@@ -1183,18 +1203,18 @@ fun init_application(fixture: *AppFixture, limits: message.Limits) bool {
         ret false;
     }
     fixture.handlers.providers = ?fixture.providers;
-    fixture.services[0] = lifecycle.Lifecycle{ctx: (?fixture.service_starts)::ptr,
+    fixture.services[0]        = lifecycle.Lifecycle{ctx: (?fixture.service_starts)::ptr,
         start: service_start, ready: service_ready, drain: service_drain,
-        stop: service_stop};
+        stop:  service_stop};
     if (!lifecycle.init(?fixture.controller, ?fixture.services[0], 1, 1)) { ret false; }
-    if (!error.initialize_default(?fixture.errors, limits, 512)) { ret false; }
+    if (!error.initialize_default(?fixture.errors, limits, 512))          { ret false; }
     if (!observability.term(?fixture.label_values[0], view.view("read", 4))
         || !observability.term(?fixture.label_values[1], view.view("write", 5))
         || !observability.term(?fixture.label_specs[0].name, view.view("kind", 4))) {
         ret false;
     }
-    fixture.label_specs[0].values = ?fixture.label_values[0];
-    fixture.label_specs[0].value_count = 2;
+    fixture.label_specs[0].values          = ?fixture.label_values[0];
+    fixture.label_specs[0].value_count     = 2;
     fixture.label_specs[0].max_value_bytes = 8;
     if (!observability.init_vocabulary(?fixture.vocabulary, ?fixture.label_specs[0], 1)) {
         ret false;
@@ -1203,40 +1223,40 @@ fun init_application(fixture: *AppFixture, limits: message.Limits) bool {
         start: sink_start, finish: sink_finish, error: sink_error};
     val assembly: app.Assembly = app.Assembly{
         config: app.Config{limits: app.Limits{max_body_bytes: 65536,
-            max_form_fields: 16, max_upload_bytes: 65536, max_route_params: 4,
-            max_request_id_bytes: 64, max_active_requests: 1,
-            max_middleware_depth: 8, handler_deadline_ns: lifecycle.NO_DEADLINE,
-            max_providers: 1, max_provider_key_bytes: 32,
+            max_form_fields:         16, max_upload_bytes: 65536, max_route_params: 4,
+            max_request_id_bytes:    64, max_active_requests: 1,
+            max_middleware_depth:    8, handler_deadline_ns: lifecycle.NO_DEADLINE,
+            max_providers:           1, max_provider_key_bytes: 32,
             max_background_services: 1}, trust_proxy: false,
-            panic_policy: middleware.PANIC_ABORT},
-        router: ?fixture.matcher,
-        middleware: ?fixture.stack,
-        fallback: handler.Handler{ctx: (?fixture.handlers)::ptr, call: fallback_handler},
-        errors: error.default_mapper(?fixture.errors),
-        providers: ?fixture.providers,
-        lifecycle: ?fixture.controller,
-        sessions: ?fixture.manager,
-        security: ?fixture.headers,
-        csrf: nil,
-        origins: nil,
+            panic_policy:            middleware.PANIC_ABORT},
+        router:        ?fixture.matcher,
+        middleware:    ?fixture.stack,
+        fallback:      handler.Handler{ctx: (?fixture.handlers)::ptr, call: fallback_handler},
+        errors:        error.default_mapper(?fixture.errors),
+        providers:     ?fixture.providers,
+        lifecycle:     ?fixture.controller,
+        sessions:      ?fixture.manager,
+        security:      ?fixture.headers,
+        csrf:          nil,
+        origins:       nil,
         authenticator: nil,
-        renderer: nil,
-        observer: ?fixture.observer,
-        vocabulary: ?fixture.vocabulary,
-        event_policy: observability.policy_default(),
-        app_state: nil,
+        renderer:      nil,
+        observer:      ?fixture.observer,
+        vocabulary:    ?fixture.vocabulary,
+        event_policy:  observability.policy_default(),
+        app_state:     nil,
     };
     ret app.assemble(?fixture.application, assembly);
 }
 
 fun release_code(fixture: *AppFixture) usize {
     if (session.stop_manager(?fixture.manager) != session.STORE_OK) { ret 1; }
-    if (!session.release_protected_codec(?fixture.codec)) { ret 2; }
-    if (!session.release_key_ring(?fixture.ring)) { ret 3; }
-    if (!session.release_memory_guard(?fixture.nonce_guard)) { ret 4; }
-    if (!session.release_memory_guard(?fixture.replay_guard)) { ret 5; }
-    if (!app.release(?fixture.application)) { ret 6; }
-    if (!lifecycle.destroy(?fixture.controller)) { ret 7; }
+    if (!session.release_protected_codec(?fixture.codec))           { ret 2; }
+    if (!session.release_key_ring(?fixture.ring))                   { ret 3; }
+    if (!session.release_memory_guard(?fixture.nonce_guard))        { ret 4; }
+    if (!session.release_memory_guard(?fixture.replay_guard))       { ret 5; }
+    if (!app.release(?fixture.application))                         { ret 6; }
+    if (!lifecycle.destroy(?fixture.controller))                    { ret 7; }
     ret 0;
 }
 
@@ -1271,14 +1291,14 @@ fun post_request(fields: field.Fields, path: view.View, id: view.View,
     var built: Request = request(message.version_h1(1, 1),
         method.from_kind(method.POST),
         target.origin(path, path, view.view(nil, 0)), fields, id);
-    built.body = payload;
+    built.body     = payload;
     built.fragment = fragment;
-    built.suspend = suspend;
+    built.suspend  = suspend;
     ret built;
 }
 
 test "laurel.testing: the harness drives a whole application without a socket" {
-    val limits: message.Limits = message.limits_default();
+    val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
     var harness: Harness;
@@ -1288,7 +1308,7 @@ test "laurel.testing: the harness drives a whole application without a socket" {
     if (start(?harness).status != lifecycle.TRANSITION_OK
         || ready(?harness).status != lifecycle.TRANSITION_OK
         || fixture.service_starts != 1) { ret 3; }
-    var items: [4]field.Field;
+    var items:  [4]field.Field;
     var fields: field.Fields;
     if (!host_fields(?items[0], limits, ?fields)) { ret 4; }
     var result: Result;
@@ -1317,7 +1337,7 @@ test "laurel.testing: the harness drives a whole application without a socket" {
         || fixture.sink.status != 200 || fixture.sink.bytes_out != 8
         || fixture.sink.bytes_in != 0 || fixture.sink.route_len != 11
         || !same(view.view(?fixture.sink.route[0], 11),
-            view.view("orders.show", 11))) { ret 8; }
+        view.view("orders.show", 11))) { ret 8; }
     if (invoke(?harness, get_request(fields, view.view("/missing", 8),
         view.view("harness-2", 9)), ?result) != INVOKE_ERROR
         || result.response.status != 404
@@ -1345,7 +1365,7 @@ test "laurel.testing: the harness drives a whole application without a socket" {
 }
 
 test "laurel.testing: a handler reaches its session through the application" {
-    val limits: message.Limits = message.limits_default();
+    val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     if (!init_application(?fixture, limits)) { ret 1; }
     var storage: HarnessStorage;
@@ -1354,7 +1374,7 @@ test "laurel.testing: a handler reaches its session through the application" {
         harness_storage(?storage), limits, DEFAULT_BODY_POLLS)) { ret 2; }
     if (start(?harness).status != lifecycle.TRANSITION_OK
         || ready(?harness).status != lifecycle.TRANSITION_OK) { ret 3; }
-    var items: [4]field.Field;
+    var items:  [4]field.Field;
     var fields: field.Fields;
     if (!host_fields(?items[0], limits, ?fields)) { ret 4; }
     var result: Result;
@@ -1377,14 +1397,14 @@ test "laurel.testing: a handler reaches its session through the application" {
         ret 8;
     }
     if (drain(?harness, lifecycle.NO_DEADLINE).status
-            != lifecycle.TRANSITION_OK
+        != lifecycle.TRANSITION_OK
         || stop(?harness).status != lifecycle.TRANSITION_OK
         || release_code(?fixture) != 0) { ret 9; }
     ret 0;
 }
 
 test "laurel.testing: streaming request and response bodies flow in process" {
-    val limits: message.Limits = message.limits_default();
+    val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
     var harness: Harness;
@@ -1393,14 +1413,14 @@ test "laurel.testing: streaming request and response bodies flow in process" {
         harness_storage(?storage), limits, DEFAULT_BODY_POLLS)
         || start(?harness).status != lifecycle.TRANSITION_OK
         || ready(?harness).status != lifecycle.TRANSITION_OK) { ret 2; }
-    var items: [4]field.Field;
+    var items:  [4]field.Field;
     var fields: field.Fields;
     if (!host_fields(?items[0], limits, ?fields)) { ret 3; }
     var payload: [20]u8;
-    var i: usize = 0;
+    var i:       usize = 0;
     for (i < 20) {
         payload[i] = 'a' + (i % 26)::u8;
-        i = i + 1;
+        i          = i + 1;
     }
     var result: Result;
     if (invoke(?harness, post_request(fields, view.view("/upload", 7),
@@ -1428,7 +1448,7 @@ test "laurel.testing: streaming request and response bodies flow in process" {
     i = 0;
     for (i < 300) {
         oversized[i] = 'z';
-        i = i + 1;
+        i            = i + 1;
     }
     if (invoke(?harness, post_request(fields, view.view("/upload", 7),
         view.view("upload-3", 8), view.view(?oversized[0], 300), 64, false), ?result)
@@ -1442,7 +1462,7 @@ test "laurel.testing: streaming request and response bodies flow in process" {
 }
 
 test "laurel.testing: the security corpus runs against every http version" {
-    val limits: message.Limits = message.limits_default();
+    val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
     var harness: Harness;
@@ -1451,53 +1471,53 @@ test "laurel.testing: the security corpus runs against every http version" {
         harness_storage(?storage), limits, DEFAULT_BODY_POLLS)
         || start(?harness).status != lifecycle.TRANSITION_OK
         || ready(?harness).status != lifecycle.TRANSITION_OK) { ret 2; }
-    var items: [4]field.Field;
+    var items:  [4]field.Field;
     var fields: field.Fields;
     if (!host_fields(?items[0], limits, ?fields)) { ret 3; }
     var oversized: [300]u8;
-    var i: usize = 0;
+    var i:         usize = 0;
     for (i < 300) {
         oversized[i] = 'z';
-        i = i + 1;
+        i            = i + 1;
     }
     var cases: [6]Case;
     cases[0] = Case{name: view.view("encoded path separator", 22),
         request: get_request(fields, view.view("/orders/%2f", 11),
-            view.view("corpus-1", 8)),
-        expect: Expectation{status: INVOKE_ERROR, code: 400,
-            execution: middleware.EXECUTION_ERROR_RENDERED,
-            error_kind: error.BAD_REQUEST}};
+        view.view("corpus-1", 8)),
+        expect:     Expectation{status: INVOKE_ERROR, code: 400,
+        execution:  middleware.EXECUTION_ERROR_RENDERED,
+        error_kind: error.BAD_REQUEST}};
     cases[1] = Case{name: view.view("unsigned parameter overflow", 27),
         request: get_request(fields,
-            view.view("/orders/99999999999999999999999", 30),
-            view.view("corpus-2", 8)),
-        expect: Expectation{status: INVOKE_ERROR, code: 400,
-            execution: middleware.EXECUTION_ERROR_RENDERED,
-            error_kind: error.BAD_REQUEST}};
+        view.view("/orders/99999999999999999999999", 30),
+        view.view("corpus-2", 8)),
+        expect:     Expectation{status: INVOKE_ERROR, code: 400,
+        execution:  middleware.EXECUTION_ERROR_RENDERED,
+        error_kind: error.BAD_REQUEST}};
     cases[2] = Case{name: view.view("dot segment traversal", 21),
         request: get_request(fields, view.view("/../etc/passwd", 14),
-            view.view("corpus-3", 8)),
-        expect: Expectation{status: INVOKE_ERROR, code: 400,
-            execution: middleware.EXECUTION_ERROR_RENDERED,
-            error_kind: error.BAD_REQUEST}};
+        view.view("corpus-3", 8)),
+        expect:     Expectation{status: INVOKE_ERROR, code: 400,
+        execution:  middleware.EXECUTION_ERROR_RENDERED,
+        error_kind: error.BAD_REQUEST}};
     cases[3] = Case{name: view.view("private detail never leaks", 26),
         request: get_request(fields, view.view("/secret", 7),
-            view.view("corpus-4", 8)),
-        expect: Expectation{status: INVOKE_ERROR, code: 500,
-            execution: middleware.EXECUTION_ERROR_RENDERED,
-            error_kind: error.INTERNAL}};
+        view.view("corpus-4", 8)),
+        expect:     Expectation{status: INVOKE_ERROR, code: 500,
+        execution:  middleware.EXECUTION_ERROR_RENDERED,
+        error_kind: error.INTERNAL}};
     cases[4] = Case{name: view.view("method is not routable", 22),
         request: get_request(fields, view.view("/upload", 7),
-            view.view("corpus-5", 8)),
-        expect: Expectation{status: INVOKE_ERROR, code: 404,
-            execution: middleware.EXECUTION_ERROR_RENDERED,
-            error_kind: error.NOT_FOUND}};
+        view.view("corpus-5", 8)),
+        expect:     Expectation{status: INVOKE_ERROR, code: 404,
+        execution:  middleware.EXECUTION_ERROR_RENDERED,
+        error_kind: error.NOT_FOUND}};
     cases[5] = Case{name: view.view("body exceeds the handler bound", 30),
         request: post_request(fields, view.view("/upload", 7),
-            view.view("corpus-6", 8), view.view(?oversized[0], 300), 64, false),
-        expect: Expectation{status: INVOKE_ERROR, code: 413,
-            execution: middleware.EXECUTION_ERROR_RENDERED,
-            error_kind: error.TOO_LARGE}};
+        view.view("corpus-6", 8), view.view(?oversized[0], 300), 64, false),
+        expect:     Expectation{status: INVOKE_ERROR, code: 413,
+        execution:  middleware.EXECUTION_ERROR_RENDERED,
+        error_kind: error.TOO_LARGE}};
     var versions: [4]message.Version;
     versions[0] = message.version_h1(1, 0);
     versions[1] = message.version_h1(1, 1);
@@ -1511,7 +1531,7 @@ test "laurel.testing: the security corpus runs against every http version" {
     if (fixture.sink.starts != 24 || fixture.sink.errors != 24
         || fixture.sink.finishes != 0) { ret 6; }
     var wrong: [1]Case;
-    wrong[0] = cases[3];
+    wrong[0]             = cases[3];
     wrong[0].expect.code = 200;
     var negative: Report;
     if (run_suite(?harness, ?wrong[0], 1, ?versions[0], 4, ?negative)
@@ -1524,18 +1544,18 @@ test "laurel.testing: the security corpus runs against every http version" {
 }
 
 test "laurel.testing: admission follows the driven application lifecycle" {
-    val limits: message.Limits = message.limits_default();
+    val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
     var harness: Harness;
     if (!init_application(?fixture, limits)) { ret 1; }
     if (!init(?harness, ?fixture.application, ?fixture.matcher,
         harness_storage(?storage), limits, DEFAULT_BODY_POLLS)) { ret 2; }
-    var items: [4]field.Field;
+    var items:  [4]field.Field;
     var fields: field.Fields;
     if (!host_fields(?items[0], limits, ?fields)) { ret 3; }
     var result: Result;
-    val probe: Request = get_request(fields, view.view("/orders/7", 9),
+    val probe:  Request = get_request(fields, view.view("/orders/7", 9),
         view.view("life-1", 6));
     if (invoke(?harness, probe, ?result) != INVOKE_REJECTED
         || fixture.sink.starts != 0) { ret 4; }
@@ -1550,12 +1570,12 @@ test "laurel.testing: admission follows the driven application lifecycle" {
     if (stop(?harness).status != lifecycle.TRANSITION_OK
         || !lifecycle.terminal(?fixture.controller)) { ret 8; }
     var overlapping: HarnessStorage;
-    var invalid: Storage = harness_storage(?overlapping);
+    var invalid:     Storage = harness_storage(?overlapping);
     invalid.captured = invalid.arena;
     var refused: Harness;
     if (storage_valid(invalid)
         || init(?refused, ?fixture.application, ?fixture.matcher, invalid,
-            limits, DEFAULT_BODY_POLLS)) { ret 9; }
+        limits, DEFAULT_BODY_POLLS)) { ret 9; }
     if (!release_application(?fixture)) { ret 10; }
     ret 0;
 }
@@ -1568,43 +1588,153 @@ test "laurel.testing: admission follows the driven application lifecycle" {
 #
 # `csrf.KeyRing` is deliberately absent: it owns key material and must keep
 # refusing to erase.
-fun erase_app(value: *app.App) ptr { ret value::ptr; }
-fun erase_assembly(value: *app.Assembly) ptr { ret value::ptr; }
-fun erase_context(value: *context.Context) ptr { ret value::ptr; }
-fun erase_handler(value: *handler.Handler) ptr { ret value::ptr; }
-fun erase_router(value: *router.Router) ptr { ret value::ptr; }
-fun erase_stack(value: *middleware.Stack) ptr { ret value::ptr; }
-fun erase_mapper(value: *error.Mapper) ptr { ret value::ptr; }
-fun erase_default_errors(value: *error.Default) ptr { ret value::ptr; }
-fun erase_manager(value: *session.Manager) ptr { ret value::ptr; }
-fun erase_request_session(value: *session.RequestSession) ptr { ret value::ptr; }
-fun erase_request_storage(value: *session.RequestStorage) ptr { ret value::ptr; }
-fun erase_binder(value: *session.Binder) ptr { ret value::ptr; }
-fun erase_headers(value: *security.HeadersPolicy) ptr { ret value::ptr; }
-fun erase_origins(value: *security.OriginPolicy) ptr { ret value::ptr; }
-fun erase_redirects(value: *security.RedirectPolicy) ptr { ret value::ptr; }
-fun erase_authenticator(value: *security.Authenticator) ptr { ret value::ptr; }
-fun erase_protector(value: *csrf.Protector) ptr { ret value::ptr; }
-fun erase_csrf_handle(value: *csrf.Handle) ptr { ret value::ptr; }
-fun erase_providers(value: *provider.Set) ptr { ret value::ptr; }
-fun erase_controller(value: *lifecycle.Controller) ptr { ret value::ptr; }
-fun erase_jar(value: *cookie.Jar) ptr { ret value::ptr; }
-fun erase_form(value: *form.UrlEncoded) ptr { ret value::ptr; }
-fun erase_form_body(value: *form.BodyParser) ptr { ret value::ptr; }
-fun erase_multipart(value: *multipart.Parser) ptr { ret value::ptr; }
-fun erase_upload(value: *upload.Upload) ptr { ret value::ptr; }
-fun erase_media(value: *render.Media) ptr { ret value::ptr; }
-fun erase_fixed(value: *render.Fixed) ptr { ret value::ptr; }
-fun erase_render_stream(value: *render.Stream) ptr { ret value::ptr; }
-fun erase_renderer(value: *render.Renderer) ptr { ret value::ptr; }
-fun erase_realtime_stream(value: *realtime.Stream) ptr { ret value::ptr; }
-fun erase_socket(value: *realtime.Socket) ptr { ret value::ptr; }
-fun erase_admission(value: *app.Admission) ptr { ret value::ptr; }
-fun erase_termination(value: *app.Termination) ptr { ret value::ptr; }
-fun erase_recorder(value: *observability.Recorder) ptr { ret value::ptr; }
-fun erase_observer(value: *observability.Observer) ptr { ret value::ptr; }
-fun erase_harness(value: *Harness) ptr { ret value::ptr; }
-fun erase_result(value: *Result) ptr { ret value::ptr; }
+fun erase_app(value: *app.App) ptr {
+    ret value::ptr;
+}
+
+fun erase_assembly(value: *app.Assembly) ptr {
+    ret value::ptr;
+}
+
+fun erase_context(value: *context.Context) ptr {
+    ret value::ptr;
+}
+
+fun erase_handler(value: *handler.Handler) ptr {
+    ret value::ptr;
+}
+
+fun erase_router(value: *router.Router) ptr {
+    ret value::ptr;
+}
+
+fun erase_stack(value: *middleware.Stack) ptr {
+    ret value::ptr;
+}
+
+fun erase_mapper(value: *error.Mapper) ptr {
+    ret value::ptr;
+}
+
+fun erase_default_errors(value: *error.Default) ptr {
+    ret value::ptr;
+}
+
+fun erase_manager(value: *session.Manager) ptr {
+    ret value::ptr;
+}
+
+fun erase_request_session(value: *session.RequestSession) ptr {
+    ret value::ptr;
+}
+
+fun erase_request_storage(value: *session.RequestStorage) ptr {
+    ret value::ptr;
+}
+
+fun erase_binder(value: *session.Binder) ptr {
+    ret value::ptr;
+}
+
+fun erase_headers(value: *security.HeadersPolicy) ptr {
+    ret value::ptr;
+}
+
+fun erase_origins(value: *security.OriginPolicy) ptr {
+    ret value::ptr;
+}
+
+fun erase_redirects(value: *security.RedirectPolicy) ptr {
+    ret value::ptr;
+}
+
+fun erase_authenticator(value: *security.Authenticator) ptr {
+    ret value::ptr;
+}
+
+fun erase_protector(value: *csrf.Protector) ptr {
+    ret value::ptr;
+}
+
+fun erase_csrf_handle(value: *csrf.Handle) ptr {
+    ret value::ptr;
+}
+
+fun erase_providers(value: *provider.Set) ptr {
+    ret value::ptr;
+}
+
+fun erase_controller(value: *lifecycle.Controller) ptr {
+    ret value::ptr;
+}
+
+fun erase_jar(value: *cookie.Jar) ptr {
+    ret value::ptr;
+}
+
+fun erase_form(value: *form.UrlEncoded) ptr {
+    ret value::ptr;
+}
+
+fun erase_form_body(value: *form.BodyParser) ptr {
+    ret value::ptr;
+}
+
+fun erase_multipart(value: *multipart.Parser) ptr {
+    ret value::ptr;
+}
+
+fun erase_upload(value: *upload.Upload) ptr {
+    ret value::ptr;
+}
+
+fun erase_media(value: *render.Media) ptr {
+    ret value::ptr;
+}
+
+fun erase_fixed(value: *render.Fixed) ptr {
+    ret value::ptr;
+}
+
+fun erase_render_stream(value: *render.Stream) ptr {
+    ret value::ptr;
+}
+
+fun erase_renderer(value: *render.Renderer) ptr {
+    ret value::ptr;
+}
+
+fun erase_realtime_stream(value: *realtime.Stream) ptr {
+    ret value::ptr;
+}
+
+fun erase_socket(value: *realtime.Socket) ptr {
+    ret value::ptr;
+}
+
+fun erase_admission(value: *app.Admission) ptr {
+    ret value::ptr;
+}
+
+fun erase_termination(value: *app.Termination) ptr {
+    ret value::ptr;
+}
+
+fun erase_recorder(value: *observability.Recorder) ptr {
+    ret value::ptr;
+}
+
+fun erase_observer(value: *observability.Observer) ptr {
+    ret value::ptr;
+}
+
+fun erase_harness(value: *Harness) ptr {
+    ret value::ptr;
+}
+
+fun erase_result(value: *Result) ptr {
+    ret value::ptr;
+}
 
 test "laurel.testing: every public type erases to the untyped ptr" {
     if (erase_app(nil) != nil || erase_assembly(nil) != nil

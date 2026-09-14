@@ -1,0 +1,9 @@
+[submodule "dep/std"]
+	path = dep/std
+	url = https://github.com/briar-systems/mach-std
+[submodule "dep/crypto"]
+	path = dep/crypto
+	url = https://github.com/briar-systems/mach-crypto
+[submodule "dep/http"]
+	path = dep/http
+	url = https://github.com/briar-systems/mach-http
