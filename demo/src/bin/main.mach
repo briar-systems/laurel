@@ -17,10 +17,9 @@ use std.types.bool.true;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
-use std.types.result.Result;
-use std.types.result.is_err;
-use std.types.result.unwrap_ok;
-use option: std.types.option;
+use std.types.result.res;
+use std.types.error.err;
+use std.types.option.opt;
 use allocator: std.allocator;
 use std.allocator.page;
 use std.allocator.fixed;
@@ -51,7 +50,11 @@ use laurel.observability;
 use laurel.form;
 use laurel.session;
 
-val EXIT_OK: i64 = 0;
+
+
+fun page_ok(outcome: err[allocator.Error]) bool {
+    ret sel outcome.ok;
+}val EXIT_OK: i64 = 0;
 val EXIT_CONFIG: i64 = 78;
 val EXIT_RUNTIME: i64 = 70;
 
@@ -113,7 +116,10 @@ fun capabilities() loader.Capabilities {
 }
 
 fun resolve_environment(context: ptr, name: str, output: *u8, capacity: usize) i64 {
-    ret env.get(name, output, capacity);
+    val got: res[opt[usize], env.EnvError] = env.get(name, output, capacity);
+    if (sel got.err) { ret -1; }
+    if (sel got.ok.none) { ret -1; }
+    ret got.ok.some::i64;
 }
 
 fun report_diagnostics(diagnostics: *schema.Diagnostics) {
@@ -189,26 +195,26 @@ fun announce(boot: *Boot, graph: *schema.Graph) {
 #[symbol("main")]
 fun main(argc: i64, argv: **u8) i64 {
     var heap: allocator.Allocator;
-    if (option.is_some[*u8](page.make(?heap))) {
+    if (!page_ok(page.make(?heap))) {
         print.eprintln("laurel-demo: page allocator initialization failed");
         ret EXIT_RUNTIME;
     }
     val path: str = configuration_path(argc, argv);
-    val loaded: Result[str, str] = filesystem.read_string(?heap, path);
-    if (is_err[str, str](loaded)) {
+    val loaded: res[str, filesystem.FsError] = filesystem.read_string(?heap, path);
+    if (sel loaded.err) {
         print.eprint("laurel-demo: cannot read configuration ");
         print.eprintln(path);
         ret EXIT_CONFIG;
     }
-    val source: str = unwrap_ok[str, str](loaded);
+    val source: str = loaded.ok;
 
-    val booted: Result[*Boot, *u8] = allocator.zallocate[Boot](?heap, 1);
-    val arena: Result[*u8, *u8] = allocator.allocate[u8](?heap, CONFIG_ARENA_BYTES);
-    if (is_err[*Boot, *u8](booted) || is_err[*u8, *u8](arena)) {
-        print.eprintln("laurel-demo: startup allocation failed");
-        ret EXIT_RUNTIME;
-    }
-    val boot: *Boot = unwrap_ok[*Boot, *u8](booted);
+    val booted: res[*Boot, allocator.Error] = allocator.zallocate[Boot](?heap, 1);
+    val arena: res[*u8, allocator.Error] = allocator.allocate[u8](?heap, CONFIG_ARENA_BYTES);
+    if (sel booted.err) { print.eprintln("laurel-demo: startup allocation failed");
+        ret EXIT_RUNTIME; }
+    if (sel arena.err) { print.eprintln("laurel-demo: startup allocation failed");
+        ret EXIT_RUNTIME; }
+    val boot: *Boot = booted.ok;
     boot.quiet = argc > 2 && argv[2] != nil && str_equals(argv[2]::str, "--quiet");
 
     # the csrf key ring holds secret key material, so it is owned here by typed
@@ -222,7 +228,7 @@ fun main(argc: i64, argv: **u8) i64 {
 
     var config_allocator: allocator.Allocator;
     var config_state: fixed.FixedState;
-    fixed.make(?config_allocator, ?config_state, unwrap_ok[*u8, *u8](arena),
+    fixed.make(?config_allocator, ?config_state, arena.ok,
         CONFIG_ARENA_BYTES);
 
     var resolver: loader.Resolver = loader.Resolver{

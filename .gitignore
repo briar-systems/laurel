@@ -8,3 +8,7 @@ doc/api/
 .wt/
 .mach-seed/
 .mach-txn-lock
+demo/dep/
+demo/out/
+doc/bench/laurel/dep/
+doc/bench/laurel/out/
