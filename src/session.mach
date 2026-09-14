@@ -1876,7 +1876,7 @@ fun manager_dependencies_valid(store: Store, codec: Codec,
         && store.stop != nil && store.load != nil && store.save != nil
         && store.delete != nil && store.replace != nil && store.reap != nil
         && codec.encode != nil && codec.decode != nil && cookie.name != nil
-        && cookie.secure && cookie.http_only;
+        && cookie.secure && cookie.http_only && cookie.max_age >= 0;
 }
 
 pub fun manager_valid(manager: *Manager) bool {
@@ -2537,10 +2537,11 @@ fun policy_view(value: str) view.View {
 fun emit_cookie(request_session: *RequestSession, response: *message.Response,
     value: view.View, max_age: i64, expiring: bool) RequestStatus {
     val policy: CookiePolicy  = request_session.manager.cookie;
+    val has_max: bool         = expiring || max_age > 0;
     var header: cookie.Cookie = cookie.Cookie{
         name:         policy_view(policy.name), value: value,
         path:         policy_view(policy.path), domain: policy_view(policy.domain),
-        has_max_age:  true, max_age_s: max_age, has_expires: expiring,
+        has_max_age:  has_max, max_age_s: max_age, has_expires: expiring,
         expires_unix: 0, secure: policy.secure, http_only: policy.http_only,
         partitioned:  false, same_site: policy_same_site(policy.same_site),
         attributes:   nil, attribute_len: 0
@@ -2917,6 +2918,25 @@ fun emitted_cookie(fixture: *RequestFixture) view.View {
     ret view.view(nil, 0);
 }
 
+fun view_contains(haystack: view.View, needle: str) bool {
+    val length: usize = str_len(needle);
+    if (length == 0 || haystack.len < length || haystack.data == nil) {
+        ret false;
+    }
+    var start: usize = 0;
+    for (start + length <= haystack.len) {
+        var matched: bool  = true;
+        var i:       usize = 0;
+        for (i < length) {
+            if (haystack.data[start + i] != needle[i]) { matched = false; }
+            i = i + 1;
+        }
+        if (matched) { ret true; }
+        start = start + 1;
+    }
+    ret false;
+}
+
 # take the token out of one response's Set-Cookie and present it as the next
 # request's Cookie, which is what a browser does
 fun replay_cookie(fixture: *RequestFixture, buffer: *u8,
@@ -2968,7 +2988,10 @@ test "laurel.session: a request reaches its session through the boundary" {
         ?fixture.scope) != REQUEST_OK
         || request_state(?fixture.session) != SESSION_PRESENT) { ret 4; }
     val issued: view.View = emitted_cookie(?fixture);
-    if (issued.len == 0) { ret 5; }
+    if (issued.len == 0
+        || !view_contains(issued, "laurel_session=")
+        || view_contains(issued, "Max-Age")
+        || view_contains(issued, "Expires")) { ret 5; }
 
     # the token round-trips: a second request loads what the first stored
     var carried: [4096]u8;
@@ -3052,8 +3075,11 @@ test "laurel.session: a request reaches its session through the boundary" {
     reset_response(?fixture);
     if (commit_request(?ending, ?fixture.response, 140, ?fixture.scope)
         != REQUEST_OK
-        || request_state(?ending) != SESSION_ABSENT
-        || emitted_cookie(?fixture).len == 0) { ret 20; }
+        || request_state(?ending) != SESSION_ABSENT) { ret 20; }
+    val cleared_cookie: view.View = emitted_cookie(?fixture);
+    if (cleared_cookie.len == 0
+        || !view_contains(cleared_cookie, "Max-Age=0")
+        || !view_contains(cleared_cookie, "Expires=")) { ret 20; }
     var gone: RequestSession;
     gone.initialized = false;
     if (!init_request(?gone, ?fixture.manager,
@@ -3072,6 +3098,22 @@ test "laurel.session: a request reaches its session through the boundary" {
         != REQUEST_OK
         || emitted_cookie(?fixture).len != 0
         || fixture.response.fields.len != 0) { ret 22; }
+
+    # a manager with explicit positive max_age emits Max-Age in Set-Cookie
+    fixture.manager.cookie.max_age = 3600;
+    reset_response(?fixture);
+    var persistent_sess: RequestSession;
+    persistent_sess.initialized = false;
+    if (!init_request(?persistent_sess, ?fixture.manager,
+        request_fixture_storage(?fixture))
+        || create_request(?persistent_sess, 600, 200) != REQUEST_OK
+        || commit_request(?persistent_sess, ?fixture.response, 200,
+        ?fixture.scope) != REQUEST_OK) { ret 24; }
+    val persistent: view.View = emitted_cookie(?fixture);
+    if (persistent.len == 0 || !view_contains(persistent, "Max-Age=3600")) {
+        ret 25;
+    }
+    fixture.manager.cookie.max_age = 0;
 
     if (!release_request(?fixture.session) || !operation_ok(cancel.destroy(?fixture.scope))
         || stop_manager(?fixture.manager) != STORE_OK) { ret 23; }
@@ -4114,6 +4156,13 @@ test "laurel.session: manager ownership and lifecycle fail closed" {
     if (init_manager(aliased_manager, memory_store(?memory),
         codec_fixture.codec, secure_cookie("__Host-aliased"), "laurel.test")
         || slots[0].id[0] != 0x5a) { ret 3; }
+
+    var negative_cookie: CookiePolicy = secure_cookie("__Host-managed");
+    negative_cookie.max_age           = -1;
+    var bad_manager: Manager;
+    bad_manager.state                 = MANAGER_EMPTY;
+    if (init_manager(?bad_manager, memory_store(?memory), codec_fixture.codec,
+        negative_cookie, "laurel.test")) { ret 3; }
 
     var probe:   DurableProbe;
     var manager: Manager;

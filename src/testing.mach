@@ -1389,7 +1389,8 @@ test "laurel.testing: a handler reaches its session through the application" {
         || !contains(issued.value, "Secure")
         || !contains(issued.value, "HttpOnly")
         || !contains(issued.value, "SameSite=Lax")
-        || !contains(issued.value, "Path=/")) { ret 7; }
+        || !contains(issued.value, "Path=/")
+        || contains(issued.value, "Max-Age")) { ret 7; }
     # a route that never touches a session emits no cookie at all
     if (invoke(?harness, get_request(fields, view.view("/orders/42", 10),
         view.view("harness-s2", 10)), ?result) != INVOKE_OK
