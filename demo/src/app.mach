@@ -188,8 +188,7 @@ fun init_sessions(demo: *Application) bool {
     if (!session.init_protected_codec(?demo.codec, ?demo.ring, entropy, nonce,
         session.REPLAY_ALLOW, replay, session.AES_256_GCM, 60,
         handlers.SESSION_LIFETIME_S, session.MAX_CONTEXT_BYTES)) { ret false; }
-    # secure_cookie leaves max_age at 0, and a Set-Cookie carrying Max-Age=0
-    # tells the client to delete the cookie, so the policy gets a real lifetime
+    # secure_cookie leaves max_age at 0 for a session cookie; the demo sets a real lifetime
     var cookie_policy: session.CookiePolicy =
         session.secure_cookie("laurel_demo_session");
     cookie_policy.max_age = handlers.SESSION_LIFETIME_S;
