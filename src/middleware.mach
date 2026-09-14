@@ -1,18 +1,5 @@
 # single-pass middleware and error execution
 
-use A: std.allocator;
-use std.types.option.opt;
-use std.types.result.res;
-use std.types.error.err;
-use std.allocator.fixed;
-use std.chrono.time;
-use std.sync.cancel;
-use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
-use std.types.size.usize;
-use std.types.string.str;
-use std.types.view;
 use http.core.body;
 use http.core.exchange;
 use http.core.field;
@@ -22,24 +9,37 @@ use http.core.target;
 use laurel.context;
 use laurel.error;
 use laurel.handler;
-
-
-
-
+use A: std.allocator;
+use std.allocator.fixed;
+use std.chrono.time;
+use std.sync.cancel;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.view;
 
 fun fixed_ok(outcome: err[A.Error]) bool {
     ret sel outcome.ok;
 }
+
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
 
 fun transition_ok(outcome: cancel.Transition) bool {
     ret (sel outcome.ok) && outcome.ok;
-}fun scope_active(scope: *cancel.Scope) bool {
+}
+
+fun scope_active(scope: *cancel.Scope) bool {
     val reason: cancel.Reason = cancel.reason(scope);
     ret sel reason.active;
 }
+
 pub def PanicPolicy: u8;
 pub val PANIC_ABORT: PanicPolicy = 1;
 
@@ -161,12 +161,12 @@ fun advance(execution: *Execution, index: usize)
     }
     val slot: *Slot = ?execution.slots[index];
     slot.execution_id = execution.execution_id;
-    slot.index = index;
-    slot.calls = 0;
-    slot.active = true;
+    slot.index        = index;
+    slot.calls        = 0;
+    slot.active       = true;
     val next_handler: Next = Next{context: execution.context,
         request_generation: execution.generation,
-        execution_id: execution.execution_id, index: index};
+        execution_id:       execution.execution_id, index: index};
     val result: res[u8, error.AppError] = slot.middleware.call(
         slot.middleware.ctx, next_handler, execution.context);
     slot.active = false;
@@ -281,12 +281,12 @@ fun execute_claimed(source_items: *Middleware, source_len: usize,
     }
     i = 0;
     for (i < source_len) {
-        execution.slots[i].middleware = source_items[i];
+        execution.slots[i].middleware   = source_items[i];
         execution.slots[i].execution_id = execution.execution_id;
-        execution.slots[i].index = i;
-        execution.slots[i].calls = 0;
-        execution.slots[i].active = false;
-        i = i + 1;
+        execution.slots[i].index        = i;
+        execution.slots[i].calls        = 0;
+        execution.slots[i].active       = false;
+        i                               = i + 1;
     }
     val result: res[u8, error.AppError] = advance(execution, 0);
     execution.active = false;
@@ -318,15 +318,15 @@ pub fun execute(stack: *Stack, terminal: handler.Handler,
         val app_error: error.AppError = internal("invalid middleware policy or input");
         ret unmapped(app_error, "error mapper unavailable");
     }
-    var source_items: *Middleware = nil;
-    var source_len: usize = 0;
-    val stack_supplied: bool = stack != nil;
+    var source_items:   *Middleware = nil;
+    var source_len:     usize       = 0;
+    val stack_supplied: bool        = stack != nil;
     if (stack_supplied) {
         source_items = stack.items;
-        source_len = stack.len;
+        source_len   = stack.len;
     }
     var execution: Execution = Execution{terminal: terminal,
-        context: request_context, slots: nil, len: source_len,
+        context:    request_context, slots: nil, len: source_len,
         generation: request_context.generation, execution_id: 0, active: true};
     var execution_id: u64 = 0;
     if (!context.claim_execution(request_context, (?execution)::ptr,
@@ -410,29 +410,29 @@ fun fixture_init(fixture: *Fixture, generation: u64) bool {
     val request_trailers: field.Fields = field.init(?fixture.request_trailers[0], 1,
         fixture.limits.request_trailers);
     val metadata: message.Metadata = message.Metadata{
-        version: message.version_h1(1, 1), secure: true, early_data: false,
-        peer: message.unspecified_endpoint(), local: message.unspecified_endpoint(),
+        version:     message.version_h1(1, 1), secure: true, early_data: false,
+        peer:        message.unspecified_endpoint(), local: message.unspecified_endpoint(),
         received_at: time.Time{sec: 1, nsec: 0}, has_deadline: false,
-        deadline: time.Time{sec: 0, nsec: 0}, request_index: generation,
+        deadline:    time.Time{sec: 0, nsec: 0}, request_index: generation,
     };
     if (!message.init_request(?fixture.request,
         method.from_kind(method.GET),
         target.origin(view.view("/", 1), view.view("/", 1),
-            view.view(nil, 0)), metadata, request_fields, request_trailers,
+        view.view(nil, 0)), metadata, request_fields, request_trailers,
         ?fixture.request_body, generation, fixture.limits)
         || !message.init_response(?fixture.response,
-            ?fixture.response_fields[0], 8, ?fixture.response_trailers[0], 4,
-            generation, fixture.limits)
+        ?fixture.response_fields[0], 8, ?fixture.response_trailers[0], 4,
+        generation, fixture.limits)
         || !exchange.init(?fixture.exchange, ?fixture.request,
-            ?fixture.response, ?fixture.informationals[0], 4,
-            ?fixture.scope, generation, fixture.limits)
+        ?fixture.response, ?fixture.informationals[0], 4,
+        ?fixture.scope, generation, fixture.limits)
         || !exchange.begin(?fixture.exchange)
         || !fixed_ok(fixed.make(?fixture.allocator,
-            ?fixture.allocation_state, ?fixture.allocation_bytes[0], 32768))
+        ?fixture.allocation_state, ?fixture.allocation_bytes[0], 32768))
         || !context.bind(?fixture.request_context, ?fixture.exchange,
-            context.Params{items: nil, len: 0, generation: generation},
-            8, ?fixture.allocator, fixture::ptr, 1, nil,
-            view.view("request", 7), 64)) { ret false; }
+        context.Params{items: nil, len: 0, generation: generation},
+        8, ?fixture.allocator, fixture::ptr, 1, nil,
+        view.view("request", 7), 64)) { ret false; }
     ret true;
 }
 
@@ -448,7 +448,7 @@ fun fixture_end(fixture: *Fixture) bool {
 fun record(trace: *Trace, event: u8) bool {
     if (trace == nil || trace.len >= 16) { ret false; }
     trace.events[trace.len] = event;
-    trace.len = trace.len + 1;
+    trace.len               = trace.len + 1;
     ret true;
 }
 
@@ -487,7 +487,7 @@ fun short_middleware(ctx: ptr, next_handler: Next,
 
 fun double_middleware(ctx: ptr, next_handler: Next,
     request_context: *context.Context) res[u8, error.AppError] {
-    val first: res[u8, error.AppError] = call(next_handler, request_context);
+    val first:  res[u8, error.AppError] = call(next_handler, request_context);
     val second: res[u8, error.AppError] = call(next_handler, request_context);
     if (sel second.ok) {
         ret res[u8, error.AppError].err{internal("second next call succeeded")};
@@ -564,7 +564,7 @@ fun mutate_stack_middleware(ctx: ptr, next_handler: Next,
         ret res[u8, error.AppError].err{internal("invalid stack mutation test")};
     }
     mutation.stack.items = mutation.replacement_items;
-    mutation.stack.len = mutation.replacement_len;
+    mutation.stack.len   = mutation.replacement_len;
     ret call(next_handler, request_context);
 }
 
@@ -576,7 +576,7 @@ fun reentrant_middleware(ctx: ptr, next_handler: Next,
     }
     val inner: Outcome = execute(reentrant.stack, reentrant.terminal,
         reentrant.mapper, request_context, policy_default());
-    reentrant.calls = reentrant.calls + 1;
+    reentrant.calls        = reentrant.calls + 1;
     reentrant.inner_status = inner.status;
     if (inner.status != EXECUTION_ERROR_UNMAPPED) {
         ret res[u8, error.AppError].err{internal("reentrant execution was accepted")};
@@ -601,7 +601,7 @@ fun reentrant_mapper(ctx: ptr, app_error: error.AppError,
     val inner: Outcome = execute(reentrant.stack, reentrant.terminal,
         error.Mapper{ctx: nil, render: failing_mapper}, request_context,
         policy_default());
-    reentrant.calls = reentrant.calls + 1;
+    reentrant.calls        = reentrant.calls + 1;
     reentrant.inner_status = inner.status;
     ret res[u8, error.RenderFailure].err{error.render_failure(
         "mapper stack-local failure")};
@@ -644,13 +644,13 @@ test "laurel.middleware: before next and after order is single pass" {
     var fixture: Fixture;
     if (!fixture_init(?fixture, 31)) { ret 1; }
     var renderer: error.Default;
-    val mapper: error.Mapper = default_error_mapper(?fixture, ?renderer);
+    val mapper:   error.Mapper = default_error_mapper(?fixture, ?renderer);
     if (mapper.render == nil) { ret 2; }
     var trace: Trace;
     var items: [2]Middleware;
     items[0] = Middleware{ctx: ?trace, call: first_middleware};
     items[1] = Middleware{ctx: ?trace, call: second_middleware};
-    var stack: Stack = Stack{items: ?items[0], len: 2};
+    var stack:     Stack   = Stack{items: ?items[0], len: 2};
     val completed: Outcome = execute(?stack,
         handler.Handler{ctx: ?trace, call: traced_terminal}, mapper,
         ?fixture.request_context, policy_default());
@@ -658,10 +658,10 @@ test "laurel.middleware: before next and after order is single pass" {
         || trace.terminal_calls != 1 || trace.events[0] != 1
         || trace.events[1] != 2 || trace.events[2] != 3
         || trace.events[3] != 4 || trace.events[4] != 5) { ret 3; }
-    trace.len = 0;
+    trace.len            = 0;
     trace.terminal_calls = 0;
-    items[0] = Middleware{ctx: ?trace, call: short_middleware};
-    stack.len = 1;
+    items[0]             = Middleware{ctx: ?trace, call: short_middleware};
+    stack.len            = 1;
     val shorted: Outcome = execute(?stack,
         handler.Handler{ctx: ?trace, call: traced_terminal}, mapper,
         ?fixture.request_context, policy_default());
@@ -676,11 +676,11 @@ test "laurel.middleware: before next and after order is single pass" {
         || invalid.app_error.kind != error.INTERNAL
         || trace.terminal_calls != 0
         || fixture.response.status != 500) { ret 5; }
-    var rendered: [64]u8;
+    var rendered:     [64]u8;
     var rendered_len: usize = 0;
     if (!response_text(?fixture, ?rendered[0], 64, ?rendered_len)
         || !bytes_equal(?rendered[0], rendered_len,
-            "internal server error", 21) || !fixture_end(?fixture)) { ret 6; }
+        "internal server error", 21) || !fixture_end(?fixture)) { ret 6; }
     ret 0;
 }
 
@@ -688,13 +688,14 @@ test "laurel.middleware: next is at most once and private errors never render" {
     var fixture: Fixture;
     if (!fixture_init(?fixture, 41)) { ret 1; }
     var renderer: error.Default;
-    val mapper: error.Mapper = default_error_mapper(?fixture, ?renderer);
-    var trace: Trace;
-    var item: Middleware = Middleware{ctx: ?trace, call: double_middleware};
+    val mapper:   error.Mapper = default_error_mapper(?fixture, ?renderer);
+    var trace:    Trace;
+    var item:     Middleware   = Middleware{ctx: ?trace, call: double_middleware};
     if (message.add_field(?fixture.response, field.Field{
-        name: view.view("x-private", 9), value: view.view("top-secret", 10),
-        sensitive: true}) != field.ADD_OK) { ret 2; }
-    var stack: Stack = Stack{items: ?item, len: 1};
+        name:      view.view("x-private", 9), value: view.view("top-secret", 10),
+        sensitive: true
+    }) != field.ADD_OK) { ret 2; }
+    var stack:   Stack   = Stack{items: ?item, len: 1};
     val doubled: Outcome = execute(?stack,
         handler.Handler{ctx: ?trace, call: traced_terminal}, mapper,
         ?fixture.request_context, policy_default());
@@ -702,31 +703,31 @@ test "laurel.middleware: next is at most once and private errors never render" {
         || doubled.app_error.kind != error.INTERNAL
         || trace.terminal_calls != 1 || fixture.response.status != 500
         || fixture.response.fields.len != 2) { ret 3; }
-    var rendered: [64]u8;
+    var rendered:     [64]u8;
     var rendered_len: usize = 0;
     if (!response_text(?fixture, ?rendered[0], 64, ?rendered_len)
         || !bytes_equal(?rendered[0], rendered_len,
-            "internal server error", 21) || !fixture_end(?fixture)) { ret 4; }
+        "internal server error", 21) || !fixture_end(?fixture)) { ret 4; }
 
     var private_fixture: Fixture;
     if (!fixture_init(?private_fixture, 42)) { ret 5; }
     var private_renderer: error.Default;
-    val private_mapper: error.Mapper = default_error_mapper(
+    val private_mapper:   error.Mapper = default_error_mapper(
         ?private_fixture, ?private_renderer);
-    var empty_stack: Stack = Stack{items: nil, len: 0};
-    val hidden: Outcome = execute(?empty_stack,
+    var empty_stack: Stack   = Stack{items: nil, len: 0};
+    val hidden:      Outcome = execute(?empty_stack,
         handler.Handler{ctx: nil, call: private_error_terminal}, private_mapper,
         ?private_fixture.request_context, policy_default());
     rendered_len = 0;
     if (hidden.status != EXECUTION_ERROR_RENDERED
         || !response_text(?private_fixture, ?rendered[0], 64, ?rendered_len)
         || !bytes_equal(?rendered[0], rendered_len,
-            "internal server error", 21) || !fixture_end(?private_fixture)) { ret 6; }
+        "internal server error", 21) || !fixture_end(?private_fixture)) { ret 6; }
 
     var action_fixture: Fixture;
     if (!fixture_init(?action_fixture, 43)) { ret 7; }
     var action_renderer: error.Default;
-    val action_mapper: error.Mapper = default_error_mapper(
+    val action_mapper:   error.Mapper = default_error_mapper(
         ?action_fixture, ?action_renderer);
     trace.terminal_calls = 0;
     val bad_action: Outcome = execute(?empty_stack,
@@ -738,18 +739,18 @@ test "laurel.middleware: next is at most once and private errors never render" {
     rendered_len = 0;
     if (!response_text(?action_fixture, ?rendered[0], 64, ?rendered_len)
         || !bytes_equal(?rendered[0], rendered_len,
-            "internal server error", 21) || !fixture_end(?action_fixture)) { ret 9; }
+        "internal server error", 21) || !fixture_end(?action_fixture)) { ret 9; }
 
     var copied_fixture: Fixture;
     if (!fixture_init(?copied_fixture, 44)) { ret 10; }
     var copied_renderer: error.Default;
-    val copied_mapper: error.Mapper = default_error_mapper(
+    val copied_mapper:   error.Mapper = default_error_mapper(
         ?copied_fixture, ?copied_renderer);
     var source: MutableError;
-    var i: usize = 0;
+    var i:      usize = 0;
     for (i < 14) {
         source.message[i] = "original error"[i];
-        i = i + 1;
+        i                 = i + 1;
     }
     val copied: Outcome = execute(?empty_stack,
         handler.Handler{ctx: ?source, call: mutable_error_terminal},
@@ -757,17 +758,17 @@ test "laurel.middleware: next is at most once and private errors never render" {
     i = 0;
     for (i < 14) {
         source.message[i] = 'x';
-        i = i + 1;
+        i                 = i + 1;
     }
     rendered_len = 0;
     if (copied.status != EXECUTION_ERROR_RENDERED
         || copied_fixture.response.status != 409
         || !response_text(?copied_fixture, ?rendered[0], 64, ?rendered_len)
         || !bytes_equal(?rendered[0], rendered_len,
-            "original error", 14)
+        "original error", 14)
         || !bytes_equal(error.public_text(?copied.app_error).data,
-            error.public_text(?copied.app_error).len,
-            "original error", 14)
+        error.public_text(?copied.app_error).len,
+        "original error", 14)
         || !fixture_end(?copied_fixture)) { ret 11; }
     ret 0;
 }
@@ -776,12 +777,12 @@ test "laurel.middleware: nested errors and cancellation unwind in order" {
     var fixture: Fixture;
     if (!fixture_init(?fixture, 51)) { ret 1; }
     var renderer: error.Default;
-    val mapper: error.Mapper = default_error_mapper(?fixture, ?renderer);
-    var trace: Trace;
-    var items: [2]Middleware;
+    val mapper:   error.Mapper = default_error_mapper(?fixture, ?renderer);
+    var trace:    Trace;
+    var items:    [2]Middleware;
     items[0] = Middleware{ctx: ?trace, call: replace_error};
     items[1] = Middleware{ctx: ?trace, call: inner_error};
-    var stack: Stack = Stack{items: ?items[0], len: 2};
+    var stack:  Stack   = Stack{items: ?items[0], len: 2};
     val nested: Outcome = execute(?stack,
         handler.Handler{ctx: ?trace, call: traced_terminal}, mapper,
         ?fixture.request_context, policy_default());
@@ -790,19 +791,19 @@ test "laurel.middleware: nested errors and cancellation unwind in order" {
         || trace.events[0] != 1 || trace.events[1] != 2
         || trace.events[2] != 3 || trace.terminal_calls != 0
         || fixture.response.status != 409) { ret 2; }
-    var rendered: [64]u8;
+    var rendered:     [64]u8;
     var rendered_len: usize = 0;
     if (!response_text(?fixture, ?rendered[0], 64, ?rendered_len)
         || !bytes_equal(?rendered[0], rendered_len,
-            "outer conflict", 14) || !fixture_end(?fixture)) { ret 3; }
+        "outer conflict", 14) || !fixture_end(?fixture)) { ret 3; }
 
     var cancelled_fixture: Fixture;
     if (!fixture_init(?cancelled_fixture, 52)) { ret 4; }
     var cancelled_renderer: error.Default;
-    val cancelled_mapper: error.Mapper = default_error_mapper(
+    val cancelled_mapper:   error.Mapper = default_error_mapper(
         ?cancelled_fixture, ?cancelled_renderer);
     var cancelled_trace: Trace;
-    var cancel_item: Middleware = Middleware{ctx: ?cancelled_trace,
+    var cancel_item:     Middleware = Middleware{ctx: ?cancelled_trace,
         call: cancel_middleware};
     stack = Stack{items: ?cancel_item, len: 1};
     val cancelled: Outcome = execute(?stack,
@@ -822,7 +823,7 @@ test "laurel.middleware: stack snapshots survive growth and shrinkage" {
     var shrink_fixture: Fixture;
     if (!fixture_init(?shrink_fixture, 61)) { ret 1; }
     var shrink_renderer: error.Default;
-    val shrink_mapper: error.Mapper = default_error_mapper(
+    val shrink_mapper:   error.Mapper = default_error_mapper(
         ?shrink_fixture, ?shrink_renderer);
     var shrink_trace: Trace;
     var shrink_stack: Stack;
@@ -832,7 +833,7 @@ test "laurel.middleware: stack snapshots survive growth and shrinkage" {
     shrink_items[0] = Middleware{ctx: ?shrink_state,
         call: mutate_stack_middleware};
     shrink_items[1] = Middleware{ctx: ?shrink_trace, call: second_middleware};
-    shrink_stack = Stack{items: ?shrink_items[0], len: 2};
+    shrink_stack    = Stack{items: ?shrink_items[0], len: 2};
     val shrunk: Outcome = execute(?shrink_stack,
         handler.Handler{ctx: ?shrink_trace, call: traced_terminal},
         shrink_mapper, ?shrink_fixture.request_context, policy_default());
@@ -846,15 +847,15 @@ test "laurel.middleware: stack snapshots survive growth and shrinkage" {
     var grow_fixture: Fixture;
     if (!fixture_init(?grow_fixture, 62)) { ret 3; }
     var grow_renderer: error.Default;
-    val grow_mapper: error.Mapper = default_error_mapper(
+    val grow_mapper:   error.Mapper = default_error_mapper(
         ?grow_fixture, ?grow_renderer);
-    var grow_trace: Trace;
-    var grow_stack: Stack;
+    var grow_trace:  Trace;
+    var grow_stack:  Stack;
     var replacement: [2]Middleware;
     replacement[0] = Middleware{ctx: ?grow_trace, call: short_middleware};
     replacement[1] = Middleware{ctx: ?grow_trace, call: short_middleware};
     var grow_state: StackMutation = StackMutation{trace: ?grow_trace,
-        stack: ?grow_stack, replacement_items: ?replacement[0],
+        stack:           ?grow_stack, replacement_items: ?replacement[0],
         replacement_len: 2};
     var grow_item: Middleware = Middleware{ctx: ?grow_state,
         call: mutate_stack_middleware};
@@ -874,14 +875,14 @@ test "laurel.middleware: next retention and reentrancy fail closed" {
     var retained_fixture: Fixture;
     if (!fixture_init(?retained_fixture, 71)) { ret 1; }
     var retained_renderer: error.Default;
-    val retained_mapper: error.Mapper = default_error_mapper(
+    val retained_mapper:   error.Mapper = default_error_mapper(
         ?retained_fixture, ?retained_renderer);
-    var retained: RetainedNext;
-    var trace: Trace;
+    var retained:      RetainedNext;
+    var trace:         Trace;
     var retained_item: Middleware = Middleware{ctx: ?retained,
         call: retain_middleware};
-    var retained_stack: Stack = Stack{items: ?retained_item, len: 1};
-    val completed: Outcome = execute(?retained_stack,
+    var retained_stack: Stack   = Stack{items: ?retained_item, len: 1};
+    val completed:      Outcome = execute(?retained_stack,
         handler.Handler{ctx: ?trace, call: traced_terminal}, retained_mapper,
         ?retained_fixture.request_context, policy_default());
     if (completed.status != EXECUTION_RESPOND || !retained.saved
@@ -895,14 +896,14 @@ test "laurel.middleware: next retention and reentrancy fail closed" {
     var reentrant_fixture: Fixture;
     if (!fixture_init(?reentrant_fixture, 72)) { ret 4; }
     var reentrant_renderer: error.Default;
-    val reentrant_mapper: error.Mapper = default_error_mapper(
+    val reentrant_mapper:   error.Mapper = default_error_mapper(
         ?reentrant_fixture, ?reentrant_renderer);
     var reentrant_trace: Trace;
     var reentrant_stack: Stack;
-    var reentrant: Reentrant = Reentrant{trace: ?reentrant_trace,
-        stack: ?reentrant_stack,
+    var reentrant:       Reentrant = Reentrant{trace: ?reentrant_trace,
+        stack:    ?reentrant_stack,
         terminal: handler.Handler{ctx: ?reentrant_trace,
-            call: traced_terminal}, mapper: reentrant_mapper, calls: 0, inner_status: 0};
+        call:     traced_terminal}, mapper: reentrant_mapper, calls: 0, inner_status: 0};
     var reentrant_item: Middleware = Middleware{ctx: ?reentrant,
         call: reentrant_middleware};
     reentrant_stack = Stack{items: ?reentrant_item, len: 1};
@@ -923,9 +924,9 @@ test "laurel.middleware: pre-cancel and allocator failures do not render" {
     var cancelled_fixture: Fixture;
     if (!fixture_init(?cancelled_fixture, 81)) { ret 1; }
     var cancelled_renderer: error.Default;
-    val cancelled_mapper: error.Mapper = default_error_mapper(
+    val cancelled_mapper:   error.Mapper = default_error_mapper(
         ?cancelled_fixture, ?cancelled_renderer);
-    var trace: Trace;
+    var trace:       Trace;
     var empty_stack: Stack = Stack{items: nil, len: 0};
     if (!transition_ok(cancel.cancel(?cancelled_fixture.scope))) { ret 2; }
     val cancelled: Outcome = execute(?empty_stack,
@@ -940,7 +941,7 @@ test "laurel.middleware: pre-cancel and allocator failures do not render" {
     var timed_fixture: Fixture;
     if (!fixture_init(?timed_fixture, 82)) { ret 4; }
     var timed_renderer: error.Default;
-    val timed_mapper: error.Mapper = default_error_mapper(
+    val timed_mapper:   error.Mapper = default_error_mapper(
         ?timed_fixture, ?timed_renderer);
     if (!transition_ok(cancel.timeout(?timed_fixture.scope))) { ret 5; }
     val timed: Outcome = execute(?empty_stack,
@@ -955,7 +956,7 @@ test "laurel.middleware: pre-cancel and allocator failures do not render" {
     var allocator_fixture: Fixture;
     if (!fixture_init(?allocator_fixture, 83)) { ret 7; }
     var allocator_renderer: error.Default;
-    val allocator_mapper: error.Mapper = default_error_mapper(
+    val allocator_mapper:   error.Mapper = default_error_mapper(
         ?allocator_fixture, ?allocator_renderer);
     allocator_fixture.allocator.fn_allocate = nil;
     val direct: res[u8, error.RenderFailure] = allocator_mapper.render(
@@ -974,23 +975,24 @@ test "laurel.middleware: pre-cancel and allocator failures do not render" {
 test "laurel.middleware: mapper failures are value owned" {
     var fixture: Fixture;
     if (!fixture_init(?fixture, 91)) { ret 1; }
-    var empty_stack: Stack = Stack{items: nil, len: 0};
-    val mapped: Outcome = execute(?empty_stack,
+    var empty_stack: Stack   = Stack{items: nil, len: 0};
+    val mapped:      Outcome = execute(?empty_stack,
         handler.Handler{ctx: nil, call: private_error_terminal},
         error.Mapper{ctx: nil, render: failing_mapper},
         ?fixture.request_context, policy_default());
     val detail: view.View = error.render_failure_view(?mapped.render_error);
     if (mapped.status != EXECUTION_ERROR_UNMAPPED
         || !bytes_equal(detail.data, detail.len,
-            "mapper stack-local failure", 26)
+        "mapper stack-local failure", 26)
         || !fixture_end(?fixture)) { ret 2; }
 
     var reentrant_fixture: Fixture;
     if (!fixture_init(?reentrant_fixture, 92)) { ret 3; }
-    var reentrant_stack: Stack = Stack{items: nil, len: 0};
-    var mapper_state: ReentrantMapper = ReentrantMapper{
-        stack: ?reentrant_stack,
-        terminal: handler.Handler{ctx: nil, call: private_error_terminal}, calls: 0, inner_status: 0};
+    var reentrant_stack: Stack           = Stack{items: nil, len: 0};
+    var mapper_state:    ReentrantMapper = ReentrantMapper{
+        stack:    ?reentrant_stack,
+        terminal: handler.Handler{ctx: nil, call: private_error_terminal}, calls: 0, inner_status: 0
+    };
     val reentrant: Outcome = execute(?reentrant_stack, mapper_state.terminal,
         error.Mapper{ctx: ?mapper_state, render: reentrant_mapper},
         ?reentrant_fixture.request_context, policy_default());

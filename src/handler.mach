@@ -1,8 +1,8 @@
 # application handler contract
 
-use std.types.result.res;
 use laurel.context;
 use laurel.error;
+use std.types.result.res;
 
 pub val RESPOND: u8 = 1;
 pub val NEXT:    u8 = 2;

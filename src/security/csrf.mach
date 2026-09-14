@@ -1,19 +1,5 @@
 # bounded csrf tokens with explicit binding and key rotation
 
-use A: std.allocator;
-use std.types.error.err;
-use std.types.option.opt;
-use std.allocator.fixed;
-use std.chrono.time;
-use std.crypto.ct;
-use std.encoding.base64;
-use std.sync.cancel;
-use std.sync.mutex;
-use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
-use std.types.size.usize;
-use std.types.view;
 use crypto.contracts;
 use crypto.hmac;
 use http.core.body;
@@ -23,104 +9,118 @@ use http.core.message;
 use http.core.method;
 use http.core.target;
 use laurel.context;
-
-
-
+use A: std.allocator;
+use std.allocator.fixed;
+use std.chrono.time;
+use std.crypto.ct;
+use std.encoding.base64;
+use std.sync.cancel;
+use std.sync.mutex;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.size.usize;
+use std.types.view;
 
 fun fixed_ok(outcome: err[A.Error]) bool {
     ret sel outcome.ok;
 }
+
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
-}pub val KEY_BYTES: usize = 32;
-pub val NONCE_BYTES: usize = 16;
-pub val TAG_BYTES: usize = 32;
-pub val MAX_BINDING_BYTES: usize = 256;
-pub val MAX_KEY_GENERATIONS: usize = 16;
+}
+
+pub val KEY_BYTES:            usize = 32;
+pub val NONCE_BYTES:          usize = 16;
+pub val TAG_BYTES:            usize = 32;
+pub val MAX_BINDING_BYTES:    usize = 256;
+pub val MAX_KEY_GENERATIONS:  usize = 16;
 pub val MAX_REGISTERED_RINGS: usize = 8;
-pub val RAW_HEADER_BYTES: usize = 40;
-pub val RAW_TOKEN_BYTES: usize = 72;
-pub val TOKEN_BYTES: usize = 96;
-pub val TOKEN_CAPACITY: usize = 97;
+pub val RAW_HEADER_BYTES:     usize = 40;
+pub val RAW_TOKEN_BYTES:      usize = 72;
+pub val TOKEN_BYTES:          usize = 96;
+pub val TOKEN_CAPACITY:       usize = 97;
 
 pub def BindingMode: u8;
 pub val BIND_SESSION: BindingMode = 1;
 pub val BIND_REQUEST: BindingMode = 2;
 
 pub def Status: u8;
-pub val OK: Status = 0;
-pub val INVALID: Status = 1;
-pub val OUTPUT_TOO_SMALL: Status = 2;
+pub val OK:                  Status = 0;
+pub val INVALID:             Status = 1;
+pub val OUTPUT_TOO_SMALL:    Status = 2;
 pub val ENTROPY_UNAVAILABLE: Status = 3;
-pub val KEY_UNAVAILABLE: Status = 4;
-pub val NOT_YET_VALID: Status = 5;
-pub val EXPIRED: Status = 6;
-pub val AUTH_FAILED: Status = 7;
-pub val WRONG_BINDING: Status = 8;
-pub val MISSING: Status = 9;
-pub val PROVIDER_VIOLATION: Status = 10;
+pub val KEY_UNAVAILABLE:     Status = 4;
+pub val NOT_YET_VALID:       Status = 5;
+pub val EXPIRED:             Status = 6;
+pub val AUTH_FAILED:         Status = 7;
+pub val WRONG_BINDING:       Status = 8;
+pub val MISSING:             Status = 9;
+pub val PROVIDER_VIOLATION:  Status = 10;
 
 pub rec Policy {
-    binding: BindingMode;
-    max_age_s: i64;
-    clock_skew_s: i64;
+    binding:        BindingMode;
+    max_age_s:      i64;
+    clock_skew_s:   i64;
     require_unsafe: bool;
 }
 
 pub rec KeyGeneration {
-    id: u32;
-    key: [32]^u8;
+    id:           u32;
+    key:          [32]^u8;
     activated_at: i64;
-    issue_until: i64;
+    issue_until:  i64;
     verify_until: i64;
 }
 
 pub rec KeyRing {
-    items: *KeyGeneration;
-    len: usize;
-    current_id: u32;
+    items:       *KeyGeneration;
+    len:         usize;
+    current_id:  u32;
     max_retired: usize;
-    lock: mutex.Mutex;
+    lock:        mutex.Mutex;
     initialized: bool;
-    active: bool;
+    active:      bool;
 }
 
 pub def AliasesStateFun: fun(ptr, *u8, usize) bool;
-pub def FillFun: fun(ptr, *u8, usize) i64;
+pub def FillFun:         fun(ptr, *u8, usize) i64;
 
 pub rec Entropy {
-    ctx: ptr;
-    context_size: usize;
+    ctx:           ptr;
+    context_size:  usize;
     aliases_state: AliasesStateFun;
-    fill: FillFun;
+    fill:          FillFun;
 }
 
 # an opaque public name for one registered key ring; it holds no pointer, so
 # nothing reachable from a Protector leads to secret-welded storage
 pub rec Handle {
-    slot: u32;
+    slot:       u32;
     generation: u32;
 }
 
 pub rec Protector {
-    ring: Handle;
+    ring:    Handle;
     entropy: Entropy;
-    policy: Policy;
-    active: bool;
+    policy:  Policy;
+    active:  bool;
 }
 
 # the resolved private view of a Protector, used only inside this module
 rec Snapshot {
-    ring: *KeyRing;
+    ring:    *KeyRing;
     entropy: Entropy;
-    policy: Policy;
-    active: bool;
+    policy:  Policy;
+    active:  bool;
 }
 
 pub rec Operation {
-    status: Status;
-    written: usize;
-    key_id: u32;
+    status:         Status;
+    written:        usize;
+    key_id:         u32;
     needs_rotation: bool;
 }
 
@@ -130,7 +130,7 @@ fun operation(status: Status) Operation {
 }
 
 fun range_valid(data: *u8, len: usize) bool {
-    if (len == 0) { ret true; }
+    if (len == 0)    { ret true; }
     if (data == nil) { ret false; }
     ret len - 1 <= ~(0::usize) - data::usize;
 }
@@ -149,7 +149,7 @@ fun overlap(first: *u8, first_len: usize, second: *u8,
     if (!range_valid(first, first_len) || !range_valid(second, second_len)) {
         ret true;
     }
-    val first_start: usize = first::usize;
+    val first_start:  usize = first::usize;
     val second_start: usize = second::usize;
     ret first_start <= second_start + second_len - 1 &&
         second_start <= first_start + first_len - 1;
@@ -160,7 +160,7 @@ fun clear(data: *u8, len: usize) {
     var i: usize = 0;
     for (i < len) {
         data[i] = 0;
-        i = i + 1;
+        i       = i + 1;
     }
 }
 
@@ -172,7 +172,7 @@ fun view_valid(value: view.View) bool {
 fun ring_anchor(ring: *KeyRing) *u8 {
     if (ring == nil) { ret nil; }
     val address: usize = (?ring.initialized)::usize;
-    val offset: usize = $offset_of(KeyRing, initialized);
+    val offset:  usize = $offset_of(KeyRing, initialized);
     if (address < offset) { ret nil; }
     ret (address - offset)::*u8;
 }
@@ -180,7 +180,7 @@ fun ring_anchor(ring: *KeyRing) *u8 {
 fun protector_anchor(protector: *Protector) *u8 {
     if (protector == nil) { ret nil; }
     val address: usize = (?protector.active)::usize;
-    val offset: usize = $offset_of(Protector, active);
+    val offset:  usize = $offset_of(Protector, active);
     if (address < offset) { ret nil; }
     ret (address - offset)::*u8;
 }
@@ -198,7 +198,7 @@ fun ring_shape_valid(ring: *KeyRing) bool {
     if (ring == nil || !range_valid(ring_anchor(ring), $size_of(KeyRing)) ||
         !ring.initialized || ring.len == 0 || ring.len > MAX_KEY_GENERATIONS ||
         ring.len - 1 > ring.max_retired) { ret false; }
-    var data: *u8 = nil;
+    var data:  *u8   = nil;
     var bytes: usize = 0;
     if (!items_range(ring, ?data, ?bytes) ||
         overlap(ring_anchor(ring), $size_of(KeyRing), data, bytes)) { ret false; }
@@ -207,8 +207,8 @@ fun ring_shape_valid(ring: *KeyRing) bool {
         mutex.unlock(?ring.lock);
         ret false;
     }
-    var current: bool = false;
-    var i: usize = 0;
+    var current: bool  = false;
+    var i:       usize = 0;
     for (i < ring.len) {
         val item: *KeyGeneration = ?ring.items[i];
         if (item.id == 0 || item.activated_at < 0 ||
@@ -235,7 +235,7 @@ fun ring_shape_valid(ring: *KeyRing) bool {
 
 fun ring_aliases(ring: *KeyRing, data: *u8, len: usize) bool {
     if (!range_valid(data, len) || !ring_shape_valid(ring)) { ret true; }
-    var items: *u8 = nil;
+    var items: *u8   = nil;
     var bytes: usize = 0;
     if (!items_range(ring, ?items, ?bytes)) { ret true; }
     ret overlap(ring_anchor(ring), $size_of(KeyRing), data, len) ||
@@ -255,10 +255,10 @@ fun key_equal(first: *KeyGeneration, second: *KeyGeneration) bool {
 
 # key rings stay caller owned and secret welded. only this module-private table
 # names them, so no public record ever points at key material.
-var registry_rings: [8]*KeyRing;
+var registry_rings:       [8]*KeyRing;
 var registry_generations: [8]u32;
-var registry_used: [8]bool;
-var registry_lock: mutex.Mutex = 0;
+var registry_used:        [8]bool;
+var registry_lock:        mutex.Mutex = 0;
 
 fun register_ring(ring: *KeyRing, output: *Handle) bool {
     if (ring == nil || output == nil) { ret false; }
@@ -275,9 +275,9 @@ fun register_ring(ring: *KeyRing, output: *Handle) bool {
     for (i < MAX_REGISTERED_RINGS) {
         if (!registry_used[i] && registry_generations[i] != 4294967295) {
             registry_generations[i] = registry_generations[i] + 1;
-            registry_rings[i] = ring;
-            registry_used[i] = true;
-            @output = Handle{slot: i::u32,
+            registry_rings[i]       = ring;
+            registry_used[i]        = true;
+            @output                 = Handle{slot: i::u32,
                 generation: registry_generations[i]};
             mutex.unlock(?registry_lock);
             ret true;
@@ -313,7 +313,7 @@ fun deregister_ring(handle: Handle) bool {
         ret false;
     }
     registry_rings[slot] = nil;
-    registry_used[slot] = false;
+    registry_used[slot]  = false;
     mutex.unlock(?registry_lock);
     ret true;
 }
@@ -338,8 +338,8 @@ pub fun init_ring(ring: *KeyRing, items: *KeyGeneration, len: usize,
     val data: *u8 = (?items[0].id)::*u8;
     if (!range_valid(data, bytes) ||
         overlap(ring_anchor(ring), $size_of(KeyRing), data, bytes)) { ret false; }
-    var found: bool = false;
-    var i: usize = 0;
+    var found: bool  = false;
+    var i:     usize = 0;
     for (i < len) {
         if (items[i].id == 0 || items[i].activated_at < 0 ||
             items[i].issue_until <= items[i].activated_at ||
@@ -354,13 +354,13 @@ pub fun init_ring(ring: *KeyRing, items: *KeyGeneration, len: usize,
         i = i + 1;
     }
     if (!found) { ret false; }
-    ring.items = items;
-    ring.len = len;
-    ring.current_id = current_id;
+    ring.items       = items;
+    ring.len         = len;
+    ring.current_id  = current_id;
     ring.max_retired = max_retired;
-    ring.lock = mutex.make();
+    ring.lock        = mutex.make();
     ring.initialized = true;
-    ring.active = true;
+    ring.active      = true;
     ret true;
 }
 
@@ -401,14 +401,14 @@ pub fun release_ring(ring: *KeyRing) bool {
     var i: usize = 0;
     for (i < ring.len) {
         ct.zeroize(?ring.items[i].key[0], KEY_BYTES);
-        ring.items[i].id = 0;
+        ring.items[i].id           = 0;
         ring.items[i].activated_at = 0;
-        ring.items[i].issue_until = 0;
+        ring.items[i].issue_until  = 0;
         ring.items[i].verify_until = 0;
-        i = i + 1;
+        i                          = i + 1;
     }
     ring.current_id = 0;
-    ring.active = false;
+    ring.active     = false;
     mutex.unlock(?ring.lock);
     ret true;
 }
@@ -445,19 +445,19 @@ fun entropy_primary_disjoint(value: Entropy, protector: *Protector,
     if (!entropy_valid(value) || protector == nil || !ring_shape_valid(ring)) {
         ret false;
     }
-    var items: *u8 = nil;
+    var items:      *u8   = nil;
     var item_bytes: usize = 0;
     ret items_range(ring, ?items, ?item_bytes) &&
         !overlap(value.ctx::*u8, value.context_size,
-            protector_anchor(protector), $size_of(Protector)) &&
+        protector_anchor(protector), $size_of(Protector)) &&
         !overlap(value.ctx::*u8, value.context_size,
-            ring_anchor(ring), $size_of(KeyRing)) &&
+        ring_anchor(ring), $size_of(KeyRing)) &&
         !overlap(value.ctx::*u8, value.context_size, items, item_bytes);
 }
 
 fun entropy_disjoint(value: Entropy, protector: *Protector,
     ring: *KeyRing) bool {
-    var items: *u8 = nil;
+    var items:      *u8   = nil;
     var item_bytes: usize = 0;
     if (!entropy_primary_disjoint(value, protector, ring) ||
         !items_range(ring, ?items, ?item_bytes)) {
@@ -465,9 +465,9 @@ fun entropy_disjoint(value: Entropy, protector: *Protector,
     }
     ret value.aliases_state(value.ctx, value.ctx::*u8, value.context_size) &&
         !value.aliases_state(value.ctx, protector_anchor(protector),
-            $size_of(Protector)) &&
+        $size_of(Protector)) &&
         !value.aliases_state(value.ctx, ring_anchor(ring),
-            $size_of(KeyRing)) &&
+        $size_of(KeyRing)) &&
         !value.aliases_state(value.ctx, items, item_bytes);
 }
 
@@ -488,10 +488,10 @@ pub fun init(protector: *Protector, ring: *KeyRing, entropy: Entropy,
     if (protector.active || !ring_shape_valid(ring)) { ret false; }
     var handle: Handle;
     if (!register_ring(ring, ?handle)) { ret false; }
-    protector.ring = handle;
+    protector.ring    = handle;
     protector.entropy = entropy;
-    protector.policy = policy;
-    protector.active = true;
+    protector.policy  = policy;
+    protector.active  = true;
     ret true;
 }
 
@@ -507,9 +507,9 @@ pub fun valid(protector: *Protector) bool {
         ret false;
     }
     ret !ring_aliases(snapshot.ring, protector_anchor(protector),
-            $size_of(Protector)) &&
+        $size_of(Protector)) &&
         !ring_aliases(snapshot.ring, snapshot.entropy.ctx::*u8,
-            snapshot.entropy.context_size) &&
+        snapshot.entropy.context_size) &&
         entropy_primary_disjoint(snapshot.entropy, protector, snapshot.ring) &&
         protector_equal(snapshot, protector);
 }
@@ -517,7 +517,7 @@ pub fun valid(protector: *Protector) bool {
 pub fun release(protector: *Protector) bool {
     if (!valid(protector)) { ret false; }
     val handle: Handle = protector.ring;
-    protector.ring = Handle{slot: 0, generation: 0};
+    protector.ring    = Handle{slot: 0, generation: 0};
     protector.entropy = Entropy{ctx: nil, context_size: 0,
         aliases_state: nil, fill: nil};
     protector.policy = Policy{binding: 0, max_age_s: 0, clock_skew_s: 0,
@@ -530,12 +530,12 @@ fun external_disjoint(snapshot: Snapshot, protector: *Protector,
     data: *u8, len: usize, consult_provider: bool) bool {
     if (!range_valid(data, len) ||
         overlap(data, len, protector_anchor(protector),
-            $size_of(Protector)) ||
+        $size_of(Protector)) ||
         ring_aliases(snapshot.ring, data, len) ||
         overlap(data, len, snapshot.entropy.ctx::*u8,
-            snapshot.entropy.context_size)) { ret false; }
+        snapshot.entropy.context_size)) { ret false; }
     if (consult_provider && snapshot.entropy.aliases_state(
-            snapshot.entropy.ctx, data, len)) { ret false; }
+        snapshot.entropy.ctx, data, len)) { ret false; }
     ret protector_equal(snapshot, protector);
 }
 
@@ -544,35 +544,35 @@ fun binding_for(snapshot: Snapshot, protector: *Protector,
     storage: *u8, output: *view.View, generation: *u64) bool {
     if (!context.active(request_context) || storage == nil || output == nil ||
         generation == nil || !external_disjoint(snapshot, protector,
-            request_context::*u8, $size_of(context.Context), false)) {
+        request_context::*u8, $size_of(context.Context), false)) {
         ret false;
     }
     var source: view.View = session_id;
     @generation = 0;
     if (snapshot.policy.binding == BIND_REQUEST) {
         if (!view_valid(request_context.request_id)) { ret false; }
-        source = request_context.request_id;
+        source      = request_context.request_id;
         @generation = request_context.generation;
     }
     if (!view_valid(source)) { ret false; }
     if (!external_disjoint(snapshot, protector, source.data, source.len,
-            false)) { ret false; }
+        false)) { ret false; }
     var i: usize = 0;
     for (i < source.len) {
         storage[i] = source.data[i];
-        i = i + 1;
+        i          = i + 1;
     }
     @output = view.view(storage, source.len);
     ret protector_equal(snapshot, protector);
 }
 
 fun write_u16(output: *u8, offset: usize, value: usize) {
-    output[offset] = (value >> 8)::u8;
+    output[offset]     = (value >> 8)::u8;
     output[offset + 1] = value::u8;
 }
 
 fun write_u32(output: *u8, offset: usize, value: u32) {
-    output[offset] = (value >> 24)::u8;
+    output[offset]     = (value >> 24)::u8;
     output[offset + 1] = (value >> 16)::u8;
     output[offset + 2] = (value >> 8)::u8;
     output[offset + 3] = value::u8;
@@ -582,7 +582,7 @@ fun write_u64(output: *u8, offset: usize, value: u64) {
     var i: usize = 0;
     for (i < 8) {
         output[offset + i] = (value >> ((7 - i) * 8))::u8;
-        i = i + 1;
+        i                  = i + 1;
     }
 }
 
@@ -596,11 +596,11 @@ fun read_u32(input: *u8, offset: usize) u32 {
 }
 
 fun read_u64(input: *u8, offset: usize) u64 {
-    var value: u64 = 0;
-    var i: usize = 0;
+    var value: u64   = 0;
+    var i:     usize = 0;
     for (i < 8) {
         value = (value << 8) | input[offset + i]::u64;
-        i = i + 1;
+        i     = i + 1;
     }
     ret value;
 }
@@ -609,12 +609,12 @@ fun build_message(header: *u8, binding: view.View, output: *u8) usize {
     var i: usize = 0;
     for (i < RAW_HEADER_BYTES) {
         output[i] = header[i];
-        i = i + 1;
+        i         = i + 1;
     }
     i = 0;
     for (i < binding.len) {
         output[RAW_HEADER_BYTES + i] = binding.data[i];
-        i = i + 1;
+        i                            = i + 1;
     }
     ret RAW_HEADER_BYTES + binding.len;
 }
@@ -622,8 +622,8 @@ fun build_message(header: *u8, binding: view.View, output: *u8) usize {
 fun make_tag(key: *KeyGeneration, header: *u8, binding: view.View,
     output: *u8) bool {
     var authenticated: [RAW_HEADER_BYTES + MAX_BINDING_BYTES]u8;
-    val len: usize = build_message(header, binding, ?authenticated[0]);
-    val result: contracts.Operation = hmac.sha256(
+    val len:           usize               = build_message(header, binding, ?authenticated[0]);
+    val result:        contracts.Operation = hmac.sha256(
         contracts.SecretBytes{data: ?key.key[0], len: KEY_BYTES},
         contracts.Bytes{data: ?authenticated[0], len: len},
         contracts.Buffer{data: output, capacity: TAG_BYTES});
@@ -656,18 +656,18 @@ pub fun issue(protector: *Protector, request_context: *context.Context,
     if (!valid(protector)) { ret operation(INVALID); }
     var snapshot: Snapshot;
     if (!snapshot_of(protector, ?snapshot)) { ret operation(INVALID); }
-    if (output_capacity < TOKEN_CAPACITY) { ret operation(OUTPUT_TOO_SMALL); }
+    if (output_capacity < TOKEN_CAPACITY)   { ret operation(OUTPUT_TOO_SMALL); }
     if (now < 0 || output == nil || !range_valid(output, TOKEN_CAPACITY) ||
         !external_disjoint(snapshot, protector, output, TOKEN_CAPACITY, true) ||
         overlap(output, TOKEN_CAPACITY, request_context::*u8,
-            $size_of(context.Context))) { ret operation(INVALID); }
+        $size_of(context.Context))) { ret operation(INVALID); }
     var binding_storage: [MAX_BINDING_BYTES]u8;
-    var binding: view.View;
-    var generation: u64 = 0;
+    var binding:         view.View;
+    var generation:      u64 = 0;
     if (!binding_for(snapshot, protector, request_context, session_id,
-            ?binding_storage[0], ?binding, ?generation) ||
+        ?binding_storage[0], ?binding, ?generation) ||
         overlap(output, TOKEN_CAPACITY, binding.data,
-            binding.len)) { ret operation(WRONG_BINDING); }
+        binding.len)) { ret operation(WRONG_BINDING); }
     var raw: [RAW_TOKEN_BYTES]u8;
     clear(?raw[0], RAW_TOKEN_BYTES);
     val entropy_status: Status = fill_nonce(protector, snapshot, ?raw[22]);
@@ -708,7 +708,7 @@ pub fun issue(protector: *Protector, request_context: *context.Context,
     var i: usize = 0;
     for (i < TOKEN_BYTES) {
         output[i] = encoded[i];
-        i = i + 1;
+        i         = i + 1;
     }
     output[TOKEN_BYTES] = 0;
     clear(?encoded[0], TOKEN_CAPACITY);
@@ -717,13 +717,13 @@ pub fun issue(protector: *Protector, request_context: *context.Context,
 }
 
 fun constant_tag_equal(first: *u8, second: *u8) bool {
-    var left: [TAG_BYTES]^u8;
+    var left:  [TAG_BYTES]^u8;
     var right: [TAG_BYTES]^u8;
-    var i: usize = 0;
+    var i:     usize = 0;
     for (i < TAG_BYTES) {
-        left[i] = first[i];
+        left[i]  = first[i];
         right[i] = second[i];
-        i = i + 1;
+        i        = i + 1;
     }
     ct.begin();
     val equal: ^u8 = ct.eq_bytes(?left[0], ?right[0], TAG_BYTES);
@@ -740,11 +740,11 @@ fun constant_tag_equal(first: *u8, second: *u8) bool {
 fun canonical_token(input: view.View, raw: *u8) bool {
     if (input.len != TOKEN_BYTES || !range_valid(input.data, input.len) ||
         base64.decode(input.data, input.len, raw, RAW_TOKEN_BYTES) !=
-            RAW_TOKEN_BYTES) { ret false; }
+        RAW_TOKEN_BYTES) { ret false; }
     var encoded: [TOKEN_CAPACITY]u8;
     clear(?encoded[0], TOKEN_CAPACITY);
     if (base64.encode_url(raw, RAW_TOKEN_BYTES, ?encoded[0], TOKEN_CAPACITY) !=
-            TOKEN_BYTES) { ret false; }
+        TOKEN_BYTES) { ret false; }
     var i: usize = 0;
     for (i < TOKEN_BYTES) {
         if (input.data[i] != encoded[i]) {
@@ -782,30 +782,30 @@ pub fun verify(protector: *Protector, request_context: *context.Context,
         ret operation(INVALID);
     }
     var token_storage: [TOKEN_BYTES]u8;
-    var token_index: usize = 0;
+    var token_index:   usize = 0;
     for (token_index < TOKEN_BYTES) {
         token_storage[token_index] = token.data[token_index];
-        token_index = token_index + 1;
+        token_index                = token_index + 1;
     }
     var binding_storage: [MAX_BINDING_BYTES]u8;
-    var binding: view.View;
-    var generation: u64 = 0;
+    var binding:         view.View;
+    var generation:      u64 = 0;
     if (!binding_for(snapshot, protector, request_context, session_id,
-            ?binding_storage[0], ?binding, ?generation)) {
+        ?binding_storage[0], ?binding, ?generation)) {
         ret operation(WRONG_BINDING);
     }
     var raw: [RAW_TOKEN_BYTES]u8;
     clear(?raw[0], RAW_TOKEN_BYTES);
     if (!canonical_token(view.view(?token_storage[0], TOKEN_BYTES),
-            ?raw[0]) || raw[0] != 1) {
+        ?raw[0]) || raw[0] != 1) {
         clear(?raw[0], RAW_TOKEN_BYTES);
         ret operation(INVALID);
     }
-    val key_id: u32 = read_u32(?raw[0], 1);
-    val mode: BindingMode = raw[5];
-    val issued_value: u64 = read_u64(?raw[0], 6);
-    val token_generation: u64 = read_u64(?raw[0], 14);
-    val binding_len: usize = read_u16(?raw[0], 38);
+    val key_id:           u32         = read_u32(?raw[0], 1);
+    val mode:             BindingMode = raw[5];
+    val issued_value:     u64         = read_u64(?raw[0], 6);
+    val token_generation: u64         = read_u64(?raw[0], 14);
+    val binding_len:      usize       = read_u16(?raw[0], 38);
     if (key_id == 0 || mode != snapshot.policy.binding ||
         issued_value > 9223372036854775807 || binding_len != binding.len ||
         token_generation != generation) {
@@ -824,7 +824,7 @@ pub fun verify(protector: *Protector, request_context: *context.Context,
         issued_value::i64, now);
     var expected: [TAG_BYTES]u8;
     clear(?expected[0], TAG_BYTES);
-    val tagged: bool = make_tag(key, ?raw[0], binding, ?expected[0]);
+    val tagged:        bool = make_tag(key, ?raw[0], binding, ?expected[0]);
     val authenticated: bool = tagged && constant_tag_equal(
         ?raw[RAW_HEADER_BYTES], ?expected[0]);
     val needs_rotation: bool = key_id != snapshot.ring.current_id;
@@ -840,7 +840,7 @@ pub fun verify(protector: *Protector, request_context: *context.Context,
 fun header_count(fields: *field.Fields, name: view.View) usize {
     if (fields == nil || !fields.valid) { ret ~(0::usize); }
     var count: usize = 0;
-    var i: usize = 0;
+    var i:     usize = 0;
     for (i < fields.len) {
         if (field.name_equal(fields.items[i].name, name)) {
             count = count + 1;
@@ -869,9 +869,9 @@ pub fun verify_request(protector: *Protector,
 }
 
 rec TestEntropy {
-    seed: u8;
+    seed:  u8;
     calls: usize;
-    fail: bool;
+    fail:  bool;
 }
 
 fun test_entropy_aliases(ctx: ptr, data: *u8, len: usize) bool {
@@ -887,16 +887,16 @@ fun test_entropy_fill(ctx: ptr, output: *u8, len: usize) i64 {
     var i: usize = 0;
     for (i < len) {
         output[i] = state.seed + i::u8;
-        i = i + 1;
+        i         = i + 1;
     }
-    state.seed = state.seed + 1;
+    state.seed  = state.seed + 1;
     state.calls = state.calls + 1;
     ret 0;
 }
 
 rec MutatingEntropy {
     target: *Policy;
-    calls: usize;
+    calls:  usize;
 }
 
 fun mutating_entropy_aliases(ctx: ptr, data: *u8, len: usize) bool {
@@ -914,44 +914,44 @@ fun mutating_entropy_fill(ctx: ptr, output: *u8, len: usize) i64 {
     var i: usize = 0;
     for (i < len) {
         output[i] = 0x70 + i::u8;
-        i = i + 1;
+        i         = i + 1;
     }
     state.target.max_age_s = state.target.max_age_s + 1;
-    state.calls = state.calls + 1;
+    state.calls            = state.calls + 1;
     ret 0;
 }
 
 rec Fixture {
-    scope: cancel.Scope;
-    request_body: body.Reader;
-    request_fields: [4]field.Field;
-    request: message.Request;
-    response_fields: [4]field.Field;
+    scope:             cancel.Scope;
+    request_body:      body.Reader;
+    request_fields:    [4]field.Field;
+    request:           message.Request;
+    response_fields:   [4]field.Field;
     response_trailers: [2]field.Field;
-    response: message.Response;
-    informationals: [2]message.Informational;
-    exchange: exchange.Exchange;
-    allocation_bytes: [4096]u8;
-    allocation_state: fixed.FixedState;
-    allocator: A.Allocator;
-    owner: u64;
-    request_context: context.Context;
-    entropy: TestEntropy;
-    keys: [2]KeyGeneration;
-    ring: KeyRing;
-    protector: Protector;
+    response:          message.Response;
+    informationals:    [2]message.Informational;
+    exchange:          exchange.Exchange;
+    allocation_bytes:  [4096]u8;
+    allocation_state:  fixed.FixedState;
+    allocator:         A.Allocator;
+    owner:             u64;
+    request_context:   context.Context;
+    entropy:           TestEntropy;
+    keys:              [2]KeyGeneration;
+    ring:              KeyRing;
+    protector:         Protector;
 }
 
 fun fixture_metadata() message.Metadata {
     ret message.Metadata{
-        version: message.version_h1(1, 1),
-        secure: true,
-        early_data: false,
-        peer: message.unspecified_endpoint(),
-        local: message.unspecified_endpoint(),
-        received_at: time.Time{sec: 1, nsec: 0},
-        has_deadline: false,
-        deadline: time.Time{sec: 0, nsec: 0},
+        version:       message.version_h1(1, 1),
+        secure:        true,
+        early_data:    false,
+        peer:          message.unspecified_endpoint(),
+        local:         message.unspecified_endpoint(),
+        received_at:   time.Time{sec: 1, nsec: 0},
+        has_deadline:  false,
+        deadline:      time.Time{sec: 0, nsec: 0},
         request_index: 1,
     };
 }
@@ -962,60 +962,61 @@ fun init_fixture(fixture: *Fixture, binding: BindingMode,
     if (fixture == nil || generation == 0 ||
         !operation_ok(cancel.make_root(?fixture.scope, false, time.Time{sec: 0, nsec: 0}))) { ret false; }
     if (!fixed_ok(fixed.make(?fixture.allocator,
-            ?fixture.allocation_state, ?fixture.allocation_bytes[0], 4096))) {
+        ?fixture.allocation_state, ?fixture.allocation_bytes[0], 4096))) {
         ret false;
     }
-    val limits: message.Limits = message.limits_default();
-    val request_fields: field.Fields = field.init(?fixture.request_fields[0], 4,
+    val limits:         message.Limits = message.limits_default();
+    val request_fields: field.Fields   = field.init(?fixture.request_fields[0], 4,
         field.limits(4, 4096, 64, 1024));
     val request_trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
     fixture.request_body = body.empty_reader(generation);
     if (!message.init_request(?fixture.request, method.from_kind(request_method),
-            target.origin(view.view("/", 1), view.view("/", 1),
-                view.view(nil, 0)), fixture_metadata(), request_fields,
-            request_trailers, ?fixture.request_body, generation, limits) ||
+        target.origin(view.view("/", 1), view.view("/", 1),
+        view.view(nil, 0)), fixture_metadata(), request_fields,
+        request_trailers, ?fixture.request_body, generation, limits) ||
         !message.init_response(?fixture.response, ?fixture.response_fields[0], 4,
-            ?fixture.response_trailers[0], 2, generation, limits) ||
+        ?fixture.response_trailers[0], 2, generation, limits) ||
         !exchange.init(?fixture.exchange, ?fixture.request, ?fixture.response,
-            ?fixture.informationals[0], 2, ?fixture.scope, generation, limits) ||
+        ?fixture.informationals[0], 2, ?fixture.scope, generation, limits) ||
         !exchange.begin(?fixture.exchange)) { ret false; }
     fixture.owner = generation;
     if (!context.bind(?fixture.request_context, ?fixture.exchange,
-            context.Params{items: nil, len: 0, generation: generation}, 4,
-            ?fixture.allocator, (?fixture.owner)::ptr, generation, nil,
-            request_id, MAX_BINDING_BYTES)) { ret false; }
-    fixture.entropy = TestEntropy{seed: 1, calls: 0, fail: false};
-    fixture.keys[0].id = 1;
+        context.Params{items: nil, len: 0, generation: generation}, 4,
+        ?fixture.allocator, (?fixture.owner)::ptr, generation, nil,
+        request_id, MAX_BINDING_BYTES)) { ret false; }
+    fixture.entropy              = TestEntropy{seed: 1, calls: 0, fail: false};
+    fixture.keys[0].id           = 1;
     fixture.keys[0].activated_at = 0;
-    fixture.keys[0].issue_until = 200;
+    fixture.keys[0].issue_until  = 200;
     fixture.keys[0].verify_until = 400;
-    fixture.keys[1].id = 2;
+    fixture.keys[1].id           = 2;
     fixture.keys[1].activated_at = 50;
-    fixture.keys[1].issue_until = 300;
+    fixture.keys[1].issue_until  = 300;
     fixture.keys[1].verify_until = 500;
     var i: usize = 0;
     for (i < KEY_BYTES) {
-        val first: u8 = 0x10 + i::u8;
+        val first:  u8 = 0x10 + i::u8;
         val second: u8 = 0x80 + i::u8;
         fixture.keys[0].key[i] = first;
         fixture.keys[1].key[i] = second;
-        i = i + 1;
+        i                      = i + 1;
     }
     if (!init_ring(?fixture.ring, ?fixture.keys[0], 2, 1, 1) ||
         !init(?fixture.protector, ?fixture.ring, Entropy{
-            ctx: (?fixture.entropy)::ptr,
-            context_size: $size_of(TestEntropy),
-            aliases_state: test_entropy_aliases,
-            fill: test_entropy_fill}, Policy{binding: binding, max_age_s: 60,
-            clock_skew_s: 5, require_unsafe: true})) { ret false; }
+        ctx: (?fixture.entropy)::ptr,
+        context_size:  $size_of(TestEntropy),
+        aliases_state: test_entropy_aliases,
+        fill:          test_entropy_fill
+    }, Policy{binding: binding, max_age_s: 60,
+        clock_skew_s: 5, require_unsafe: true})) { ret false; }
     ret true;
 }
 
 fun release_fixture(fixture: *Fixture) bool {
     if (fixture == nil ||
         !context.unbind(?fixture.request_context, (?fixture.owner)::ptr,
-            fixture.owner) ||
+        fixture.owner) ||
         !release(?fixture.protector) || !release_ring(?fixture.ring)) {
         ret false;
     }
@@ -1025,12 +1026,12 @@ fun release_fixture(fixture: *Fixture) bool {
 test "laurel.security.csrf: session tokens are bounded authenticated and rotated" {
     var fixture: Fixture;
     if (!init_fixture(?fixture, BIND_SESSION, method.POST, 71,
-            view.view("request-a", 9))) { ret 1; }
+        view.view("request-a", 9))) { ret 1; }
     var token: [TOKEN_CAPACITY]u8;
     token[0] = 0xa5;
     if (issue(?fixture.protector, ?fixture.request_context,
-            view.view("session-a", 9), 100, ?token[0], TOKEN_BYTES).status !=
-            OUTPUT_TOO_SMALL || token[0] != 0xa5 || fixture.entropy.calls != 0) {
+        view.view("session-a", 9), 100, ?token[0], TOKEN_BYTES).status !=
+        OUTPUT_TOO_SMALL || token[0] != 0xa5 || fixture.entropy.calls != 0) {
         ret 2;
     }
     val issued: Operation = issue(?fixture.protector,
@@ -1040,27 +1041,27 @@ test "laurel.security.csrf: session tokens are bounded authenticated and rotated
         issued.key_id != 1 || token[TOKEN_BYTES] != 0 ||
         fixture.entropy.calls != 1 ||
         verify(?fixture.protector, ?fixture.request_context,
-            view.view("session-a", 9), view.view(?token[0], TOKEN_BYTES),
-            100).status != OK ||
+        view.view("session-a", 9), view.view(?token[0], TOKEN_BYTES),
+        100).status != OK ||
         verify(?fixture.protector, ?fixture.request_context,
-            view.view("session-b", 9), view.view(?token[0], TOKEN_BYTES),
-            100).status != AUTH_FAILED) { ret 3; }
+        view.view("session-b", 9), view.view(?token[0], TOKEN_BYTES),
+        100).status != AUTH_FAILED) { ret 3; }
     var i: usize = 0;
     for (i < TOKEN_BYTES) {
         val saved: u8 = token[i];
         token[i] = token[i] ^ 1;
         if (verify(?fixture.protector, ?fixture.request_context,
-                view.view("session-a", 9), view.view(?token[0], TOKEN_BYTES),
-                100).status == OK) { ret 4; }
+            view.view("session-a", 9), view.view(?token[0], TOKEN_BYTES),
+            100).status == OK) { ret 4; }
         token[i] = saved;
-        i = i + 1;
+        i        = i + 1;
     }
     if (verify(?fixture.protector, ?fixture.request_context,
-            view.view("session-a", 9), view.view(?token[0], TOKEN_BYTES),
-            94).status != NOT_YET_VALID ||
+        view.view("session-a", 9), view.view(?token[0], TOKEN_BYTES),
+        94).status != NOT_YET_VALID ||
         verify(?fixture.protector, ?fixture.request_context,
-            view.view("session-a", 9), view.view(?token[0], TOKEN_BYTES),
-            165).status != EXPIRED ||
+        view.view("session-a", 9), view.view(?token[0], TOKEN_BYTES),
+        165).status != EXPIRED ||
         !rotate(?fixture.ring, 2, 110)) { ret 5; }
     val old: Operation = verify(?fixture.protector, ?fixture.request_context,
         view.view("session-a", 9), view.view(?token[0], TOKEN_BYTES), 110);
@@ -1071,16 +1072,16 @@ test "laurel.security.csrf: session tokens are bounded authenticated and rotated
         ret 7;
     }
     fixture.entropy.fail = true;
-    token[0] = 0xa5;
+    token[0]             = 0xa5;
     if (issue(?fixture.protector, ?fixture.request_context,
-            view.view("session-a", 9), 111, ?token[0], TOKEN_CAPACITY).status !=
-            ENTROPY_UNAVAILABLE || token[0] != 0xa5 ||
+        view.view("session-a", 9), 111, ?token[0], TOKEN_CAPACITY).status !=
+        ENTROPY_UNAVAILABLE || token[0] != 0xa5 ||
         issue(?fixture.protector, ?fixture.request_context,
-            view.view("session-a", 9), 111, protector_anchor(?fixture.protector),
-            TOKEN_CAPACITY).status != INVALID ||
+        view.view("session-a", 9), 111, protector_anchor(?fixture.protector),
+        TOKEN_CAPACITY).status != INVALID ||
         issue(?fixture.protector, ?fixture.request_context,
-            view.view("session-a", 9), 111, (?fixture.keys[0].id)::*u8,
-            TOKEN_CAPACITY).status != INVALID) { ret 8; }
+        view.view("session-a", 9), 111, (?fixture.keys[0].id)::*u8,
+        TOKEN_CAPACITY).status != INVALID) { ret 8; }
     fixture.entropy.fail = false;
     if (!release_fixture(?fixture)) { ret 9; }
     ret 0;
@@ -1089,125 +1090,129 @@ test "laurel.security.csrf: session tokens are bounded authenticated and rotated
 test "laurel.security.csrf: request binding and unsafe headers fail closed" {
     var fixture: Fixture;
     if (!init_fixture(?fixture, BIND_REQUEST, method.POST, 81,
-            view.view("request-a", 9))) { ret 1; }
-    var token: [TOKEN_CAPACITY]u8;
+        view.view("request-a", 9))) { ret 1; }
+    var token:  [TOKEN_CAPACITY]u8;
     val issued: Operation = issue(?fixture.protector,
         ?fixture.request_context, view.view(nil, 0), 100,
         ?token[0], TOKEN_CAPACITY);
     if (issued.status != OK || verify_request(?fixture.protector,
-            ?fixture.request_context, view.view(nil, 0), 100).status != MISSING ||
+        ?fixture.request_context, view.view(nil, 0), 100).status != MISSING ||
         field.append(?fixture.request.fields, field.Field{
-            name: view.view("x-csrf-token", 12),
-            value: view.view(?token[0], TOKEN_BYTES), sensitive: true}) !=
-            field.ADD_OK || verify_request(?fixture.protector,
-            ?fixture.request_context, view.view(nil, 0), 100).status != OK) {
+        name:  view.view("x-csrf-token", 12),
+        value: view.view(?token[0], TOKEN_BYTES), sensitive: true
+    }) !=
+        field.ADD_OK || verify_request(?fixture.protector,
+        ?fixture.request_context, view.view(nil, 0), 100).status != OK) {
         ret 2;
     }
     if (field.append(?fixture.request.fields, field.Field{
-            name: view.view("x-csrf-token", 12),
-            value: view.view(?token[0], TOKEN_BYTES), sensitive: true}) !=
-            field.ADD_OK || verify_request(?fixture.protector,
-            ?fixture.request_context, view.view(nil, 0), 100).status != MISSING) {
+        name:  view.view("x-csrf-token", 12),
+        value: view.view(?token[0], TOKEN_BYTES), sensitive: true
+    }) !=
+        field.ADD_OK || verify_request(?fixture.protector,
+        ?fixture.request_context, view.view(nil, 0), 100).status != MISSING) {
         ret 3;
     }
     fixture.request.method = method.from_kind(method.GET);
     if (verify_request(?fixture.protector, ?fixture.request_context,
-            view.view(nil, 0), 100).status != OK) { ret 4; }
+        view.view(nil, 0), 100).status != OK) { ret 4; }
     fixture.request.method = method.from_kind(method.POST);
     var other: Fixture;
     if (!init_fixture(?other, BIND_REQUEST, method.POST, 82,
-            view.view("request-a", 9)) ||
+        view.view("request-a", 9)) ||
         verify(?fixture.protector, ?other.request_context, view.view(nil, 0),
-            view.view(?token[0], TOKEN_BYTES), 100).status != WRONG_BINDING ||
+        view.view(?token[0], TOKEN_BYTES), 100).status != WRONG_BINDING ||
         !release_fixture(?other)) { ret 5; }
     fixture.request_context.request_id = view.view("request-b", 9);
     if (verify(?fixture.protector, ?fixture.request_context,
-            view.view(nil, 0), view.view(?token[0], TOKEN_BYTES), 100).status !=
-            AUTH_FAILED) { ret 6; }
+        view.view(nil, 0), view.view(?token[0], TOKEN_BYTES), 100).status !=
+        AUTH_FAILED) { ret 6; }
     fixture.request_context.request_id = view.view("request-a", 9);
-    token[TOKEN_BYTES - 1] = '=';
+    token[TOKEN_BYTES - 1]             = '=';
     if (verify(?fixture.protector, ?fixture.request_context,
-            view.view(nil, 0), view.view(?token[0], TOKEN_BYTES), 100).status !=
-            INVALID || !release_fixture(?fixture)) { ret 7; }
+        view.view(nil, 0), view.view(?token[0], TOKEN_BYTES), 100).status !=
+        INVALID || !release_fixture(?fixture)) { ret 7; }
     ret 0;
 }
 
 test "laurel.security.csrf: provider mutation and invalid rings are rejected" {
     var fixture: Fixture;
     if (!init_fixture(?fixture, BIND_SESSION, method.POST, 91,
-            view.view("request-a", 9)) || !release(?fixture.protector)) { ret 1; }
+        view.view("request-a", 9)) || !release(?fixture.protector)) { ret 1; }
     var mutation: MutatingEntropy = MutatingEntropy{
-        target: ?fixture.protector.policy, calls: 0};
+        target: ?fixture.protector.policy, calls: 0
+    };
     if (!init(?fixture.protector, ?fixture.ring, Entropy{
-            ctx: (?mutation)::ptr, context_size: $size_of(MutatingEntropy),
-            aliases_state: mutating_entropy_aliases,
-            fill: mutating_entropy_fill}, Policy{binding: BIND_SESSION,
-            max_age_s: 60, clock_skew_s: 5, require_unsafe: true})) { ret 2; }
+        ctx: (?mutation)::ptr, context_size: $size_of(MutatingEntropy),
+        aliases_state:                       mutating_entropy_aliases,
+        fill:                                mutating_entropy_fill
+    }, Policy{binding: BIND_SESSION,
+        max_age_s: 60, clock_skew_s: 5, require_unsafe: true})) { ret 2; }
     var output: [TOKEN_CAPACITY]u8;
     output[0] = 0xa5;
     if (issue(?fixture.protector, ?fixture.request_context,
-            view.view("session-a", 9), 100, ?output[0], TOKEN_CAPACITY).status !=
-            PROVIDER_VIOLATION || output[0] != 0xa5 || mutation.calls != 1) {
+        view.view("session-a", 9), 100, ?output[0], TOKEN_CAPACITY).status !=
+        PROVIDER_VIOLATION || output[0] != 0xa5 || mutation.calls != 1) {
         ret 3;
     }
     fixture.protector.policy.max_age_s = 60;
     if (!release(?fixture.protector) || !context.unbind(
-            ?fixture.request_context, (?fixture.owner)::ptr, fixture.owner) ||
+        ?fixture.request_context, (?fixture.owner)::ptr, fixture.owner) ||
         !release_ring(?fixture.ring) || !operation_ok(cancel.destroy(?fixture.scope))) {
         ret 4;
     }
     var duplicate: [2]KeyGeneration;
-    duplicate[0].id = 1;
+    duplicate[0].id           = 1;
     duplicate[0].activated_at = 0;
-    duplicate[0].issue_until = 100;
+    duplicate[0].issue_until  = 100;
     duplicate[0].verify_until = 200;
-    duplicate[1].id = 1;
+    duplicate[1].id           = 1;
     duplicate[1].activated_at = 0;
-    duplicate[1].issue_until = 100;
+    duplicate[1].issue_until  = 100;
     duplicate[1].verify_until = 200;
     var i: usize = 0;
     for (i < KEY_BYTES) {
         duplicate[0].key[i] = i::u8;
         val second: u8 = 0x80 + i::u8;
         duplicate[1].key[i] = second;
-        i = i + 1;
+        i                   = i + 1;
     }
     var ring: KeyRing;
     if (init_ring(?ring, ?duplicate[0], 2, 1, 1)) { ret 5; }
     duplicate[1].id = 2;
-    i = 0;
+    i               = 0;
     for (i < KEY_BYTES) {
         duplicate[1].key[i] = duplicate[0].key[i];
-        i = i + 1;
+        i                   = i + 1;
     }
     if (init_ring(?ring, ?duplicate[0], 2, 1, 1)) { ret 6; }
     ret 0;
 }
 
 rec RegistryCase {
-    entropy: TestEntropy;
-    keys: [2]KeyGeneration;
-    ring: KeyRing;
+    entropy:   TestEntropy;
+    keys:      [2]KeyGeneration;
+    ring:      KeyRing;
     protector: Protector;
 }
 
 fun init_registry_case(item: *RegistryCase, tag: u8) bool {
-    item.entropy = TestEntropy{seed: 1, calls: 0, fail: false};
-    item.keys[0].id = 1;
+    item.entropy              = TestEntropy{seed: 1, calls: 0, fail: false};
+    item.keys[0].id           = 1;
     item.keys[0].activated_at = 0;
-    item.keys[0].issue_until = 200;
+    item.keys[0].issue_until  = 200;
     item.keys[0].verify_until = 400;
-    item.keys[1].id = 2;
+    item.keys[1].id           = 2;
     item.keys[1].activated_at = 50;
-    item.keys[1].issue_until = 300;
+    item.keys[1].issue_until  = 300;
     item.keys[1].verify_until = 500;
     var i: usize = 0;
     for (i < KEY_BYTES) {
-        val first: u8 = tag + i::u8;
+        val first:  u8 = tag + i::u8;
         val second: u8 = tag + 0x40 + i::u8;
         item.keys[0].key[i] = first;
         item.keys[1].key[i] = second;
-        i = i + 1;
+        i                   = i + 1;
     }
     ret init_ring(?item.ring, ?item.keys[0], 2, 1, 1);
 }
@@ -1228,14 +1233,14 @@ fun activate_case(item: *RegistryCase) bool {
 
 test "laurel.security.csrf: ring registration is bounded and single use" {
     var cases: [9]RegistryCase;
-    var i: usize = 0;
+    var i:     usize = 0;
     for (i < 9) {
         if (!init_registry_case(?cases[i], (0x10 + i * 8)::u8)) { ret 1; }
         i = i + 1;
     }
     if (!activate_case(?cases[0]) || !valid(?cases[0].protector)) { ret 2; }
     if (init(?cases[8].protector, ?cases[0].ring, case_entropy(?cases[8]),
-            case_policy()) || cases[8].protector.active) { ret 3; }
+        case_policy()) || cases[8].protector.active) { ret 3; }
     i = 1;
     for (i < MAX_REGISTERED_RINGS) {
         if (!activate_case(?cases[i]) || !valid(?cases[i].protector)) { ret 4; }
@@ -1249,12 +1254,12 @@ test "laurel.security.csrf: ring registration is bounded and single use" {
     # re-arm everything except the handle, so a stale generation is the only
     # reason this protector must not resolve to the ring now in that slot
     cases[0].protector.entropy = case_entropy(?cases[0]);
-    cases[0].protector.policy = case_policy();
-    cases[0].protector.ring = stale;
-    cases[0].protector.active = true;
+    cases[0].protector.policy  = case_policy();
+    cases[0].protector.ring    = stale;
+    cases[0].protector.active  = true;
     if (valid(?cases[0].protector)
         || issue(?cases[0].protector, nil, view.view("s", 1), 1, nil,
-            0).status != INVALID) { ret 8; }
+        0).status != INVALID) { ret 8; }
     cases[0].protector.active = false;
     if (release(?cases[0].protector)) { ret 9; }
     i = 1;

@@ -1,30 +1,29 @@
 # typed application routes over mach-http's compiled matcher
 
-use A: std.allocator;
-use std.types.option.opt;
-use std.types.result.res;
-use std.types.error.err;
-use std.allocator.fixed;
-use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
-use std.types.size.usize;
-use std.types.string.str;
-use std.types.view;
+use http.core.field;
 use http.core.message;
 use http.core.method;
-use http.core.field;
 use http.core.target;
 use http_router: http.router.router;
 use laurel.context;
 use laurel.error;
 use laurel.handler;
-
-
+use A: std.allocator;
+use std.allocator.fixed;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.view;
 
 fun fixed_ok(outcome: err[A.Error]) bool {
     ret sel outcome.ok;
 }
+
 fun is_err_u8_error_apperror(outcome: res[u8, error.AppError]) bool {
     ret sel outcome.err;
 }
@@ -32,6 +31,7 @@ fun is_err_u8_error_apperror(outcome: res[u8, error.AppError]) bool {
 fun is_ok_u8_error_apperror(outcome: res[u8, error.AppError]) bool {
     ret sel outcome.ok;
 }
+
 pub def HostKind: u8;
 pub val HOST_ANY:    HostKind = 1;
 pub val HOST_EXACT:  HostKind = 2;
@@ -60,10 +60,10 @@ pub val COMPILE_CONFLICT:  CompileStatus = 8;
 pub val COMPILE_HANDLER:   CompileStatus = 9;
 
 pub def DispatchStatus: u8;
-pub val DISPATCH_MATCH:       DispatchStatus = 1;
-pub val DISPATCH_NOT_FOUND:   DispatchStatus = 2;
-pub val DISPATCH_BAD_REQUEST: DispatchStatus = 3;
-pub val DISPATCH_REJECTED:    DispatchStatus = 4;
+pub val DISPATCH_MATCH:           DispatchStatus = 1;
+pub val DISPATCH_NOT_FOUND:       DispatchStatus = 2;
+pub val DISPATCH_BAD_REQUEST:     DispatchStatus = 3;
+pub val DISPATCH_REJECTED:        DispatchStatus = 4;
 pub val DISPATCH_PARAMETER_ERROR: DispatchStatus = 5;
 
 pub rec Method {
@@ -121,12 +121,12 @@ pub rec Limits {
 }
 
 pub rec Storage {
-    specifications:      *http_router.Route;
-    specification_cap:   usize;
-    compiled_routes:     *http_router.CompiledRoute;
-    compiled_route_cap:  usize;
-    segments:            *http_router.Segment;
-    segment_cap:         usize;
+    specifications:     *http_router.Route;
+    specification_cap:  usize;
+    compiled_routes:    *http_router.CompiledRoute;
+    compiled_route_cap: usize;
+    segments:           *http_router.Segment;
+    segment_cap:        usize;
 }
 
 pub rec Router {
@@ -217,15 +217,15 @@ fun compile_result(status: CompileStatus, route: usize, conflict_route: usize,
     app_error: error.AppError) Compile {
     ret Compile{status: status, route: route, conflict_route: conflict_route,
         pattern_offset: pattern_offset, needed: needed, capacity: capacity,
-        app_error: app_error};
+        app_error:      app_error};
 }
 
 fun dispatch_result(status: DispatchStatus, app_error: error.AppError) Dispatch {
     ret Dispatch{status: status, route: http_router.NO_INDEX,
         router_generation: 0, request_generation: 0,
-        handler: handler.Handler{ctx: nil, call: nil},
-        params: context.Params{items: nil, len: 0, generation: 0},
-        app_error: app_error};
+        handler:           handler.Handler{ctx: nil, call: nil},
+        params:            context.Params{items: nil, len: 0, generation: 0},
+        app_error:         app_error};
 }
 
 fun same(a: view.View, b: view.View) bool {
@@ -278,14 +278,14 @@ fun bridge_handler(ctx: ptr, request: *message.Request,
 }
 
 fun typed_host_matches(route: *Route, compiled: *http_router.CompiledRoute) bool {
-    if (route.host.kind == HOST_ANY) { ret compiled.host.kind == http_router.HOST_ANY; }
-    if (route.host.kind == HOST_EXACT) { ret compiled.host.kind == http_router.HOST_EXACT; }
+    if (route.host.kind == HOST_ANY)    { ret compiled.host.kind == http_router.HOST_ANY; }
+    if (route.host.kind == HOST_EXACT)  { ret compiled.host.kind == http_router.HOST_EXACT; }
     if (route.host.kind == HOST_SUFFIX) { ret compiled.host.kind == http_router.HOST_SUFFIX; }
     ret false;
 }
 
 fun typed_path_matches(route: *Route, compiled: *http_router.CompiledRoute) bool {
-    if (route.path.kind == PATH_PATTERN) { ret !compiled.non_path; }
+    if (route.path.kind == PATH_PATTERN)  { ret !compiled.non_path; }
     if (route.path.kind == PATH_NON_PATH) { ret compiled.non_path; }
     ret false;
 }
@@ -301,7 +301,7 @@ fun parameters_match(route: *Route, compiled: *http_router.CompiledRoute,
     if (route.parameter_len != compiled.parameter_count
         || (route.parameter_len != 0 && route.parameters == nil)) { ret false; }
     var parameter_index: usize = 0;
-    var segment_index: usize = 0;
+    var segment_index:   usize = 0;
     for (segment_index < compiled.segment_count) {
         val segment: *http_router.Segment =
             ?segments[compiled.segment_start + segment_index];
@@ -332,49 +332,49 @@ fun map_compile(core: http_router.Compile) Compile {
         ret compile_result(COMPILE_CAPACITY, core.route, core.conflict_route,
             core.pattern_offset, core.needed, core.capacity,
             route_error(error.INTERNAL, 500, "route configuration failed",
-                "compiled route storage is too small", false));
+            "compiled route storage is too small", false));
     }
     if (core.status == http_router.COMPILE_METHOD) {
         ret compile_result(COMPILE_METHOD, core.route, core.conflict_route,
             core.pattern_offset, core.needed, core.capacity,
             route_error(error.BAD_REQUEST, 400, "invalid route method",
-                "route method is not a valid HTTP token", false));
+            "route method is not a valid HTTP token", false));
     }
     if (core.status == http_router.COMPILE_HOST) {
         ret compile_result(COMPILE_HOST, core.route, core.conflict_route,
             core.pattern_offset, core.needed, core.capacity,
             route_error(error.BAD_REQUEST, 400, "invalid route host",
-                "route host pattern is malformed", false));
+            "route host pattern is malformed", false));
     }
     if (core.status == http_router.COMPILE_PATTERN
         || core.status == http_router.COMPILE_UNREACHABLE) {
         ret compile_result(COMPILE_PATH, core.route, core.conflict_route,
             core.pattern_offset, core.needed, core.capacity,
             route_error(error.BAD_REQUEST, 400, "invalid route path",
-                "route path pattern is malformed or unreachable", false));
+            "route path pattern is malformed or unreachable", false));
     }
     if (core.status == http_router.COMPILE_PARAMETER) {
         ret compile_result(COMPILE_PARAMETER, core.route, core.conflict_route,
             core.pattern_offset, core.needed, core.capacity,
             route_error(error.BAD_REQUEST, 400, "invalid route parameter",
-                "route parameter declaration is malformed", false));
+            "route parameter declaration is malformed", false));
     }
     if (core.status == http_router.COMPILE_CONFLICT) {
         ret compile_result(COMPILE_CONFLICT, core.route, core.conflict_route,
             core.pattern_offset, core.needed, core.capacity,
             route_error(error.CONFLICT, 409, "route conflict",
-                "route is indistinguishable from an earlier route", false));
+            "route is indistinguishable from an earlier route", false));
     }
     if (core.status == http_router.COMPILE_HANDLER) {
         ret compile_result(COMPILE_HANDLER, core.route, core.conflict_route,
             core.pattern_offset, core.needed, core.capacity,
             route_error(error.INTERNAL, 500, "route configuration failed",
-                "route handler is missing", false));
+            "route handler is missing", false));
     }
     ret compile_result(COMPILE_INVALID, core.route, core.conflict_route,
         core.pattern_offset, core.needed, core.capacity,
         route_error(error.INTERNAL, 500, "route configuration failed",
-            "route compiler input is invalid", false));
+        "route compiler input is invalid", false));
 }
 
 pub fun compile(router: *Router, routes: *Route, route_len: usize,
@@ -390,7 +390,7 @@ pub fun compile(router: *Router, routes: *Route, route_len: usize,
         ret compile_result(COMPILE_INVALID, http_router.NO_INDEX,
             http_router.NO_INDEX, 0, 0, 0,
             route_error(error.INTERNAL, 500, "route configuration failed",
-                "route compiler input is invalid", false));
+            "route compiler input is invalid", false));
     }
     var i: usize = 0;
     for (i < route_len) {
@@ -398,28 +398,28 @@ pub fun compile(router: *Router, routes: *Route, route_len: usize,
         if (route.handler.call == nil) {
             ret compile_result(COMPILE_HANDLER, i, http_router.NO_INDEX, 0, 0, 0,
                 route_error(error.INTERNAL, 500, "route configuration failed",
-                    "route handler is missing", false));
+                "route handler is missing", false));
         }
         if (!typed_method_valid(route.method,
             configured.matcher.max_method_bytes)) {
             ret compile_result(COMPILE_METHOD, i, http_router.NO_INDEX, 0, 0, 0,
                 route_error(error.BAD_REQUEST, 400, "invalid route method",
-                    "typed method has contradictory or invalid state", false));
+                "typed method has contradictory or invalid state", false));
         }
         if (!typed_host_valid(route.host)) {
             ret compile_result(COMPILE_HOST, i, http_router.NO_INDEX, 0, 0, 0,
                 route_error(error.BAD_REQUEST, 400, "invalid route host",
-                    "typed host has contradictory or invalid state", false));
+                "typed host has contradictory or invalid state", false));
         }
         if (!typed_path_valid(route.path)) {
             ret compile_result(COMPILE_PATH, i, http_router.NO_INDEX, 0, 0, 0,
                 route_error(error.BAD_REQUEST, 400, "invalid route path",
-                    "typed path has contradictory or invalid state", false));
+                "typed path has contradictory or invalid state", false));
         }
         if (!typed_parameters_valid(route)) {
             ret compile_result(COMPILE_PARAMETER, i, http_router.NO_INDEX, 0, 0, 0,
                 route_error(error.BAD_REQUEST, 400, "invalid route parameter",
-                    "typed parameter declaration is invalid", false));
+                "typed parameter declaration is invalid", false));
         }
         var route_method: view.View = view.view("*", 1);
         if (!route.method.any) { route_method = route.method.value.token; }
@@ -428,11 +428,11 @@ pub fun compile(router: *Router, routes: *Route, route_len: usize,
         var route_path: view.View = route.path.pattern;
         if (route.path.kind == PATH_NON_PATH) { route_path = view.view("*", 1); }
         storage.specifications[i] = http_router.Route{
-            method: route_method,
-            host: route_host,
-            pattern: route_path,
+            method:      route_method,
+            host:        route_host,
+            pattern:     route_path,
             handler_ctx: nil,
-            handler: bridge_handler,
+            handler:     bridge_handler,
         };
         i = i + 1;
     }
@@ -444,39 +444,39 @@ pub fun compile(router: *Router, routes: *Route, route_len: usize,
     if (mapped.status != COMPILE_OK) { ret mapped; }
     i = 0;
     for (i < route_len) {
-        val route: *Route = ?routes[i];
+        val route:    *Route                     = ?routes[i];
         val compiled: *http_router.CompiledRoute = ?storage.compiled_routes[i];
         if (!typed_method_matches(route, compiled,
             configured.matcher.max_method_bytes)) {
             router.inner.initialized = false;
             ret compile_result(COMPILE_METHOD, i, http_router.NO_INDEX, 0, 0, 0,
                 route_error(error.BAD_REQUEST, 400, "invalid route method",
-                    "typed method does not match its token", false));
+                "typed method does not match its token", false));
         }
         if (!typed_host_matches(route, compiled)) {
             router.inner.initialized = false;
             ret compile_result(COMPILE_HOST, i, http_router.NO_INDEX, 0, 0, 0,
                 route_error(error.BAD_REQUEST, 400, "invalid route host",
-                    "typed host kind does not match its pattern", false));
+                "typed host kind does not match its pattern", false));
         }
         if (!typed_path_matches(route, compiled)) {
             router.inner.initialized = false;
             ret compile_result(COMPILE_PATH, i, http_router.NO_INDEX, 0, 0, 0,
                 route_error(error.BAD_REQUEST, 400, "invalid route path",
-                    "typed path kind does not match its pattern", false));
+                "typed path kind does not match its pattern", false));
         }
         if (!parameters_match(route, compiled, storage.segments)) {
             router.inner.initialized = false;
             ret compile_result(COMPILE_PARAMETER, i, http_router.NO_INDEX, 0, 0, 0,
                 route_error(error.BAD_REQUEST, 400, "invalid route parameter",
-                    "typed parameter declarations do not match the path", false));
+                "typed parameter declarations do not match the path", false));
         }
         i = i + 1;
     }
-    router.routes = routes;
-    router.route_len = route_len;
-    router.configured = configured;
-    router.generation = router.inner.generation;
+    router.routes      = routes;
+    router.route_len   = route_len;
+    router.configured  = configured;
+    router.generation  = router.inner.generation;
     router.initialized = true;
     ret mapped;
 }
@@ -490,11 +490,11 @@ fun map_dispatch(status: http_router.DispatchStatus) Dispatch {
         || status == http_router.DISPATCH_PATH || status == http_router.DISPATCH_INVALID) {
         ret dispatch_result(DISPATCH_BAD_REQUEST,
             route_error(error.BAD_REQUEST, 400, "bad request",
-                "request target cannot be routed", false));
+            "request target cannot be routed", false));
     }
     ret dispatch_result(DISPATCH_REJECTED,
         route_error(error.INTERNAL, 500, "route dispatch failed",
-            "route matcher rejected bounded dispatch state", false));
+        "route matcher rejected bounded dispatch state", false));
 }
 
 pub fun dispatch(router: *Router, request: *message.Request,
@@ -503,7 +503,7 @@ pub fun dispatch(router: *Router, request: *message.Request,
         || request_allocator == nil || request_allocator.fn_allocate == nil) {
         ret dispatch_result(DISPATCH_REJECTED,
             route_error(error.INTERNAL, 500, "route dispatch failed",
-                "route dispatch input is invalid", false));
+            "route dispatch input is invalid", false));
     }
     var core: http_router.Dispatch = http_router.dispatch(?router.inner,
         request, nil, 0);
@@ -511,37 +511,37 @@ pub fun dispatch(router: *Router, request: *message.Request,
     if (core.status == http_router.DISPATCH_CAPTURE_CAPACITY) {
         val capture_allocation: res[*http_router.Capture, A.Error] =
             A.allocate[http_router.Capture](request_allocator,
-                router.configured.matcher.max_parameters_per_route);
+            router.configured.matcher.max_parameters_per_route);
         if (sel capture_allocation.err) {
             ret dispatch_result(DISPATCH_REJECTED, allocation_error());
         }
         captures = capture_allocation.ok;
-        core = http_router.dispatch(?router.inner, request, captures,
+        core     = http_router.dispatch(?router.inner, request, captures,
             router.configured.matcher.max_parameters_per_route);
     }
     if (core.status != http_router.DISPATCH_MATCH) { ret map_dispatch(core.status); }
     if (core.source_index >= router.route_len) {
         ret dispatch_result(DISPATCH_REJECTED,
             route_error(error.INTERNAL, 500, "route dispatch failed",
-                "matcher returned an unknown route", false));
+            "matcher returned an unknown route", false));
     }
     val route: *Route = ?router.routes[core.source_index];
     if (core.params.len != route.parameter_len) {
         ret dispatch_result(DISPATCH_REJECTED,
             route_error(error.INTERNAL, 500, "route dispatch failed",
-                "matcher returned an invalid parameter set", false));
+            "matcher returned an invalid parameter set", false));
     }
     var total_bytes: usize = 0;
-    var i: usize = 0;
+    var i:           usize = 0;
     for (i < core.params.len) {
         if (core.params.items[i].decoded_length
             > router.configured.max_decoded_parameter_bytes - total_bytes) {
             ret dispatch_result(DISPATCH_REJECTED,
                 route_error(error.TOO_LARGE, 413, "route parameters too large",
-                    "decoded route parameters exceed the request limit", false));
+                "decoded route parameters exceed the request limit", false));
         }
         total_bytes = total_bytes + core.params.items[i].decoded_length;
-        i = i + 1;
+        i           = i + 1;
     }
     var params: *context.Param = nil;
     if (core.params.len != 0) {
@@ -564,16 +564,16 @@ pub fun dispatch(router: *Router, request: *message.Request,
     var byte_offset: usize = 0;
     i = 0;
     for (i < core.params.len) {
-        val capture: *http_router.Capture = ?core.params.items[i];
-        var decoded_data: *u8 = nil;
+        val capture:      *http_router.Capture = ?core.params.items[i];
+        var decoded_data: *u8                  = nil;
         if (capture.decoded_length != 0) { decoded_data = ?decoded_bytes[byte_offset]; }
         if (!http_router.decode_capture(capture, decoded_data, capture.decoded_length)) {
             ret dispatch_result(DISPATCH_PARAMETER_ERROR, bad_parameter());
         }
-        val decoded_view: view.View = view.view(decoded_data, capture.decoded_length);
-        val declaration: *Parameter = ?route.parameters[i];
-        var value: Value;
-        val decoded: res[u8, error.AppError] = declaration.decoder.call(
+        val decoded_view: view.View               = view.view(decoded_data, capture.decoded_length);
+        val declaration:  *Parameter              = ?route.parameters[i];
+        var value:        Value;
+        val decoded:      res[u8, error.AppError] = declaration.decoder.call(
             declaration.decoder.ctx, request_allocator, decoded_view, ?value);
         if (sel decoded.err) {
             ret dispatch_result(DISPATCH_PARAMETER_ERROR,
@@ -583,28 +583,28 @@ pub fun dispatch(router: *Router, request: *message.Request,
             || value.kind > VALUE_CUSTOM) {
             ret dispatch_result(DISPATCH_REJECTED,
                 route_error(error.INTERNAL, 500, "route dispatch failed",
-                    "parameter decoder violated its value contract", false));
+                "parameter decoder violated its value contract", false));
         }
         params[i] = context.Param{
-            name: declaration.name,
-            value: decoded_view,
-            kind: value.kind,
+            name:           declaration.name,
+            value:          decoded_view,
+            kind:           value.kind,
             unsigned_value: value.unsigned_value,
-            signed_value: value.signed_value,
-            boolean_value: value.boolean_value,
-            uuid_value: value.uuid_value,
-            custom_value: value.custom_value,
+            signed_value:   value.signed_value,
+            boolean_value:  value.boolean_value,
+            uuid_value:     value.uuid_value,
+            custom_value:   value.custom_value,
         };
         byte_offset = byte_offset + capture.decoded_length;
-        i = i + 1;
+        i           = i + 1;
     }
     ret Dispatch{status: DISPATCH_MATCH, route: core.source_index,
-        router_generation: router.generation,
+        router_generation:  router.generation,
         request_generation: request.generation,
-        handler: route.handler,
-        params: context.Params{items: params, len: core.params.len,
-            generation: request.generation},
-        app_error: no_error()};
+        handler:            route.handler,
+        params:             context.Params{items: params, len: core.params.len,
+        generation:         request.generation},
+        app_error:          no_error()};
 }
 
 pub fun invoke(router: *Router, matched: *Dispatch,
@@ -633,7 +633,7 @@ fun text_decode(ctx: ptr, allocator: *A.Allocator,
     }
     var value: Value;
     value.kind = VALUE_TEXT;
-    @output = value;
+    @output    = value;
     ret res[u8, error.AppError].ok{1};
 }
 
@@ -642,8 +642,8 @@ fun u64_decode(ctx: ptr, allocator: *A.Allocator,
     if (output == nil || input.len == 0 || input.data == nil) {
         ret res[u8, error.AppError].err{bad_parameter()};
     }
-    var value: u64 = 0;
-    var i: usize = 0;
+    var value: u64   = 0;
+    var i:     usize = 0;
     for (i < input.len) {
         val c: u8 = input.data[i];
         if (c < '0' || c > '9') { ret res[u8, error.AppError].err{bad_parameter()}; }
@@ -652,12 +652,12 @@ fun u64_decode(ctx: ptr, allocator: *A.Allocator,
             ret res[u8, error.AppError].err{bad_parameter()};
         }
         value = value * 10 + digit;
-        i = i + 1;
+        i     = i + 1;
     }
     var decoded: Value;
-    decoded.kind = VALUE_U64;
+    decoded.kind           = VALUE_U64;
     decoded.unsigned_value = value;
-    @output = decoded;
+    @output                = decoded;
     ret res[u8, error.AppError].ok{1};
 }
 
@@ -666,15 +666,15 @@ fun i64_decode(ctx: ptr, allocator: *A.Allocator,
     if (output == nil || input.len == 0 || input.data == nil) {
         ret res[u8, error.AppError].err{bad_parameter()};
     }
-    var negative: bool = false;
-    var start: usize = 0;
+    var negative: bool  = false;
+    var start:    usize = 0;
     if (input.data[0] == '-') {
         negative = true;
-        start = 1;
+        start    = 1;
         if (start == input.len) { ret res[u8, error.AppError].err{bad_parameter()}; }
     }
     var magnitude: u64 = 0;
-    var limit: u64 = 9223372036854775807;
+    var limit:     u64 = 9223372036854775807;
     if (negative) { limit = 9223372036854775808; }
     var i: usize = start;
     for (i < input.len) {
@@ -685,18 +685,20 @@ fun i64_decode(ctx: ptr, allocator: *A.Allocator,
             ret res[u8, error.AppError].err{bad_parameter()};
         }
         magnitude = magnitude * 10 + digit;
-        i = i + 1;
+        i         = i + 1;
     }
     var signed_value: i64 = 0;
     if (negative) {
         if (magnitude == 9223372036854775808) {
             signed_value = -9223372036854775807 - 1;
-        } or { signed_value = 0 - magnitude::i64; }
-    } or { signed_value = magnitude::i64; }
+        }
+        or { signed_value = 0 - magnitude::i64; }
+    }
+    or { signed_value = magnitude::i64; }
     var decoded: Value;
-    decoded.kind = VALUE_I64;
+    decoded.kind         = VALUE_I64;
     decoded.signed_value = signed_value;
-    @output = decoded;
+    @output              = decoded;
     ret res[u8, error.AppError].ok{1};
 }
 
@@ -704,13 +706,13 @@ fun bool_decode(ctx: ptr, allocator: *A.Allocator,
     input: view.View, output: *Value) res[u8, error.AppError] {
     if (output == nil) { ret res[u8, error.AppError].err{bad_parameter()}; }
     var value: bool = false;
-    if (same(input, view.view("true", 4))) { value = true; }
+    if (same(input, view.view("true", 4)))  { value = true; }
     or (same(input, view.view("false", 5))) { value = false; }
-    or { ret res[u8, error.AppError].err{bad_parameter()}; }
+    or                                      { ret res[u8, error.AppError].err{bad_parameter()}; }
     var decoded: Value;
-    decoded.kind = VALUE_BOOL;
+    decoded.kind          = VALUE_BOOL;
     decoded.boolean_value = value;
-    @output = decoded;
+    @output               = decoded;
     ret res[u8, error.AppError].ok{1};
 }
 
@@ -728,7 +730,7 @@ fun uuid_decode(ctx: ptr, allocator: *A.Allocator,
     }
     var decoded: Value;
     decoded.kind = VALUE_UUID;
-    var input_index: usize = 0;
+    var input_index:  usize = 0;
     var output_index: usize = 0;
     for (output_index < 16) {
         if (input_index == 8 || input_index == 13 || input_index == 18
@@ -739,11 +741,11 @@ fun uuid_decode(ctx: ptr, allocator: *A.Allocator,
             input_index = input_index + 1;
         }
         val high: i16 = hex(input.data[input_index]);
-        val low: i16 = hex(input.data[input_index + 1]);
+        val low:  i16 = hex(input.data[input_index + 1]);
         if (high < 0 || low < 0) { ret res[u8, error.AppError].err{bad_parameter()}; }
         decoded.uuid_value[output_index] = (high * 16 + low)::u8;
-        input_index = input_index + 2;
-        output_index = output_index + 1;
+        input_index                      = input_index + 2;
+        output_index                     = output_index + 1;
     }
     @output = decoded;
     ret res[u8, error.AppError].ok{1};
@@ -777,7 +779,7 @@ fun test_handler(ctx: ptr, request_context: *context.Context)
 fun test_route(route_method: Method, route_host: Host, route_path: Path,
     parameters: *Parameter, parameter_len: usize, name: str) Route {
     ret Route{method: route_method, host: route_host, path: route_path,
-        name: name, parameters: parameters, parameter_len: parameter_len,
+        name:    name, parameters: parameters, parameter_len: parameter_len,
         handler: handler.Handler{ctx: nil, call: test_handler}};
 }
 
@@ -785,13 +787,14 @@ fun test_request(request: *message.Request, request_method: method.Method,
     request_path: view.View, host_item: *field.Field, host: view.View,
     generation: u64) bool {
     if (request == nil || host_item == nil) { ret false; }
-    request.method = request_method;
-    request.target = target.origin(request_path, request_path, view.view(nil, 0));
+    request.method     = request_method;
+    request.target     = target.origin(request_path, request_path, view.view(nil, 0));
     request.generation = generation;
-    request.fields = field.init(host_item, 1, field.limits(1, 64, 16, 48));
+    request.fields     = field.init(host_item, 1, field.limits(1, 64, 16, 48));
     if (host.len != 0 && field.append(?request.fields, field.Field{
-        name: view.view("Host", 4), value: host,
-        sensitive: false}) != field.ADD_OK) { ret false; }
+        name:      view.view("Host", 4), value: host,
+        sensitive: false
+    }) != field.ADD_OK) { ret false; }
     ret true;
 }
 
@@ -811,20 +814,20 @@ test "laurel.router: compile typed routes and decode request-scoped parameters" 
         exact_host(view.view("api.example.com", 15)),
         path(view.view("/users/me", 9)), nil, 0, "self");
     var specifications: [3]http_router.Route;
-    var compiled: [3]http_router.CompiledRoute;
-    var segments: [8]http_router.Segment;
-    val storage: Storage = Storage{specifications: ?specifications[0],
-        specification_cap: 3, compiled_routes: ?compiled[0],
+    var compiled:       [3]http_router.CompiledRoute;
+    var segments:       [8]http_router.Segment;
+    val storage:        Storage = Storage{specifications: ?specifications[0],
+        specification_cap:  3, compiled_routes: ?compiled[0],
         compiled_route_cap: 3, segments: ?segments[0], segment_cap: 8};
     var router: Router;
     if (compile(?router, ?routes[0], 3, storage, limits_default()).status
         != COMPILE_OK || router.generation == 0 || !router.initialized) { ret 1; }
     var allocation_bytes: [16384]u8;
     var allocation_state: fixed.FixedState;
-    var allocator: A.Allocator;
+    var allocator:        A.Allocator;
     if (!fixed_ok(fixed.make(?allocator, ?allocation_state,
         ?allocation_bytes[0], 16384))) { ret 2; }
-    var request: message.Request;
+    var request:   message.Request;
     var host_item: field.Field;
     if (!test_request(?request, method.from_kind(method.GET),
         view.view("/users/42", 9), ?host_item,
@@ -864,8 +867,8 @@ test "laurel.router: compile typed routes and decode request-scoped parameters" 
     val malformed: Dispatch = dispatch(?router, ?request, ?allocator);
     if (malformed.status != DISPATCH_BAD_REQUEST
         || malformed.app_error.kind != error.BAD_REQUEST) { ret 12; }
-    var small_bytes: [1]u8;
-    var small_state: fixed.FixedState;
+    var small_bytes:     [1]u8;
+    var small_state:     fixed.FixedState;
     var small_allocator: A.Allocator;
     if (!fixed_ok(fixed.make(?small_allocator, ?small_state,
         ?small_bytes[0], 1)) || !test_request(?request,
@@ -901,12 +904,12 @@ test "laurel.router: conflicts and typed declaration mismatches are structured" 
     routes[1] = test_route(exact_method(method.from_kind(method.GET)), any_host(),
         path(view.view("/x/:name", 8)), ?parameters[1], 1, "second");
     var specifications: [2]http_router.Route;
-    var compiled: [2]http_router.CompiledRoute;
-    var segments: [4]http_router.Segment;
-    val storage: Storage = Storage{specifications: ?specifications[0],
-        specification_cap: 2, compiled_routes: ?compiled[0],
+    var compiled:       [2]http_router.CompiledRoute;
+    var segments:       [4]http_router.Segment;
+    val storage:        Storage = Storage{specifications: ?specifications[0],
+        specification_cap:  2, compiled_routes: ?compiled[0],
         compiled_route_cap: 2, segments: ?segments[0], segment_cap: 4};
-    var router: Router;
+    var router:   Router;
     val conflict: Compile = compile(?router, ?routes[0], 2, storage,
         limits_default());
     if (conflict.status != COMPILE_CONFLICT || conflict.route != 1
@@ -915,10 +918,10 @@ test "laurel.router: conflicts and typed declaration mismatches are structured" 
     routes[1] = test_route(exact_method(method.from_kind(method.GET)), any_host(),
         path(view.view("/y/:id", 6)), ?parameters[1], 1, "mismatch");
     var mismatch_router: Router;
-    val mismatch: Compile = compile(?mismatch_router, ?routes[1], 1,
+    val mismatch:        Compile = compile(?mismatch_router, ?routes[1], 1,
         Storage{specifications: ?specifications[0], specification_cap: 1,
-            compiled_routes: ?compiled[0], compiled_route_cap: 1,
-            segments: ?segments[0], segment_cap: 2}, limits_default());
+        compiled_routes: ?compiled[0], compiled_route_cap: 1,
+        segments:        ?segments[0], segment_cap: 2}, limits_default());
     if (mismatch.status != COMPILE_PARAMETER
         || mismatch.app_error.kind != error.BAD_REQUEST
         || mismatch_router.initialized) { ret 2; }
@@ -928,16 +931,16 @@ test "laurel.router: conflicts and typed declaration mismatches are structured" 
     var method_router: Router;
     if (compile(?method_router, ?routes[1], 1,
         Storage{specifications: ?specifications[0], specification_cap: 1,
-            compiled_routes: ?compiled[0], compiled_route_cap: 1,
-            segments: ?segments[0], segment_cap: 2}, limits_default()).status
+        compiled_routes: ?compiled[0], compiled_route_cap: 1,
+        segments:        ?segments[0], segment_cap: 2}, limits_default()).status
         != COMPILE_METHOD) { ret 3; }
     routes[1] = test_route(any_method(), exact_host(view.view("*", 1)),
         path(view.view("/", 1)), nil, 0, "bad-host-kind");
     var host_router: Router;
     if (compile(?host_router, ?routes[1], 1,
         Storage{specifications: ?specifications[0], specification_cap: 1,
-            compiled_routes: ?compiled[0], compiled_route_cap: 1,
-            segments: ?segments[0], segment_cap: 2}, limits_default()).status
+        compiled_routes: ?compiled[0], compiled_route_cap: 1,
+        segments:        ?segments[0], segment_cap: 2}, limits_default()).status
         != COMPILE_HOST) { ret 4; }
     ret 0;
 }
