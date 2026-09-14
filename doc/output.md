@@ -25,7 +25,9 @@ caller storage.
 
 `render.init_fixed` and `render.init_stream` reject any body that cannot fit the
 configured chunk and chunk-count limits, so a body never becomes unrepresentable
-after the response is installed.
+after the response is installed. Fixed and stream readers should be initialized
+under the host limits retrieved via `context.limits(request_context)` so that
+reader limits fit within the exchange limits checked at commit time.
 
 Cancellation reaches a stream through the body reader's cancellation scope.
 `body.read` classifies the scope before it consults the source, so a cancelled or
@@ -40,9 +42,12 @@ never asks it for another chunk.
 `Media` built without one emits no `charset` parameter. `render.text_plain`,
 `render.text_html`, and `render.application_json` are the explicit UTF-8 forms.
 
-`render.respond` installs exactly one status, one `content-type`, and one body.
+`render.respond` installs exactly one status, one `content-type`, and one body
+under the host message limits provided by the request context. `render.respond_with_limits`
+accepts an explicit `message.Limits` when narrower constraints are required.
 It refuses a committed response, a response that already carries a body or a
-content type, and a body whose generation is not the response generation. Every
+content type, a body whose generation is not the response generation, and a
+reader whose limits or length exceed the configured response body limits. Every
 failure restores the original status, field count, and field byte total.
 
 ### Escaping
