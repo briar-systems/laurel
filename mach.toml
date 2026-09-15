@@ -68,4 +68,4 @@ ref = "tag/v0.9.1"
 
 [dep.http]
 git = "https://github.com/briar-systems/mach-http"
-ref = "tag/v0.8.1"
+ref = "tag/v0.8.2"
