@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-09-15
+
+### Fixed
+- A session cookie whose policy has `max_age` 0 omits `Max-Age`, so the browser keeps it for the session instead of deleting it (#82).
+- Rendered responses and default error rendering take their limits from the bound exchange through `context.limits`, and a response whose reader limits or length exceed the host's limits returns `RESPOND_LIMIT` instead of failing at commit (#83).
+
+### Changed
+- Dependencies: mach-crypto v0.9.1, mach-http v0.8.1.
+
 ## [0.9.1] - 2026-09-13
 
 ### Changed
