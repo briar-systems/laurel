@@ -697,12 +697,13 @@ fun respond_text(state: *HandlerState,
     if (response == nil || !render.release_fixed(?state.fixed)) {
         ret res[u8, error.AppError].err{internal_error("response is unavailable")};
     }
+    val limits: message.Limits = context.limits(request_context);
     if (!render.release_media(?state.media) || !render.text_plain(?state.media)
         || !render.init_fixed(?state.fixed, view.view(?state.text[0], state.text_len),
-        response.generation, state.limits, ?response.trailers,
+        response.generation, limits, ?response.trailers,
         context.cancellation(request_context))
         || render.respond(request_context, status.OK, ?state.media,
-        render.fixed_body(?state.fixed), state.limits) != render.RESPOND_OK) {
+        render.fixed_body(?state.fixed)) != render.RESPOND_OK) {
         ret res[u8, error.AppError].err{internal_error("fixed response installation failed")};
     }
     ret res[u8, error.AppError].ok{handler.RESPOND};
@@ -826,11 +827,12 @@ fun stream_show(ctx: ptr,
     }
     val source: render.Source = render.Source{ctx: state::ptr, produce: stream_produce,
         resume: stream_resume, settle: stream_settle};
+    val limits: message.Limits = context.limits(request_context);
     if (!render.text_plain(?state.media)
         || !render.init_stream(?state.stream, source, 4096, response.generation,
-        state.limits, ?response.trailers, context.cancellation(request_context))
+        limits, ?response.trailers, context.cancellation(request_context))
         || render.respond(request_context, status.OK, ?state.media,
-        render.stream_body(?state.stream), state.limits) != render.RESPOND_OK) {
+        render.stream_body(?state.stream)) != render.RESPOND_OK) {
         ret res[u8, error.AppError].err{internal_error("stream installation failed")};
     }
     ret res[u8, error.AppError].ok{handler.RESPOND};
@@ -1389,7 +1391,8 @@ test "laurel.testing: a handler reaches its session through the application" {
         || !contains(issued.value, "Secure")
         || !contains(issued.value, "HttpOnly")
         || !contains(issued.value, "SameSite=Lax")
-        || !contains(issued.value, "Path=/")) { ret 7; }
+        || !contains(issued.value, "Path=/")
+        || contains(issued.value, "Max-Age")) { ret 7; }
     # a route that never touches a session emits no cookie at all
     if (invoke(?harness, get_request(fields, view.view("/orders/42", 10),
         view.view("harness-s2", 10)), ?result) != INVOKE_OK

@@ -476,6 +476,7 @@ fun fixed_complete(ctx: ptr, token: u64, trailers: *field.Fields) body.Progress 
 
 fun fixed_release(ctx: ptr) {}
 
+# initialize fixed body reader under host message limits
 pub fun init_fixed(state: *Fixed, content: view.View, generation: u64,
     configured: message.Limits, trailers: *field.Fields, scope: *cancel.Scope) bool {
     if (state == nil || state.initialized || generation == 0 || !view_valid(content)
@@ -591,6 +592,7 @@ fun stream_complete(ctx: ptr, token: u64, trailers: *field.Fields) body.Progress
 
 fun stream_release(ctx: ptr) {}
 
+# initialize stream body reader under host message limits
 pub fun init_stream(state: *Stream, source: Source, max_bytes: u64, generation: u64,
     configured: message.Limits, trailers: *field.Fields, scope: *cancel.Scope) bool {
     if (state == nil || state.initialized || generation == 0 || max_bytes == 0
@@ -642,8 +644,15 @@ fun content_type_present(response: *message.Response) bool {
     ret field.find_first(?response.fields, view.view("content-type", 12)) != nil;
 }
 
-# install one status, one content type, and one body without committing
+# install one status, one content type, and one body using host message limits
 pub fun respond(request_context: *context.Context, code: status.Status, media: *Media,
+    reader: *body.Reader) RespondStatus {
+    ret respond_with_limits(request_context, code, media, reader,
+        context.limits(request_context));
+}
+
+# install one status, one content type, and one body under explicit limits
+pub fun respond_with_limits(request_context: *context.Context, code: status.Status, media: *Media,
     reader: *body.Reader, configured: message.Limits) RespondStatus {
     if (!context.active(request_context)) { ret RESPOND_CANCELLED; }
     val response: *message.Response = context.response(request_context);
@@ -654,6 +663,10 @@ pub fun respond(request_context: *context.Context, code: status.Status, media: *
     if (response.committed) { ret RESPOND_COMMITTED; }
     if (response.body_kind != message.BODY_NONE || content_type_present(response)) {
         ret RESPOND_INVALID;
+    }
+    if (!body.within_limits(reader.limits, configured.response_body)
+        || (reader.has_length && reader.declared_length > configured.response_body.max_bytes)) {
+        ret RESPOND_LIMIT;
     }
     val original_status: status.Status = response.status;
     val original_len:    usize         = response.fields.len;
@@ -691,8 +704,15 @@ pub fun render(renderer: *Renderer, name: view.View,
     ret renderer.render(renderer.ctx, name, model);
 }
 
-# render a model and install the result, without requiring any template engine
+# render a model and install the result using host limits from the request context
 pub fun render_into(renderer: *Renderer, name: view.View, model: ptr,
+    request_context: *context.Context) res[u8, error.AppError] {
+    ret render_into_with_limits(renderer, name, model, request_context,
+        context.limits(request_context));
+}
+
+# render a model and install the result under explicit limits
+pub fun render_into_with_limits(renderer: *Renderer, name: view.View, model: ptr,
     request_context: *context.Context,
     configured: message.Limits) res[u8, error.AppError] {
     val rendered: res[Rendered, error.AppError] = render(renderer, name, model);
@@ -706,8 +726,8 @@ pub fun render_into(renderer: *Renderer, name: view.View, model: ptr,
         ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
             "internal server error", "renderer returned a foreign generation", false)};
     }
-    val installed: RespondStatus = respond(request_context, output.status, output.media,
-        output.body, configured);
+    val installed: RespondStatus = respond_with_limits(request_context, output.status,
+        output.media, output.body, configured);
     if (installed == RESPOND_OK) { ret res[u8, error.AppError].ok{1}; }
     if (installed == RESPOND_CANCELLED) {
         ret res[u8, error.AppError].err{error.make(error.CANCELLED, 408,
@@ -740,13 +760,12 @@ fun fixture_limits() message.Limits {
     ret configured;
 }
 
-fun init_fixture(state: *Fixture, generation: u64) bool {
+fun init_fixture_with_limits(state: *Fixture, generation: u64, configured: message.Limits) bool {
     if (state == nil || !operation_ok(cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0}))) {
         ret false;
     }
     if (!fixed_ok(fixed_allocator.make(?state.allocator, ?state.allocation_state,
         ?state.allocation_bytes[0], 1024))) { ret false; }
-    val configured:       message.Limits = fixture_limits();
     val request_fields:   field.Fields   = field.init(nil, 0, field.limits(0, 0, 0, 0));
     val request_trailers: field.Fields   = field.init(nil, 0, field.limits(0, 0, 0, 0));
     state.request_body = body.empty_reader(generation);
@@ -770,6 +789,10 @@ fun init_fixture(state: *Fixture, generation: u64) bool {
     ret context.bind(?state.context, ?state.exchange,
         context.Params{items: nil, len: 0, generation: generation}, 4, ?state.allocator,
         ?state.owner, 3, nil, view.view("render-request", 14), 32);
+}
+
+fun init_fixture(state: *Fixture, generation: u64) bool {
+    ret init_fixture_with_limits(state, generation, fixture_limits());
 }
 
 fun same(actual: *u8, length: usize, expected: view.View) bool {
@@ -874,8 +897,7 @@ test "laurel.render: a bounded body reaches the wire without a template engine" 
     val text:    view.View = view.view("abcdefghijklmnopqrstuvwxyz", 26);
     if (!text_plain(?media) || !init_fixed(?content, text, 31, fixture_limits(),
         ?state.response.trailers, ?state.scope)) { ret 2; }
-    if (respond(?state.context, status.OK, ?media, fixed_body(?content),
-        fixture_limits()) != RESPOND_OK) { ret 3; }
+    if (respond(?state.context, status.OK, ?media, fixed_body(?content)) != RESPOND_OK) { ret 3; }
     if (state.response.status != status.OK || state.response.fields.len != 1
         || state.response.body_kind != message.BODY_READER
         || state.response.body_reader != ?content.reader) { ret 4; }
@@ -883,8 +905,7 @@ test "laurel.render: a bounded body reaches the wire without a template engine" 
         view.view("content-type", 12));
     if (header == nil || !same(header.value.data, header.value.len,
         view.view("text/plain; charset=utf-8", 25))) { ret 5; }
-    if (respond(?state.context, status.OK, ?media, fixed_body(?content),
-        fixture_limits()) != RESPOND_INVALID || state.response.fields.len != 1) { ret 6; }
+    if (respond(?state.context, status.OK, ?media, fixed_body(?content)) != RESPOND_INVALID || state.response.fields.len != 1) { ret 6; }
     var received: [32]u8;
     var total:    usize         = 0;
     var chunks:   usize         = 0;
@@ -961,7 +982,7 @@ test "laurel.render: streamed bodies suspend, resume, and cancel" {
         ?state.response.trailers, ?state.scope)) { ret 2; }
     var media: Media;
     if (!text_plain(?media) || respond(?state.context, status.OK, ?media,
-        stream_body(?stream), fixture_limits()) != RESPOND_OK) { ret 3; }
+        stream_body(?stream)) != RESPOND_OK) { ret 3; }
     var received:  [64]u8;
     var suspended: body.Progress = body.read(?stream.reader, ?received[0], 16);
     if (suspended.status != body.PENDING || suspended.token != 77
@@ -997,14 +1018,14 @@ test "laurel.render: a renderer installs its own body with no engine coupling" {
     val renderer: Renderer = Renderer{ctx: ?provider, render: test_render};
     if (!renderer_valid(?renderer)) { ret 3; }
     val installed: res[u8, error.AppError] = render_into(?renderer,
-        view.view("page", 4), nil, ?state.context, fixture_limits());
+        view.view("page", 4), nil, ?state.context);
     if (sel installed.err)                                                                                          { ret 4; }
     if (provider.calls != 1 || state.response.status != status.OK || state.response.body_reader != ?content.reader) { ret 4; }
     provider.fail = true;
     var second: Fixture;
     if (!init_fixture(?second, 52)) { ret 5; }
     val refused: res[u8, error.AppError] = render_into(?renderer,
-        view.view("page", 4), nil, ?second.context, fixture_limits());
+        view.view("page", 4), nil, ?second.context);
     if ((sel refused.ok)
         || second.response.fields.len != 0) { ret 6; }
     if (!context.unbind(?state.context, ?state.owner, 3)
@@ -1030,4 +1051,26 @@ fun test_render(ctx: ptr, name: view.View, model: ptr) res[Rendered, error.AppEr
     }
     ret res[Rendered, error.AppError].ok{Rendered{status: status.OK, media: state.media,
         body: ?state.content.reader, generation: state.generation}};
+}
+
+test "laurel.render: respond enforces host limits and explicit limits" {
+    var tight_limits: message.Limits = fixture_limits();
+    tight_limits.response_body = body.limits(1024, 512, 16);
+    var state: Fixture;
+    if (!init_fixture_with_limits(?state, 61, tight_limits)) { ret 1; }
+    var media:   Media;
+    var content: Fixed;
+    val text:    view.View = view.view("hello world", 11);
+    var loose:   message.Limits = message.limits_default();
+    loose.response_body = body.limits(1048576, 65536, 1024);
+    if (!text_plain(?media) || !init_fixed(?content, text, 61, loose,
+        ?state.response.trailers, ?state.scope)) { ret 2; }
+    if (respond(?state.context, status.CREATED, ?media, fixed_body(?content)) != RESPOND_LIMIT) { ret 3; }
+    if (state.response.status != status.OK || state.response.fields.len != 0) { ret 4; }
+    if (respond_with_limits(?state.context, status.CREATED, ?media, fixed_body(?content),
+        loose) != RESPOND_OK) { ret 5; }
+    if (state.response.status != status.CREATED) { ret 6; }
+    if (!context.unbind(?state.context, ?state.owner, 3)
+        || !operation_ok(cancel.destroy(?state.scope))) { ret 7; }
+    ret 0;
 }
