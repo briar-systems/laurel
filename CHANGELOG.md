@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- CI runs the shared family pipeline from briar-systems/.github behind a single `gate` check (#111). A pull request into `dev` runs the light tier on x86_64-linux, a pull request into `main` adds the native aarch64-linux, x86_64-windows, aarch64-darwin and x86_64-darwin legs, and nothing runs on push. The format check is now enforced, and demo/ and doc/bench/laurel/ are built on every run.
+
 ## [0.11.0] - 2026-09-16
 
 ### Added
