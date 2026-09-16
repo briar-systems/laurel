@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Changed
+- demo/ and doc/bench/laurel/ pin hedge v0.4.1.
+
+### Changed
 - demo/ and doc/bench/laurel/ pin laurel v0.10.0 and end their middleware chains through `router.terminal_handler` instead of each carrying the mapping (#105).
 
 ## [0.10.0] - 2026-09-15
