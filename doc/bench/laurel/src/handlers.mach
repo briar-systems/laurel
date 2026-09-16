@@ -3,15 +3,6 @@
 # each one owns its response bytes and takes them from the per-request arena,
 # because laurel allocates nothing on the application's behalf.
 
-use A: std.allocator;
-use std.types.result.res;
-use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
-use std.types.char.char;
-use std.types.size.usize;
-use std.types.string.str;
-use std.types.view;
 use http.core.exchange;
 use http.core.message;
 use http.core.status;
@@ -20,11 +11,20 @@ use laurel.error;
 use laurel.form;
 use laurel.handler;
 use laurel.render;
+use A: std.allocator;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.char.char;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.view;
 
-val FORM_FIELDS: usize = 4;
-val FORM_BYTES: usize = 512;
+val FORM_FIELDS:     usize = 4;
+val FORM_BYTES:      usize = 512;
 val FORM_READ_BYTES: usize = 256;
-val MAX_BODY_TURNS: usize = 32;
+val MAX_BODY_TURNS:  usize = 32;
 
 pub rec State {
     requests: u64;
@@ -51,23 +51,23 @@ pub fun text(value: str) view.View {
 
 fun write_u64(value: u64, output: *u8, capacity: usize) usize {
     if (output == nil || capacity == 0) { ret 0; }
-    var digits: [20]u8;
-    var count: usize = 0;
-    var remaining: u64 = value;
+    var digits:    [20]u8;
+    var count:     usize = 0;
+    var remaining: u64   = value;
     if (remaining == 0) {
         digits[0] = '0'::u8;
-        count = 1;
+        count     = 1;
     }
     for (remaining != 0) {
         digits[count] = ('0'::u8) + (remaining % 10)::u8;
-        remaining = remaining / 10;
-        count = count + 1;
+        remaining     = remaining / 10;
+        count         = count + 1;
     }
     if (count > capacity) { ret 0; }
     var i: usize = 0;
     for (i < count) {
         output[i] = digits[count - 1 - i];
-        i = i + 1;
+        i         = i + 1;
     }
     ret count;
 }
@@ -77,7 +77,7 @@ fun copy_in(output: *u8, capacity: usize, offset: usize, source: view.View) usiz
     var i: usize = 0;
     for (i < source.len) {
         output[offset + i] = source.data[i]::u8;
-        i = i + 1;
+        i                  = i + 1;
     }
     ret offset + source.len;
 }
@@ -87,8 +87,8 @@ fun field_value(decoded: *form.Form, name: view.View) view.View {
     for (i < decoded.len) {
         val item: *form.Field = ?decoded.fields[i];
         if (item.name.len == name.len) {
-            var same: bool = true;
-            var j: usize = 0;
+            var same: bool  = true;
+            var j:    usize = 0;
             for (j < name.len) {
                 if (item.name.data[j] != name.data[j]) { same = false; }
                 j = j + 1;
@@ -112,16 +112,16 @@ fun respond_json(request_context: *context.Context, content: view.View)
     if (sel allocated.err) {
         ret res[u8, error.AppError].err{internal("response storage was refused")};
     }
-    val holder: *Body = allocated.ok;
-    val response: *message.Response = context.response(request_context);
-    val bound: *exchange.Exchange = context.exchange_ref(request_context);
+    val holder:   *Body              = allocated.ok;
+    val response: *message.Response  = context.response(request_context);
+    val bound:    *exchange.Exchange = context.exchange_ref(request_context);
     if (response == nil || bound == nil
         || !render.application_json(?holder.media)
         || !render.init_fixed(?holder.fixed, content, response.generation,
-            bound.limits, ?response.trailers,
-            context.cancellation(request_context))
+        bound.limits, ?response.trailers,
+        context.cancellation(request_context))
         || render.respond_with_limits(request_context, status.OK, ?holder.media,
-            render.fixed_body(?holder.fixed), bound.limits) != render.RESPOND_OK) {
+        render.fixed_body(?holder.fixed), bound.limits) != render.RESPOND_OK) {
         ret res[u8, error.AppError].err{internal("response installation failed")};
     }
     ret res[u8, error.AppError].ok{handler.RESPOND};
@@ -141,7 +141,7 @@ pub fun json_hello(ctx: ptr, request_context: *context.Context)
 # GET /echo/:id
 pub fun echo(ctx: ptr, request_context: *context.Context)
     res[u8, error.AppError] {
-    val state: *State = ctx::*State;
+    val state: *State         = ctx::*State;
     val found: *context.Param = context.find_param(request_context, text("id"));
     if (state == nil || found == nil || found.kind != context.PARAM_U64) {
         ret res[u8, error.AppError].err{internal("route parameter is missing")};
@@ -151,12 +151,12 @@ pub fun echo(ctx: ptr, request_context: *context.Context)
     if (arena == nil) {
         ret res[u8, error.AppError].err{internal("request arena is unavailable")};
     }
-    val room: usize = 48;
+    val room:      usize             = 48;
     val allocated: res[*u8, A.Error] = A.allocate[u8](arena, room);
     if (sel allocated.err) {
         ret res[u8, error.AppError].err{internal("body storage was refused")};
     }
-    val out: *u8 = allocated.ok;
+    val out:    *u8   = allocated.ok;
     var length: usize = copy_in(out, room, 0, text("{\"id\":"));
     val digits: usize = write_u64(found.unsigned_value, ?out[length], room - length);
     if (length == 0 || digits == 0) {
@@ -178,14 +178,14 @@ pub fun submit(ctx: ptr, request_context: *context.Context)
     }
     state.requests = state.requests + 1;
     val request: *message.Request = context.request(request_context);
-    val arena: *A.Allocator = request_context.alloc;
+    val arena:   *A.Allocator     = request_context.alloc;
     if (request == nil || request.body == nil || arena == nil) {
         ret res[u8, error.AppError].err{internal("the request is unavailable")};
     }
     val fields_storage: res[*form.Field, A.Error] =
         A.zallocate[form.Field](arena, FORM_FIELDS);
-    val bytes_storage: res[*u8, A.Error] = A.allocate[u8](arena, FORM_BYTES);
-    val read_storage: res[*u8, A.Error] = A.allocate[u8](arena, FORM_READ_BYTES);
+    val bytes_storage:   res[*u8, A.Error]              = A.allocate[u8](arena, FORM_BYTES);
+    val read_storage:    res[*u8, A.Error]              = A.allocate[u8](arena, FORM_READ_BYTES);
     val decoder_storage: res[*form.UrlEncoded, A.Error] =
         A.zallocate[form.UrlEncoded](arena, 1);
     val parser_storage: res[*form.BodyParser, A.Error] =
@@ -210,24 +210,26 @@ pub fun submit(ctx: ptr, request_context: *context.Context)
     val parser: *form.BodyParser =
         parser_storage.ok;
     if (!form.init_urlencoded(decoder, form.Storage{
-            fields: fields_storage.ok,
-            field_capacity: FORM_FIELDS,
-            bytes: bytes_storage.ok,
-            byte_capacity: FORM_BYTES},
+        fields:         fields_storage.ok,
+        field_capacity: FORM_FIELDS,
+        bytes:          bytes_storage.ok,
+        byte_capacity:  FORM_BYTES
+    },
         form.Limits{max_bytes: FORM_BYTES, max_fields: FORM_FIELDS,
-            max_name_bytes: 64, max_value_bytes: 256,
-            max_temporary_bytes: FORM_BYTES})
+        max_name_bytes:      64, max_value_bytes: 256,
+        max_temporary_bytes: FORM_BYTES})
         || !form.init_body(parser, decoder, request.body,
-            read_storage.ok, FORM_READ_BYTES)) {
+        read_storage.ok, FORM_READ_BYTES)) {
         ret res[u8, error.AppError].err{internal("the form decoder was refused")};
     }
     var current: form.Operation = form.poll_body(parser);
-    var turns: usize = 0;
+    var turns:   usize          = 0;
     for ((current.status == form.MORE || current.status == form.PENDING)
         && turns < MAX_BODY_TURNS) {
         if (current.status == form.PENDING) {
             current = form.complete_body(parser, current.token);
-        } or {
+        }
+        or {
             current = form.poll_body(parser);
         }
         turns = turns + 1;
@@ -245,13 +247,13 @@ pub fun submit(ctx: ptr, request_context: *context.Context)
         ret res[u8, error.AppError].err{error.make(error.BAD_REQUEST, 400,
             "name is required", "the form carried no name field", false)};
     }
-    val room: usize = 320;
+    val room: usize             = 320;
     val page: res[*u8, A.Error] = A.allocate[u8](arena, room);
     if (sel page.err) {
         ret res[u8, error.AppError].err{internal("body storage was refused")};
     }
-    val out: *u8 = page.ok;
-    var length: usize = copy_in(out, room, 0, text("{\"name\":\""));
+    val out:     *u8   = page.ok;
+    var length:  usize = copy_in(out, room, 0, text("{\"name\":\""));
     var escaped: usize = 0;
     if (render.escape_json(name, ?out[length], room - length, ?escaped)
         != render.ESCAPE_OK) {

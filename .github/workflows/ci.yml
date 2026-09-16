@@ -2,39 +2,33 @@ name: CI
 
 on:
   pull_request:
-    branches: [dev, main]
-  # release branches also build on push. a pull_request trigger is selected from
-  # the base branch, so adding `main` above cannot take effect for the very PR
-  # that adds it -- the first release PR would still land untested.
-  push:
-    branches:
-      - 'chore/release-*'
-      - 'hotfix/*'
+  workflow_dispatch:
+    inputs:
+      heavy:
+        description: heavy work to run on this ref
+        type: choice
+        default: none
+        options: [none, all, aarch64-linux, x86_64-windows, aarch64-darwin, x86_64-darwin]
+
+permissions:
+  contents: read
 
 jobs:
-  linux-x86_64:
-    name: linux x86_64
+  lib:
+    uses: briar-systems/.github/.github/workflows/mach-lib.yml@main
+    with:
+      heavy: ${{ inputs.heavy }}
+      # the demo and the bench server resolve laurel from a tag, so they gate
+      # that they still build, once, on the primary leg
+      subprojects: >-
+        [{"path": "demo", "build": true, "test": false, "legs": ["x86_64-linux"]},
+         {"path": "doc/bench/laurel", "build": true, "test": false, "legs": ["x86_64-linux"]}]
+
+  gate:
+    if: always()
+    needs: [lib]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Seed mach
-        uses: ./.github/actions/seed-mach
-
-      - name: Report the seed
-        run: mach info
-
-      - name: Resolve dependencies
-        run: mach dep pull .
-
-      - name: Build
-        run: mach build .
-
-      - name: Test
-        run: mach test .
-
-      - name: Test (release)
-        run: mach test . --profile release
-
-      - name: Build every target
-        run: mach build . --all-targets --profile release
+      - uses: briar-systems/.github/.github/actions/gate@main
+        with:
+          needs: ${{ toJSON(needs) }}

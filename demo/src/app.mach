@@ -5,16 +5,7 @@
 # every component lives and how long it lives. here that is one heap allocation
 # made before the server starts and released after it stops.
 
-use std.types.error.err;
-use std.types.result.res;
-use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
-use std.types.size.usize;
-use std.types.string.str;
-use std.types.view;
-use std.print;
-use std.chrono.time;
+use demo.handlers;
 use http.core.message;
 use http.core.method;
 use http.core.status;
@@ -29,13 +20,22 @@ use laurel.observability;
 use laurel.provider;
 use laurel.router;
 use laurel.security;
+use laurel.security.csrf;
 use laurel.session;
-use csrf: laurel.security.csrf;
+use std.chrono.time;
 use crypto_rand: std.crypto.rand;
-use secret: std.system.os.secret;
+use io_error:    std.io.error;
 use std.memory;
-use io_error: std.io.error;
-use demo.handlers;
+use std.print;
+use std.system.os.secret;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.view;
 
 fun rand_ok(outcome: err[io_error.Error]) bool {
     ret sel outcome.ok;
@@ -46,11 +46,12 @@ fun wall_now() time.Time {
     if (sel sampled.ok) { ret sampled.ok; }
     ret time.Time{sec: 0, nsec: 0};
 }
-pub val ROUTE_COUNT: usize = 4;
-val SEGMENT_COUNT: usize = 16;
-val MIDDLEWARE_COUNT: usize = 2;
-val SESSION_SLOTS: usize = 1024;
-val GUARD_SLOTS: usize = 2048;
+
+pub val ROUTE_COUNT:      usize = 4;
+val     SEGMENT_COUNT:    usize = 16;
+val     MIDDLEWARE_COUNT: usize = 2;
+val     SESSION_SLOTS:    usize = 1024;
+val     GUARD_SLOTS:      usize = 2048;
 
 # how many requests may be in flight at once. hedge admits connections up to its
 # own pool, and every admitted request reserves one laurel slot, so this bounds
@@ -80,22 +81,22 @@ pub rec Application {
     state:          handlers.State;
     # sessions: an in-memory store, an AEAD codec over a rotating key ring, and
     # the binder middleware that opens and commits one session per request
-    store_slots:    [SESSION_SLOTS]session.MemorySlot;
-    memory:         session.MemoryStore;
-    keys:           [1]session.KeyGeneration;
-    ring:           session.KeyRing;
-    nonce_slots:    [GUARD_SLOTS]session.GuardSlot;
-    nonce_guard:    session.MemoryGuard;
-    replay_slots:   [GUARD_SLOTS]session.GuardSlot;
-    replay_guard:   session.MemoryGuard;
-    codec:          session.ProtectedCodec;
-    manager:        session.Manager;
-    binder:         session.Binder;
+    store_slots:  [SESSION_SLOTS]session.MemorySlot;
+    memory:       session.MemoryStore;
+    keys:         [1]session.KeyGeneration;
+    ring:         session.KeyRing;
+    nonce_slots:  [GUARD_SLOTS]session.GuardSlot;
+    nonce_guard:  session.MemoryGuard;
+    replay_slots: [GUARD_SLOTS]session.GuardSlot;
+    replay_guard: session.MemoryGuard;
+    codec:        session.ProtectedCodec;
+    manager:      session.Manager;
+    binder:       session.Binder;
     # csrf: only the protector lives here. its key ring is secret-welded, and a
     # secret value cannot sit inside a record that is later erased to `ptr`, so
     # the ring is owned by main and reached through a typed pointer instead.
-    protector:      csrf.Protector;
-    application:    app.App;
+    protector:   csrf.Protector;
+    application: app.App;
 }
 
 # the observer is where the application learns what happened to a request.
@@ -135,13 +136,13 @@ fun observer_error(ctx: ptr, event: *observability.RequestEvent,
     val state: *Counters = ctx::*Counters;
     state.failed = state.failed + 1;
     if (state.quiet) { ret; }
-    var copy: error.AppError = failure;
-    val detail: view.View = error.private_detail(?copy);
-    var text: [256]u8;
-    var i: usize = 0;
+    var copy:   error.AppError = failure;
+    val detail: view.View      = error.private_detail(?copy);
+    var text:   [256]u8;
+    var i:      usize          = 0;
     for (i < detail.len && i < 255) {
         text[i] = detail.data[i]::u8;
-        i = i + 1;
+        i       = i + 1;
     }
     text[i] = 0;
     print.eprintlnf("demo: request failed: kind {} status {}: {}",
@@ -152,7 +153,7 @@ fun observer_error(ctx: ptr, event: *observability.RequestEvent,
 # application trusts. laurel ships no default, on purpose.
 fun entropy_fill(ctx: ptr, output: *u8, length: usize) i64 {
     val state: *EntropyState = ctx::*EntropyState;
-    if (state != nil) { state.calls = state.calls + 1; }
+    if (state != nil)                               { state.calls = state.calls + 1; }
     if (!rand_ok(crypto_rand.fill(output, length))) { ret 1; }
     ret 0;
 }
@@ -168,18 +169,18 @@ fun clock_now(ctx: ptr) i64 {
 fun init_sessions(demo: *Application) bool {
     demo.memory.active = false;
     if (!session.init_memory_store(?demo.memory, ?demo.store_slots[0],
-            SESSION_SLOTS)
+        SESSION_SLOTS)
         || !session.init_memory_guard(?demo.nonce_guard, ?demo.nonce_slots[0],
-            GUARD_SLOTS)
+        GUARD_SLOTS)
         || !session.init_memory_guard(?demo.replay_guard, ?demo.replay_slots[0],
-            GUARD_SLOTS)) { ret false; }
-    demo.keys[0].id = 1;
-    demo.keys[0].key_len = 32;
+        GUARD_SLOTS)) { ret false; }
+    demo.keys[0].id           = 1;
+    demo.keys[0].key_len      = 32;
     demo.keys[0].activated_at = 0;
     demo.keys[0].encode_until = 4102444800;
     demo.keys[0].decode_until = 4102444800;
     if (!rand_ok(crypto_rand.fill(?demo.keys[0].key[0], 32))) { ret false; }
-    val nonce: session.Guard = session.memory_guard(?demo.nonce_guard);
+    val nonce:  session.Guard = session.memory_guard(?demo.nonce_guard);
     val replay: session.Guard = session.memory_guard(?demo.replay_guard);
     if (!session.init_key_ring(?demo.ring, ?demo.keys[0], 1, 1, 0,
         session.AES_256_GCM, nonce.domain)) { ret false; }
@@ -208,7 +209,7 @@ fun init_sessions(demo: *Application) bool {
     ret session.init_binder(?demo.binder, ?demo.manager,
         session.Clock{ctx: nil, now: clock_now},
         session.RequestLimits{max_cookies: 4, max_data_bytes: 256,
-            max_token_bytes: 512, max_header_bytes: 512});
+        max_token_bytes: 512, max_header_bytes: 512});
 }
 
 # the caller owns the key ring and its generations, because both are secret and
@@ -216,18 +217,18 @@ fun init_sessions(demo: *Application) bool {
 pub fun init_csrf(demo: *Application, ring: *csrf.KeyRing,
     keys: *csrf.KeyGeneration) bool {
     if (demo == nil || ring == nil || keys == nil) { ret false; }
-    keys[0].id = 1;
+    keys[0].id           = 1;
     keys[0].activated_at = 0;
-    keys[0].issue_until = 4102444800;
+    keys[0].issue_until  = 4102444800;
     keys[0].verify_until = 4102444800;
     if (secret.random_fill(?keys[0].key[0], 32) != 0) { ret false; }
-    if (!csrf.init_ring(ring, keys, 1, 1, 0)) { ret false; }
+    if (!csrf.init_ring(ring, keys, 1, 1, 0))         { ret false; }
     ret csrf.init(?demo.protector, ring,
         csrf.Entropy{ctx: (?demo.entropy)::ptr,
-            context_size: $size_of(EntropyState),
-            aliases_state: entropy_aliases, fill: entropy_fill},
+        context_size:  $size_of(EntropyState),
+        aliases_state: entropy_aliases, fill: entropy_fill},
         csrf.Policy{binding: csrf.BIND_SESSION, max_age_s: 3600,
-            clock_skew_s: 30, require_unsafe: false});
+        clock_skew_s: 30, require_unsafe: false});
 }
 
 fun service_start(ctx: ptr) res[lifecycle.CallbackStatus, view.View] {
@@ -277,9 +278,9 @@ fun route(method_rule: router.Method, pattern: view.View, name: str,
     parameters: *router.Parameter, parameter_len: usize,
     call: handler.HandlerFun, ctx: ptr) router.Route {
     ret router.Route{method: method_rule, host: router.any_host(),
-        path: router.path(pattern), name: name, parameters: parameters,
+        path:          router.path(pattern), name: name, parameters: parameters,
         parameter_len: parameter_len,
-        handler: handler.Handler{ctx: ctx, call: call}};
+        handler:       handler.Handler{ctx: ctx, call: call}};
 }
 
 # the host decides the message limits every exchange is committed under, so the
@@ -316,29 +317,30 @@ pub fun assemble(demo: *Application, limits: message.Limits, quiet: bool) bool {
         handlers.form_submit, (?demo.state)::ptr);
 
     val storage: router.Storage = router.Storage{
-        specifications: ?demo.specifications[0], specification_cap: ROUTE_COUNT,
+        specifications:  ?demo.specifications[0], specification_cap: ROUTE_COUNT,
         compiled_routes: ?demo.compiled[0], compiled_route_cap: ROUTE_COUNT,
-        segments: ?demo.segments[0], segment_cap: SEGMENT_COUNT};
+        segments:        ?demo.segments[0], segment_cap: SEGMENT_COUNT
+    };
     if (router.compile(?demo.matcher, ?demo.routes[0], ROUTE_COUNT, storage,
         router.limits_default()).status != router.COMPILE_OK) { ret false; }
 
     demo.middlewares[0] = middleware.Middleware{ctx: (?demo.headers)::ptr,
         call: secure_headers_middleware};
     demo.middlewares[1] = session.binder_middleware(?demo.binder);
-    demo.stack = middleware.Stack{items: ?demo.middlewares[0],
+    demo.stack          = middleware.Stack{items: ?demo.middlewares[0],
         len: MIDDLEWARE_COUNT};
 
     if (!provider.init(?demo.providers, nil, 0, 0, 32)) { ret false; }
     demo.services[0] = lifecycle.Lifecycle{ctx: nil, start: service_start,
         ready: service_ready, drain: service_drain, stop: service_stop};
     if (!lifecycle.init(?demo.controller, ?demo.services[0], 1, 1)) { ret false; }
-    if (!error.initialize_default(?demo.errors, limits, 512)) { ret false; }
+    if (!error.initialize_default(?demo.errors, limits, 512))       { ret false; }
 
     if (!observability.term(?demo.label_specs[0].name, handlers.text("kind"))) {
         ret false;
     }
-    demo.label_specs[0].values = nil;
-    demo.label_specs[0].value_count = 0;
+    demo.label_specs[0].values          = nil;
+    demo.label_specs[0].value_count     = 0;
     demo.label_specs[0].max_value_bytes = 16;
     if (!observability.init_vocabulary(?demo.vocabulary, ?demo.label_specs[0], 1)) {
         ret false;
@@ -349,35 +351,37 @@ pub fun assemble(demo: *Application, limits: message.Limits, quiet: bool) bool {
     val assembly: app.Assembly = app.Assembly{
         config: app.Config{
             limits: app.Limits{
-                max_body_bytes: 65536,
-                max_form_fields: 16,
-                max_upload_bytes: 65536,
-                max_route_params: 4,
-                max_request_id_bytes: 64,
-                max_active_requests: MAX_ACTIVE_REQUESTS,
-                max_middleware_depth: 8,
-                handler_deadline_ns: lifecycle.NO_DEADLINE,
-                max_providers: 0,
-                max_provider_key_bytes: 32,
-                max_background_services: 1},
-            trust_proxy: false,
-            panic_policy: middleware.PANIC_ABORT},
-        router: ?demo.matcher,
-        middleware: ?demo.stack,
-        fallback: handler.Handler{ctx: nil, call: not_found},
-        errors: error.default_mapper(?demo.errors),
-        providers: ?demo.providers,
-        lifecycle: ?demo.controller,
-        sessions: ?demo.manager,
-        security: ?demo.headers,
-        csrf: ?demo.protector,
-        origins: nil,
+                max_body_bytes:          65536,
+                max_form_fields:         16,
+                max_upload_bytes:        65536,
+                max_route_params:        4,
+                max_request_id_bytes:    64,
+                max_active_requests:     MAX_ACTIVE_REQUESTS,
+                max_middleware_depth:    8,
+                handler_deadline_ns:     lifecycle.NO_DEADLINE,
+                max_providers:           0,
+                max_provider_key_bytes:  32,
+                max_background_services: 1
+            },
+            trust_proxy:  false,
+            panic_policy: middleware.PANIC_ABORT
+        },
+        router:        ?demo.matcher,
+        middleware:    ?demo.stack,
+        fallback:      handler.Handler{ctx: nil, call: not_found},
+        errors:        error.default_mapper(?demo.errors),
+        providers:     ?demo.providers,
+        lifecycle:     ?demo.controller,
+        sessions:      ?demo.manager,
+        security:      ?demo.headers,
+        csrf:          ?demo.protector,
+        origins:       nil,
         authenticator: nil,
-        renderer: nil,
-        observer: ?demo.observer,
-        vocabulary: ?demo.vocabulary,
-        event_policy: observability.policy_default(),
-        app_state: nil,
+        renderer:      nil,
+        observer:      ?demo.observer,
+        vocabulary:    ?demo.vocabulary,
+        event_policy:  observability.policy_default(),
+        app_state:     nil,
     };
     ret app.assemble(?demo.application, assembly);
 }
@@ -401,8 +405,8 @@ pub fun start(demo: *Application) bool {
 }
 
 pub fun shutdown(demo: *Application) bool {
-    var drained: bool = false;
-    var polls: usize = 0;
+    var drained: bool  = false;
+    var polls:   usize = 0;
     for (polls < 64 && !drained) {
         val moved: lifecycle.Transition =
             app.drain(?demo.application, lifecycle.NO_DEADLINE);
@@ -418,7 +422,7 @@ pub fun shutdown(demo: *Application) bool {
         if (moved.status != lifecycle.TRANSITION_PENDING && !stopped) { ret false; }
         polls = polls + 1;
     }
-    if (!app.release(?demo.application)) { ret false; }
+    if (!app.release(?demo.application))                         { ret false; }
     if (session.stop_manager(?demo.manager) != session.STORE_OK) { ret false; }
     if (!session.release_protected_codec(?demo.codec)
         || !session.release_key_ring(?demo.ring)

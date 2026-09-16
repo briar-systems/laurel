@@ -6,13 +6,7 @@
 # be assembled without them. it has no sessions and no CSRF, so that it measures
 # the same work the Go and Rust programs do.
 
-use std.types.result.res;
-use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
-use std.types.size.usize;
-use std.types.string.str;
-use std.types.view;
+use bench.handlers;
 use http.core.message;
 use http.core.method;
 use http_router: http.router.router;
@@ -26,11 +20,17 @@ use laurel.observability;
 use laurel.provider;
 use laurel.router;
 use laurel.security;
-use bench.handlers;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.view;
 
-pub val ROUTE_COUNT: usize = 3;
-val SEGMENT_COUNT: usize = 12;
-val MIDDLEWARE_COUNT: usize = 1;
+pub val ROUTE_COUNT:      usize = 3;
+val     SEGMENT_COUNT:    usize = 12;
+val     MIDDLEWARE_COUNT: usize = 1;
 
 pub val MAX_ACTIVE_REQUESTS: usize = 512;
 
@@ -126,13 +126,13 @@ fun route(method_rule: router.Method, pattern: view.View, name: str,
     parameters: *router.Parameter, parameter_len: usize,
     call: handler.HandlerFun, ctx: ptr) router.Route {
     ret router.Route{method: method_rule, host: router.any_host(),
-        path: router.path(pattern), name: name, parameters: parameters,
+        path:          router.path(pattern), name: name, parameters: parameters,
         parameter_len: parameter_len,
-        handler: handler.Handler{ctx: ctx, call: call}};
+        handler:       handler.Handler{ctx: ctx, call: call}};
 }
 
 pub fun assemble(bench: *Application, limits: message.Limits) bool {
-    if (bench == nil) { ret false; }
+    if (bench == nil)                             { ret false; }
     if (!security.secure_headers(?bench.headers)) { ret false; }
 
     bench.parameters[0] = router.Parameter{name: handlers.text("id"),
@@ -151,9 +151,10 @@ pub fun assemble(bench: *Application, limits: message.Limits) bool {
         handlers.submit, (?bench.state)::ptr);
 
     val storage: router.Storage = router.Storage{
-        specifications: ?bench.specifications[0], specification_cap: ROUTE_COUNT,
+        specifications:  ?bench.specifications[0], specification_cap: ROUTE_COUNT,
         compiled_routes: ?bench.compiled[0], compiled_route_cap: ROUTE_COUNT,
-        segments: ?bench.segments[0], segment_cap: SEGMENT_COUNT};
+        segments:        ?bench.segments[0], segment_cap: SEGMENT_COUNT
+    };
     if (router.compile(?bench.matcher, ?bench.routes[0], ROUTE_COUNT, storage,
         router.limits_default()).status != router.COMPILE_OK) { ret false; }
 
@@ -166,13 +167,13 @@ pub fun assemble(bench: *Application, limits: message.Limits) bool {
     bench.services[0] = lifecycle.Lifecycle{ctx: nil, start: service_start,
         ready: service_ready, drain: service_drain, stop: service_stop};
     if (!lifecycle.init(?bench.controller, ?bench.services[0], 1, 1)) { ret false; }
-    if (!error.initialize_default(?bench.errors, limits, 512)) { ret false; }
+    if (!error.initialize_default(?bench.errors, limits, 512))        { ret false; }
 
     if (!observability.term(?bench.label_specs[0].name, handlers.text("kind"))) {
         ret false;
     }
-    bench.label_specs[0].values = nil;
-    bench.label_specs[0].value_count = 0;
+    bench.label_specs[0].values          = nil;
+    bench.label_specs[0].value_count     = 0;
     bench.label_specs[0].max_value_bytes = 16;
     if (!observability.init_vocabulary(?bench.vocabulary, ?bench.label_specs[0], 1)) {
         ret false;
@@ -183,35 +184,37 @@ pub fun assemble(bench: *Application, limits: message.Limits) bool {
     val assembly: app.Assembly = app.Assembly{
         config: app.Config{
             limits: app.Limits{
-                max_body_bytes: 65536,
-                max_form_fields: 16,
-                max_upload_bytes: 65536,
-                max_route_params: 4,
-                max_request_id_bytes: 64,
-                max_active_requests: MAX_ACTIVE_REQUESTS,
-                max_middleware_depth: 8,
-                handler_deadline_ns: lifecycle.NO_DEADLINE,
-                max_providers: 0,
-                max_provider_key_bytes: 32,
-                max_background_services: 1},
-            trust_proxy: false,
-            panic_policy: middleware.PANIC_ABORT},
-        router: ?bench.matcher,
-        middleware: ?bench.stack,
-        fallback: fallback_handler(),
-        errors: error.default_mapper(?bench.errors),
-        providers: ?bench.providers,
-        lifecycle: ?bench.controller,
-        sessions: nil,
-        security: ?bench.headers,
-        csrf: nil,
-        origins: nil,
+                max_body_bytes:          65536,
+                max_form_fields:         16,
+                max_upload_bytes:        65536,
+                max_route_params:        4,
+                max_request_id_bytes:    64,
+                max_active_requests:     MAX_ACTIVE_REQUESTS,
+                max_middleware_depth:    8,
+                handler_deadline_ns:     lifecycle.NO_DEADLINE,
+                max_providers:           0,
+                max_provider_key_bytes:  32,
+                max_background_services: 1
+            },
+            trust_proxy:  false,
+            panic_policy: middleware.PANIC_ABORT
+        },
+        router:        ?bench.matcher,
+        middleware:    ?bench.stack,
+        fallback:      fallback_handler(),
+        errors:        error.default_mapper(?bench.errors),
+        providers:     ?bench.providers,
+        lifecycle:     ?bench.controller,
+        sessions:      nil,
+        security:      ?bench.headers,
+        csrf:          nil,
+        origins:       nil,
         authenticator: nil,
-        renderer: nil,
-        observer: ?bench.observer,
-        vocabulary: ?bench.vocabulary,
-        event_policy: observability.policy_default(),
-        app_state: nil,
+        renderer:      nil,
+        observer:      ?bench.observer,
+        vocabulary:    ?bench.vocabulary,
+        event_policy:  observability.policy_default(),
+        app_state:     nil,
     };
     ret app.assemble(?bench.application, assembly);
 }
@@ -233,8 +236,8 @@ pub fun start(bench: *Application) bool {
 }
 
 pub fun shutdown(bench: *Application) bool {
-    var drained: bool = false;
-    var polls: usize = 0;
+    var drained: bool  = false;
+    var polls:   usize = 0;
     for (polls < 64 && !drained) {
         val moved: lifecycle.Transition =
             app.drain(?bench.application, lifecycle.NO_DEADLINE);
