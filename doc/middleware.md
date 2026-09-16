@@ -4,46 +4,121 @@ Laurel executes one application-owned middleware stack for each bound request
 context. The stack is validated during application assembly. Its maximum depth
 and panic policy are fixed in the application configuration.
 
+## The step contract
+
+A middleware is two halves and a resume. A terminal handler is one half and a
+resume.
+
+`EnterFun`, `ResumeFun`, `Disposition` and `Result` live in `laurel.handler`;
+`LeaveFun` and `Middleware` live in `laurel.middleware`.
+
+```mach
+pub def EnterFun:  fun(ptr, *context.Context, *ptr) handler.Result;
+pub def ResumeFun: fun(ptr, *context.Context, ptr, handler.Settlement, u64)
+    handler.Result;
+pub def LeaveFun:  fun(ptr, *context.Context, ptr, handler.Result)
+    handler.Result;
+
+pub rec Middleware { ctx: ptr; before: EnterFun; resume: ResumeFun;
+    after: LeaveFun; }
+pub rec Handler    { ctx: ptr; call: EnterFun; resume: ResumeFun; }
+```
+
+Every step returns a `handler.Result`, which is either an `error.AppError` or a
+`handler.Disposition`: `RESPOND` when the response is owned, `NEXT` when the
+chain may continue, or `PENDING` with the body token the step is waiting on.
+Build them with `handler.respond`, `handler.proceed`, `handler.suspend` and
+`handler.fail` rather than by hand.
+
+`EnterFun`'s third argument is an out slot. A step that needs anything on the
+way out, or on resume, allocates it from the request allocator and writes the
+pointer there. The driver holds that pointer for the life of the execution and
+hands it back to `after` and to `resume`. A step's `ctx` is shared by every
+concurrent request, so nothing per-request belongs in it. `after` and `resume`
+may both be `nil` on a step that needs neither.
+
 ## Execution order
 
-For middleware `A` and `B`, followed by terminal handler `H`, successful
-delegation has this exact order:
+For middleware `A` and `B`, followed by terminal handler `H`, the order is:
 
-1. `A` runs before `middleware.call`.
-2. `B` runs before `middleware.call`.
-3. `H` runs.
-4. `B` resumes after `middleware.call`.
-5. `A` resumes after `middleware.call`.
+1. `A.before` runs.
+2. `B.before` runs.
+3. `H.call` runs.
+4. `B.after` runs.
+5. `A.after` runs.
 
-A middleware that returns without calling its `Next` token short-circuits the
-rest of the stack. A terminal handler can return `handler.RESPOND` when it owns
-the response or `handler.NEXT` when the surrounding application dispatcher may
-continue. Any other action is an internal application error.
+**`after` runs exactly once for every `before` that ran.** That includes the
+step whose `before` short-circuited with `RESPOND`, a chain cut short by an
+error, a cancelled request, and a request abandoned while suspended. Whatever
+`before` acquires, `after` releases, and that pairing is the only ownership rule
+a middleware has to hold.
 
-`Next` is passed by value. Each token carries the request generation, execution
-identity, context identity, and snapshot index. It never points at an execution
-frame. Copies share one call state through the active request context. A second
-call, a retained token, a token used with another context, or a token used after
-its callback returns is rejected as an internal error before Laurel accesses
-execution storage.
-
-A token may be copied only to invoke it during its callback. It must not be used
-after `middleware.execute` returns. Calling any Laurel API through a retained
-token after the caller has destroyed the `context.Context` storage is invalid
-because the context itself is caller-owned. While that context remains alive,
-retained-token rejection is deterministic and never dereferences stack-dead
-execution state.
+A `before` that returns `RESPOND` stops the descent: no deeper step runs, the
+terminal does not run, and the exit halves run from that step outward. An
+`after` returns the result that keeps travelling outward, which is usually the
+one it was handed.
 
 At execution entry Laurel captures the stack pointer and length, allocates a
-request-scoped snapshot, and copies each middleware callback into that snapshot.
-Growing, shrinking, or replacing the application `Stack` during a callback does
-not change the active chain. Concurrent mutation while the initial snapshot is
-being copied is not supported and must be excluded by the application owner.
+request-scoped snapshot, and copies each middleware into that snapshot. Growing,
+shrinking, or replacing the application `Stack` during a callback does not change
+the active chain. Concurrent mutation while the initial snapshot is being copied
+is not supported and must be excluded by the application owner.
 
 One context can own only one execution at a time, including error mapping.
-Reentrant execution with the same context fails without invoking the mapper.
-The claim is released on every return path, so the same bound context may be
-executed sequentially. A context cannot be unbound while it owns an execution.
+Reentrant execution with the same context fails without invoking the mapper. The
+claim is held from `app.execute` until a terminal outcome, across every
+suspension, and a context cannot be unbound while it owns one.
+
+## Suspension and resumption
+
+A handler that meets `form.PENDING`, `multipart` pending, or a pending
+`body.Progress` returns `handler.suspend(token)` instead of spinning on the
+read. The pending disposition travels out through the chain to `app.execute`,
+which returns `EXECUTION_PENDING` with `outcome.token`.
+
+The execution record is host-owned storage:
+
+```mach
+pub fun execute(app: *App, execution: *middleware.Execution,
+    terminal: handler.Handler, request_context: *context.Context)
+    middleware.Outcome;
+pub fun resume(app: *App, execution: *middleware.Execution,
+    request_context: *context.Context) middleware.Outcome;
+pub fun abandon(app: *App, execution: *middleware.Execution,
+    request_context: *context.Context) middleware.Outcome;
+```
+
+A host keeps one `middleware.Execution` per exchange, next to the context and
+the recorder, for as long as the request lives. The loop is: call `execute`; on
+`EXECUTION_PENDING`, do the I/O the token names and call `resume`; repeat until
+any other status.
+
+`resume` enters the suspended step, and only that step, through its `resume`
+callback with `SETTLE_READY`. Nothing that already ran runs again, however many
+times the handler suspends. The step reads its own state back from the slot
+pointer it was handed, and it is the step, not the host, that settles the body
+token it was waiting on.
+
+When the request is going away — the connection died, the host is shutting down,
+the scope was cancelled — the host calls `abandon`. The suspended step is
+entered once with `SETTLE_ABANDONED`, which asks it to release rather than to
+work; it must not suspend again. Every `after` that is owed then runs with a
+cancellation error travelling outward, and the outcome is `EXECUTION_CANCELLED`.
+`abandon` also cancels the request scope, so every observer of the request
+describes the same thing. `resume` on a scope that has already died does exactly
+this too, so a host may always call `resume` and get the right behaviour.
+
+Calling one of the two is mandatory. `EXECUTION_PENDING` is not a termination:
+`observability.observe_execution` refuses it, and `context.unbind` refuses while
+an execution is claimed, so a host that drops a suspended request without
+abandoning it gets `app.release_context == false` and one `OUTCOME_UNREPORTED`
+terminal event rather than a silent leak. A step's state lives in the request
+arena the host owns, so its memory goes with the arena, but anything a `before`
+acquired outside that arena is released by its `after`, and its `after` only
+runs because the host called `resume` or `abandon`.
+
+A step that never suspends pays nothing for any of this: it writes `nil` to its
+state slot, leaves `resume` nil, and never sees a settlement.
 
 ## Errors and cancellation
 
@@ -117,6 +192,30 @@ Laurel therefore supports only `middleware.PANIC_ABORT`. Application assembly
 rejects every other policy. A process supervisor must treat a panic as a failed
 worker and replace it. Laurel never pretends that request state can be recovered
 after a panic.
+
+## Migrating from the `Next` contract
+
+Before 0.11.0 a middleware was one callback that received a `Next` token and
+called `middleware.call` in the middle of itself. `middleware.Next`,
+`middleware.MiddlewareFun` and `middleware.call` are gone, and so is the whole
+class of errors around them: a token cannot be retained, reused, or invoked
+twice, because there is no token.
+
+- Split each middleware at its `middleware.call`. What ran before it becomes
+  `before`; what ran after it becomes `after`.
+- Every local the old after-half read across the call becomes per-request state:
+  allocate it in `before`, write it to the out slot, read it back in `after`.
+- `ret middleware.call(next, ctx)` with nothing after it becomes a `before` that
+  returns `handler.proceed()` and a nil `after`.
+- A handler's `res[u8, error.AppError]` becomes `handler.Result`. Replace
+  `res[...].ok{handler.RESPOND}` with `handler.respond()` and `res[...].err{e}`
+  with `handler.fail(e)`. Handlers take a third `state: *ptr` argument and may
+  write `nil` to it.
+- `handler.Handler` and `router.Route` handlers gain a `resume` field, which is
+  `nil` for a handler that never suspends.
+- `app.execute` takes a `*middleware.Execution` the host owns per exchange. A
+  host that returns a pending outcome must later call `app.resume` or
+  `app.abandon`.
 
 ## Application boundary
 

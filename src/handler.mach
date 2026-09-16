@@ -2,14 +2,64 @@
 
 use laurel.context;
 use laurel.error;
+use std.types.bool.bool;
 use std.types.result.res;
 
 pub val RESPOND: u8 = 1;
 pub val NEXT:    u8 = 2;
+pub val PENDING: u8 = 3;
 
-pub def HandlerFun: fun(ptr, *context.Context) res[u8, error.AppError];
+pub def Settlement: u8;
+
+# the token the step waited on is settled and the work can continue
+pub val SETTLE_READY: Settlement = 1;
+
+# the request is going away: release what was acquired and return, never PENDING
+pub val SETTLE_ABANDONED: Settlement = 2;
+
+# what a step decided, and the body token it is waiting on when it is pending
+pub rec Disposition {
+    action: u8;
+    token:  u64;
+}
+
+pub def Result: res[Disposition, error.AppError];
+
+# a step's first entry. the out slot is where it leaves the per-request state it
+# needs again on resume or on the way out
+pub def EnterFun: fun(ptr, *context.Context, *ptr) Result;
+
+# re-entry for a step that returned PENDING, with the state it left behind
+pub def ResumeFun: fun(ptr, *context.Context, ptr, Settlement, u64) Result;
 
 pub rec Handler {
-    ctx:  ptr;
-    call: HandlerFun;
+    ctx:    ptr;
+    call:   EnterFun;
+    resume: ResumeFun;
+}
+
+pub fun respond() Result {
+    ret Result.ok{Disposition{action: RESPOND, token: 0}};
+}
+
+pub fun proceed() Result {
+    ret Result.ok{Disposition{action: NEXT, token: 0}};
+}
+
+pub fun suspend(token: u64) Result {
+    ret Result.ok{Disposition{action: PENDING, token: token}};
+}
+
+pub fun fail(app_error: error.AppError) Result {
+    ret Result.err{app_error};
+}
+
+pub fun action_valid(action: u8) bool {
+    ret action == RESPOND || action == NEXT || action == PENDING;
+}
+
+# a disposition is well formed when a token accompanies exactly a suspension
+pub fun disposition_valid(disposition: Disposition) bool {
+    if (disposition.action == PENDING) { ret disposition.token != 0; }
+    ret action_valid(disposition.action) && disposition.token == 0;
 }

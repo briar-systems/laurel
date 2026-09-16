@@ -31,6 +31,13 @@ decoded bytes. `form.result` succeeds only after finalization.
 the reader's pending token, settles rejection exactly once, and never presents
 a partial form as a successful result.
 
+A `form.PENDING` operation means the body is not there yet. A handler returns
+`handler.suspend(operation.token)` and is entered again through its `resume`
+callback once the host has done the I/O, where it calls `form.complete_body`
+with the settled token and carries on. It never spins on the read, so a body
+larger than any buffer costs no more than the parser's own storage. See
+`doc/middleware.md` for the suspension contract.
+
 ## Multipart forms
 
 `multipart.Parser` recognizes exact CRLF MIME boundaries across arbitrary input

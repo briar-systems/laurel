@@ -2536,9 +2536,9 @@ fun policy_view(value: str) view.View {
 # restates the policy the manager already holds
 fun emit_cookie(request_session: *RequestSession, response: *message.Response,
     value: view.View, max_age: i64, expiring: bool) RequestStatus {
-    val policy: CookiePolicy  = request_session.manager.cookie;
-    val has_max: bool         = expiring || max_age > 0;
-    var header: cookie.Cookie = cookie.Cookie{
+    val policy:  CookiePolicy  = request_session.manager.cookie;
+    val has_max: bool          = expiring || max_age > 0;
+    var header:  cookie.Cookie = cookie.Cookie{
         name:         policy_view(policy.name), value: value,
         path:         policy_view(policy.path), domain: policy_view(policy.domain),
         has_max_age:  has_max, max_age_s: max_age, has_expires: expiring,
@@ -2775,13 +2775,13 @@ fun allocate_request(binder: *Binder,
     ret request_session;
 }
 
-fun binder_failure(detail: str) res[u8, error.AppError] {
-    ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
-        "internal server error", detail, false)};
+fun binder_failure(detail: str) handler.Result {
+    ret handler.fail(error.make(error.INTERNAL, 500,
+        "internal server error", detail, false));
 }
 
-fun bind_session(ctx: ptr, next: middleware.Next,
-    request_context: *context.Context) res[u8, error.AppError] {
+fun session_before(ctx: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
     val binder: *Binder = ctx::*Binder;
     if (binder == nil || !binder.initialized
         || !context.active(request_context)
@@ -2794,8 +2794,17 @@ fun bind_session(ctx: ptr, next: middleware.Next,
         ret binder_failure("session storage could not be allocated");
     }
     request_context.session = request_session::ptr;
-    val outcome: res[u8, error.AppError] =
-        middleware.call(next, request_context);
+    @state                  = request_session::ptr;
+    ret handler.proceed();
+}
+
+fun session_after(ctx: ptr, request_context: *context.Context, state: ptr,
+    carried: handler.Result) handler.Result {
+    val binder:          *Binder         = ctx::*Binder;
+    val request_session: *RequestSession = state::*RequestSession;
+    if (binder == nil || !binder.initialized || request_session == nil) {
+        ret binder_failure("session binder is invalid");
+    }
     val response: *message.Response = context.response(request_context);
     var settled:  RequestStatus     = REQUEST_OK;
     if (response != nil) {
@@ -2811,23 +2820,24 @@ fun bind_session(ctx: ptr, next: middleware.Next,
     }
     request_context.session = nil;
     release_request(request_session);
-    if (settled != REQUEST_OK
-        && (sel outcome.ok)) {
+    if (settled != REQUEST_OK && (sel carried.ok)) {
         if (settled == REQUEST_CONFLICT) {
-            ret res[u8, error.AppError].err{error.make(error.CONFLICT, 409,
+            ret handler.fail(error.make(error.CONFLICT, 409,
                 "request conflicted", "session was modified concurrently",
-                true)};
+                true));
         }
         ret binder_failure("session could not be committed");
     }
-    ret outcome;
+    ret carried;
 }
 
 pub fun binder_middleware(binder: *Binder) middleware.Middleware {
     if (binder == nil || !binder.initialized) {
-        ret middleware.Middleware{ctx: nil, call: nil};
+        ret middleware.Middleware{ctx: nil, before: nil, resume: nil,
+            after: nil};
     }
-    ret middleware.Middleware{ctx: binder::ptr, call: bind_session};
+    ret middleware.Middleware{ctx: binder::ptr, before: session_before,
+        resume: nil, after: session_after};
 }
 
 # the request's session, for a handler that never sees the binder
@@ -4158,9 +4168,9 @@ test "laurel.session: manager ownership and lifecycle fail closed" {
         || slots[0].id[0] != 0x5a) { ret 3; }
 
     var negative_cookie: CookiePolicy = secure_cookie("__Host-managed");
-    negative_cookie.max_age           = -1;
+    negative_cookie.max_age = -1;
     var bad_manager: Manager;
-    bad_manager.state                 = MANAGER_EMPTY;
+    bad_manager.state = MANAGER_EMPTY;
     if (init_manager(?bad_manager, memory_store(?memory), codec_fixture.codec,
         negative_cookie, "laurel.test")) { ret 3; }
 

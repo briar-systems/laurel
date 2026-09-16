@@ -75,9 +75,7 @@ pub rec Adapter {
 pub rec RequestState {
     owner:       *call.Call;
     application: *app.App;
-    routes:      *router.Router;
-    fallback:    handler.Handler;
-    matched:     router.Dispatch;
+    terminal:    router.Terminal;
     context:     context.Context;
     recorder:    observability.Recorder;
     outcome:     middleware.Outcome;
@@ -230,24 +228,6 @@ fun render_request_id(source: *trace.Context, output: *char) bool {
     ret difference != 0;
 }
 
-# the terminal handler laurel executes at the end of the middleware chain.
-# dispatch already ran, so this only decides what the result of dispatch means.
-fun terminal_call(ctx: ptr, request_context: *context.Context)
-    res[u8, error.AppError] {
-    val state: *RequestState = ctx::*RequestState;
-    if (state == nil || state.routes == nil || state.fallback.call == nil) {
-        ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
-            "internal server error", "the terminal handler is invalid", false)};
-    }
-    if (state.matched.status == router.DISPATCH_MATCH) {
-        ret router.invoke(state.routes, ?state.matched, request_context);
-    }
-    if (state.matched.status == router.DISPATCH_NOT_FOUND) {
-        ret state.fallback.call(state.fallback.ctx, request_context);
-    }
-    ret res[u8, error.AppError].err{state.matched.app_error};
-}
-
 # release_context is what closes laurel's admission slot and emits the terminal
 # request event, so it must run even when the exchange fails partway through
 fun finalize_request(owner: ptr, active: *call.Call) bool {
@@ -283,8 +263,6 @@ fun acquire(adapter: *Adapter, active: *call.Call) *RequestState {
         if (slot.owner == nil) {
             slot.owner = active;
             slot.application = adapter.application;
-            slot.routes = adapter.routes;
-            slot.fallback = adapter.fallback;
             slot.phase = PHASE_BUFFERING;
             slot.body = nil;
             slot.body_len = 0;
@@ -373,13 +351,14 @@ pub fun serve(owner: ptr, active: *call.Call) exchange.ServiceStatus {
         bound.limits.request_body, ?state.trailers, bound.scope);
     if (!state.reader.valid) { ret exchange.SERVICE_FAILED; }
     request.body = ?state.reader;
-    state.matched = router.dispatch(adapter.routes, request, arena);
+    state.terminal = router.terminal(adapter.routes, adapter.fallback,
+        router.dispatch(adapter.routes, request, arena));
     var params: context.Params = context.Params{items: nil, len: 0,
         generation: bound.generation};
     var route_name: view.View = service.text_view(active.route.name);
-    if (state.matched.status == router.DISPATCH_MATCH) {
-        params = state.matched.params;
-        val name: str = adapter.routes.routes[state.matched.route].name;
+    if (state.terminal.matched.status == router.DISPATCH_MATCH) {
+        params = state.terminal.matched.params;
+        val name: str = adapter.routes.routes[state.terminal.matched.route].name;
         if (name != nil) { route_name = view.view(name::*char, name_len(name)); }
     }
 
@@ -393,7 +372,7 @@ pub fun serve(owner: ptr, active: *call.Call) exchange.ServiceStatus {
     state.bound = true;
 
     state.outcome = app.execute(adapter.application,
-        handler.Handler{ctx: state::ptr, call: terminal_call}, ?state.context);
+        router.terminal_handler(?state.terminal), ?state.context);
     val served: exchange.ServiceStatus = status_for(state.outcome);
     if (served != exchange.SERVICE_COMPLETE) { ret served; }
     if (bound.response.committed) {

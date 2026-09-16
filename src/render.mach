@@ -766,8 +766,8 @@ fun init_fixture_with_limits(state: *Fixture, generation: u64, configured: messa
     }
     if (!fixed_ok(fixed_allocator.make(?state.allocator, ?state.allocation_state,
         ?state.allocation_bytes[0], 1024))) { ret false; }
-    val request_fields:   field.Fields   = field.init(nil, 0, field.limits(0, 0, 0, 0));
-    val request_trailers: field.Fields   = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    val request_fields:   field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    val request_trailers: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
     state.request_body = body.empty_reader(generation);
     val metadata: message.Metadata = message.Metadata{
         version:     message.version_h1(1, 1), secure: true, early_data: false,
@@ -1060,13 +1060,13 @@ test "laurel.render: respond enforces host limits and explicit limits" {
     if (!init_fixture_with_limits(?state, 61, tight_limits)) { ret 1; }
     var media:   Media;
     var content: Fixed;
-    val text:    view.View = view.view("hello world", 11);
+    val text:    view.View      = view.view("hello world", 11);
     var loose:   message.Limits = message.limits_default();
     loose.response_body = body.limits(1048576, 65536, 1024);
     if (!text_plain(?media) || !init_fixed(?content, text, 61, loose,
         ?state.response.trailers, ?state.scope)) { ret 2; }
     if (respond(?state.context, status.CREATED, ?media, fixed_body(?content)) != RESPOND_LIMIT) { ret 3; }
-    if (state.response.status != status.OK || state.response.fields.len != 0) { ret 4; }
+    if (state.response.status != status.OK || state.response.fields.len != 0)                   { ret 4; }
     if (respond_with_limits(?state.context, status.CREATED, ?media, fixed_body(?content),
         loose) != RESPOND_OK) { ret 5; }
     if (state.response.status != status.CREATED) { ret 6; }
