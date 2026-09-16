@@ -7,13 +7,21 @@ Every one of those uses the framework's real API. Nothing here is a mock.
 
 ## Run it
 
+The demo is its own Mach project with its own pinned dependencies, so it does
+not inherit the repository's `dep/`.
+
 ```sh
 cd demo
-./run.sh
+mach dep pull .
+mach build . --profile release
+mach run . --profile release -- hedge.toml
 ```
 
-That fetches the pinned dependencies on first use, builds in release, and serves
-on `127.0.0.1:8080`. It prints the bound address and then `laurel-demo: ready`.
+`mach run` forwards everything after `--` to the program, which is how the demo
+receives its configuration path. The first build takes a few minutes and a few
+gigabytes of memory; after that only the third command is needed. The server
+prints the bound address and then `laurel-demo: ready`, and serves on
+`127.0.0.1:8080`.
 
 ## What each route proves
 
@@ -172,17 +180,20 @@ with the dispatch step restored, written against the same public contract.
 is synchronous: it runs to completion inside one call and cannot wait for bytes
 the server has not read yet, because the server only reads inside the same poll
 that is running the handler. Hedge enters a service at the *request headers*,
-before any body byte is parsed. So the host waits, without reading, until the
-connection is holding the body, then copies it and hands Laurel a reader over
-that copy. See the comments in `src/host.mach`.
+before any body byte is parsed, so the first read suspends. The read belongs to
+the host until the host completes it: returning `SERVICE_PENDING` gives the
+connection a turn to collect the bytes, and the next entry resolves the token
+the host is holding. Once the whole body is buffered, Laurel is handed a reader
+over that copy. See the comments in `src/host.mach`.
 
-The body buffer is 1 KiB. That is not an arbitrary choice: hedge gives each call
-a fixed 12 KiB arena, and Laurel's per-request state is 8232 bytes of it on this
-target. The rest has to cover the session's request-scoped buffers, the form
-decoder, and the response body. Because 8232 bytes of framework state does not
-fit alongside the application's own needs, this host keeps that state in its own
-slot table, one slot per concurrent request, and leaves the arena to the
-application.
+The body buffer is 1 KiB. That is not an arbitrary choice: Laurel's per-request
+state is 8232 bytes on this target, and the rest of the arena has to cover the
+session's request-scoped buffers, the form decoder, and the response body.
+Because 8232 bytes of framework state does not fit alongside the application's
+own needs, this host keeps that state in its own slot table, one slot per
+concurrent request, and leaves the arena to the application. The arena's size is
+the application's to declare: `register_application` takes it as its last
+argument, and this demo asks for 64 KiB.
 
 ## Layout
 
@@ -197,7 +208,7 @@ application.
 
 ## Versions
 
-The demo pins Laurel `v0.8.8` and hedge `v0.2.0`. It pins the Laurel *tag*
+The demo pins Laurel `v0.9.2` and hedge `v0.4.0`. It pins the Laurel *tag*
 rather than building against the working tree it lives in, because hedge depends
 on Laurel too and Mach resolves dependencies flat: two different revisions of
 the same module cannot coexist in one build.
