@@ -1,4 +1,4 @@
-# single-pass middleware and error execution
+# resumable middleware and error execution
 
 use http.core.body;
 use http.core.exchange;
@@ -49,25 +49,32 @@ pub val EXECUTION_NEXT:           ExecutionStatus = 2;
 pub val EXECUTION_ERROR_RENDERED: ExecutionStatus = 3;
 pub val EXECUTION_ERROR_UNMAPPED: ExecutionStatus = 4;
 pub val EXECUTION_CANCELLED:      ExecutionStatus = 5;
+pub val EXECUTION_PENDING:        ExecutionStatus = 6;
+
+pub def Phase: u8;
+pub val PHASE_IDLE:     Phase = 0;
+pub val PHASE_BEFORE:   Phase = 1;
+pub val PHASE_TERMINAL: Phase = 2;
+pub val PHASE_AFTER:    Phase = 3;
+pub val PHASE_DONE:     Phase = 4;
 
 pub rec Policy {
     max_depth:    usize;
     panic_policy: PanicPolicy;
 }
 
-pub rec Next {
-    context:            *context.Context;
-    request_generation: u64;
-    execution_id:       u64;
-    index:              usize;
-}
+# a step's exit half. it gets the state its entry left and the result travelling
+# outward, and returns the result that keeps travelling
+pub def LeaveFun: fun(ptr, *context.Context, ptr, handler.Result) handler.Result;
 
-pub def MiddlewareFun: fun(ptr, Next, *context.Context)
-    res[u8, error.AppError];
-
+# before runs on the way in, after on the way out, and after runs exactly once
+# for every before that ran. resume re-enters a half that returned PENDING and
+# may be nil on a step that never suspends, as may after
 pub rec Middleware {
-    ctx:  ptr;
-    call: MiddlewareFun;
+    ctx:    ptr;
+    before: handler.EnterFun;
+    resume: handler.ResumeFun;
+    after:  LeaveFun;
 }
 
 pub rec Stack {
@@ -78,26 +85,34 @@ pub rec Stack {
 pub rec Outcome {
     status:       ExecutionStatus;
     action:       u8;
+    token:        u64;
     app_error:    error.AppError;
     render_error: error.RenderFailure;
 }
 
-rec Slot {
-    middleware:   Middleware;
-    execution_id: u64;
-    index:        usize;
-    calls:        usize;
-    active:       bool;
+pub rec Slot {
+    middleware: Middleware;
+    state:      ptr;
 }
 
-rec Execution {
-    terminal:     handler.Handler;
-    context:      *context.Context;
-    slots:        *Slot;
-    len:          usize;
-    generation:   u64;
-    execution_id: u64;
-    active:       bool;
+# one request's position in the chain. the host owns this storage per exchange,
+# because a suspended execution outlives the call that started it
+pub rec Execution {
+    terminal:       handler.Handler;
+    terminal_state: ptr;
+    context:        *context.Context;
+    mapper:         error.Mapper;
+    slots:          *Slot;
+    len:            usize;
+    cursor:         usize;
+    pending_index:  usize;
+    phase:          Phase;
+    carry:          handler.Result;
+    token:          u64;
+    generation:     u64;
+    execution_id:   u64;
+    suspended:      bool;
+    active:         bool;
 }
 
 pub fun policy_default() Policy {
@@ -121,106 +136,15 @@ fun cancellation(reason: cancel.Reason) error.AppError {
         "request scope was cancelled", false);
 }
 
-fun action_valid(action: u8) bool {
-    ret action == handler.RESPOND || action == handler.NEXT;
-}
-
 fun current_cancellation(request_context: *context.Context) error.AppError {
     var reason: cancel.Reason = cancel.Reason.invalid{};
     if (request_context != nil) { reason = context.reason(request_context); }
     ret cancellation(reason);
 }
 
-fun advance(execution: *Execution, index: usize)
-    res[u8, error.AppError] {
-    if (execution == nil || !execution.active
-        || execution.context == nil || execution.generation == 0
-        || execution.execution_id == 0
-        || execution.context.generation != execution.generation
-        || index > execution.len) {
-        ret res[u8, error.AppError].err{internal("invalid middleware execution")};
-    }
-    if (!context.active(execution.context)) {
-        ret res[u8, error.AppError].err{current_cancellation(execution.context)};
-    }
-    if (index == execution.len) {
-        val terminal_result: res[u8, error.AppError] =
-            execution.terminal.call(execution.terminal.ctx, execution.context);
-        if (!context.active(execution.context)) {
-            ret res[u8, error.AppError].err{current_cancellation(execution.context)};
-        }
-        if (sel terminal_result.err) { ret terminal_result; }
-        val action: u8 = terminal_result.ok;
-        if (!action_valid(action)) {
-            ret res[u8, error.AppError].err{internal("terminal returned an invalid action")};
-        }
-        ret terminal_result;
-    }
-    if (execution.slots == nil) {
-        ret res[u8, error.AppError].err{internal("middleware snapshot is unavailable")};
-    }
-    val slot: *Slot = ?execution.slots[index];
-    slot.execution_id = execution.execution_id;
-    slot.index        = index;
-    slot.calls        = 0;
-    slot.active       = true;
-    val next_handler: Next = Next{context: execution.context,
-        request_generation: execution.generation,
-        execution_id:       execution.execution_id, index: index};
-    val result: res[u8, error.AppError] = slot.middleware.call(
-        slot.middleware.ctx, next_handler, execution.context);
-    slot.active = false;
-    if (slot.calls > 1) {
-        ret res[u8, error.AppError].err{internal("middleware invoked next more than once")};
-    }
-    if (!context.active(execution.context)) {
-        ret res[u8, error.AppError].err{current_cancellation(execution.context)};
-    }
-    if (sel result.err) { ret result; }
-    val action: u8 = result.ok;
-    if (!action_valid(action)) {
-        ret res[u8, error.AppError].err{internal("middleware returned an invalid action")};
-    }
-    ret result;
-}
-
-pub fun call(next_handler: Next, request_context: *context.Context)
-    res[u8, error.AppError] {
-    if (next_handler.context == nil || request_context == nil
-        || next_handler.context != request_context
-        || next_handler.request_generation == 0
-        || next_handler.execution_id == 0) {
-        ret res[u8, error.AppError].err{internal("invalid middleware next token")};
-    }
-    val state: ptr = context.active_execution(request_context,
-        next_handler.request_generation, next_handler.execution_id);
-    if (state == nil) {
-        ret res[u8, error.AppError].err{internal("stale middleware next token")};
-    }
-    val execution: *Execution = state::*Execution;
-    if (execution == nil || !execution.active || execution.slots == nil
-        || execution.execution_id != next_handler.execution_id
-        || execution.generation != next_handler.request_generation
-        || execution.context != request_context
-        || next_handler.index >= execution.len) {
-        ret res[u8, error.AppError].err{internal("stale middleware next token")};
-    }
-    val slot: *Slot = ?execution.slots[next_handler.index];
-    if (!slot.active || slot.execution_id != next_handler.execution_id
-        || slot.index != next_handler.index) {
-        ret res[u8, error.AppError].err{internal("stale middleware next token")};
-    }
-    if (slot.calls != 0) {
-        slot.calls = 2;
-        ret res[u8, error.AppError].err{internal("middleware next invoked more than once")};
-    }
-    slot.calls = 1;
-    ret advance(execution, slot.index + 1);
-}
-
 fun outcome(status: ExecutionStatus, action: u8,
     app_error: error.AppError, render_error: error.RenderFailure) Outcome {
-    ret Outcome{status: status, action: action,
+    ret Outcome{status: status, action: action, token: 0,
         app_error: app_error, render_error: render_error};
 }
 
@@ -252,60 +176,282 @@ fun map_error(app_error: error.AppError, mapper: error.Mapper,
         empty_render_failure());
 }
 
-fun execute_claimed(source_items: *Middleware, source_len: usize,
-    stack_supplied: bool, execution: *Execution, mapper: error.Mapper,
-    policy: Policy) Outcome {
-    if (!stack_supplied || (source_len != 0 && source_items == nil)
-        || execution.terminal.call == nil || policy.max_depth == 0
-        || source_len > policy.max_depth || policy.panic_policy != PANIC_ABORT
-        || mapper.render == nil) {
-        ret map_error(internal("invalid middleware policy or input"), mapper,
-            execution.context);
-    }
-    var i: usize = 0;
-    for (i < source_len) {
-        if (source_items[i].call == nil) {
-            ret map_error(internal("middleware callback is missing"), mapper,
-                execution.context);
-        }
-        i = i + 1;
-    }
-    if (source_len != 0) {
-        val allocation: res[*Slot, A.Error] =
-            A.allocate[Slot](execution.context.alloc, source_len);
-        if (sel allocation.err) {
-            ret map_error(unavailable("middleware snapshot allocation failed"),
-                mapper, execution.context);
-        }
-        execution.slots = allocation.ok;
-    }
-    i = 0;
-    for (i < source_len) {
-        execution.slots[i].middleware   = source_items[i];
-        execution.slots[i].execution_id = execution.execution_id;
-        execution.slots[i].index        = i;
-        execution.slots[i].calls        = 0;
-        execution.slots[i].active       = false;
-        i                               = i + 1;
-    }
-    val result: res[u8, error.AppError] = advance(execution, 0);
-    execution.active = false;
-    if (sel result.ok) {
-        val action: u8 = result.ok;
-        if (action == handler.RESPOND) {
-            ret outcome(EXECUTION_RESPOND, action, error.no_error(),
-                empty_render_failure());
-        }
-        ret outcome(EXECUTION_NEXT, action, error.no_error(),
-            empty_render_failure());
-    }
-    ret map_error(result.err, mapper,
-        execution.context);
+fun fault(execution: *Execution, app_error: error.AppError) {
+    execution.carry = handler.fail(app_error);
+    execution.phase = PHASE_AFTER;
 }
 
-pub fun execute(stack: *Stack, terminal: handler.Handler,
-    mapper: error.Mapper, request_context: *context.Context,
-    policy: Policy) Outcome {
+fun unwind_cancelled(execution: *Execution) {
+    fault(execution, current_cancellation(execution.context));
+}
+
+# a step's entry decided. its after already owes a run, so the cursor has moved
+# past it before this is reached
+fun settle_entry(execution: *Execution, index: usize,
+    result: handler.Result) {
+    if (sel result.err) {
+        execution.carry = result;
+        execution.phase = PHASE_AFTER;
+        ret;
+    }
+    val disposition: handler.Disposition = result.ok;
+    if (!handler.disposition_valid(disposition)) {
+        fault(execution, internal("a middleware returned an invalid action"));
+        ret;
+    }
+    if (disposition.action == handler.PENDING) {
+        if (!context.active(execution.context)) {
+            unwind_cancelled(execution);
+            ret;
+        }
+        if (execution.slots[index].middleware.resume == nil) {
+            fault(execution, internal("a middleware suspended with no resume"));
+            ret;
+        }
+        execution.suspended     = true;
+        execution.pending_index = index;
+        execution.token         = disposition.token;
+        execution.phase         = PHASE_BEFORE;
+        ret;
+    }
+    if (!context.active(execution.context)) {
+        unwind_cancelled(execution);
+        ret;
+    }
+    if (disposition.action == handler.RESPOND) {
+        execution.carry = result;
+        execution.phase = PHASE_AFTER;
+        ret;
+    }
+    if (execution.cursor == execution.len) { execution.phase = PHASE_TERMINAL; }
+    or                                     { execution.phase = PHASE_BEFORE; }
+}
+
+fun settle_terminal(execution: *Execution, result: handler.Result) {
+    if (sel result.err) {
+        execution.carry = result;
+        execution.phase = PHASE_AFTER;
+        ret;
+    }
+    val disposition: handler.Disposition = result.ok;
+    if (!handler.disposition_valid(disposition)) {
+        fault(execution, internal("the terminal returned an invalid action"));
+        ret;
+    }
+    if (disposition.action == handler.PENDING) {
+        if (!context.active(execution.context)) {
+            unwind_cancelled(execution);
+            ret;
+        }
+        if (execution.terminal.resume == nil) {
+            fault(execution, internal("the terminal suspended with no resume"));
+            ret;
+        }
+        execution.suspended     = true;
+        execution.pending_index = execution.len;
+        execution.token         = disposition.token;
+        execution.phase         = PHASE_TERMINAL;
+        ret;
+    }
+    if (!context.active(execution.context)) {
+        unwind_cancelled(execution);
+        ret;
+    }
+    execution.carry = result;
+    execution.phase = PHASE_AFTER;
+}
+
+# an exit half decided. a cancelled scope replaces whatever was travelling, but
+# the remaining exit halves still run
+fun settle_after(execution: *Execution, index: usize,
+    result: handler.Result) {
+    if (sel result.ok) {
+        val disposition: handler.Disposition = result.ok;
+        if (!handler.disposition_valid(disposition)) {
+            execution.carry = handler.fail(
+                internal("a middleware returned an invalid action"));
+            execution.cursor = index;
+            ret;
+        }
+        if (disposition.action == handler.PENDING) {
+            if (!context.active(execution.context)) {
+                execution.carry = handler.fail(
+                    current_cancellation(execution.context));
+                execution.cursor = index;
+                ret;
+            }
+            if (execution.slots[index].middleware.resume == nil) {
+                execution.carry = handler.fail(
+                    internal("a middleware suspended with no resume"));
+                execution.cursor = index;
+                ret;
+            }
+            execution.suspended     = true;
+            execution.pending_index = index;
+            execution.token         = disposition.token;
+            execution.phase         = PHASE_AFTER;
+            ret;
+        }
+    }
+    execution.carry  = result;
+    execution.cursor = index;
+    if (!context.active(execution.context)) {
+        execution.carry = handler.fail(current_cancellation(execution.context));
+    }
+}
+
+fun step_before(execution: *Execution) {
+    if (execution.suspended || execution.phase != PHASE_BEFORE) { ret; }
+    if (!context.active(execution.context)) {
+        unwind_cancelled(execution);
+        ret;
+    }
+    val index: usize = execution.cursor;
+    if (execution.slots == nil || index >= execution.len) {
+        fault(execution, internal("the middleware snapshot is unavailable"));
+        ret;
+    }
+    val slot: *Slot = ?execution.slots[index];
+    if (slot.middleware.before == nil) {
+        fault(execution, internal("a middleware before callback is missing"));
+        ret;
+    }
+    var state:  ptr            = nil;
+    val result: handler.Result = slot.middleware.before(slot.middleware.ctx,
+        execution.context, ?state);
+    slot.state       = state;
+    execution.cursor = index + 1;
+    settle_entry(execution, index, result);
+}
+
+fun step_terminal(execution: *Execution) {
+    if (execution.suspended || execution.phase != PHASE_TERMINAL) { ret; }
+    if (!context.active(execution.context)) {
+        unwind_cancelled(execution);
+        ret;
+    }
+    if (execution.terminal.call == nil) {
+        fault(execution, internal("the terminal callback is missing"));
+        ret;
+    }
+    var state:  ptr            = nil;
+    val result: handler.Result = execution.terminal.call(execution.terminal.ctx,
+        execution.context, ?state);
+    execution.terminal_state = state;
+    settle_terminal(execution, result);
+}
+
+fun step_after(execution: *Execution) {
+    if (execution.suspended || execution.phase != PHASE_AFTER) { ret; }
+    if (execution.cursor == 0) {
+        execution.phase = PHASE_DONE;
+        ret;
+    }
+    val index: usize = execution.cursor - 1;
+    if (execution.slots == nil || index >= execution.len) {
+        execution.carry = handler.fail(
+            internal("the middleware snapshot is unavailable"));
+        execution.cursor = 0;
+        ret;
+    }
+    val slot: *Slot = ?execution.slots[index];
+    if (slot.middleware.after == nil) {
+        execution.cursor = index;
+        ret;
+    }
+    val result: handler.Result = slot.middleware.after(slot.middleware.ctx,
+        execution.context, slot.state, execution.carry);
+    settle_after(execution, index, result);
+}
+
+fun pending_outcome(execution: *Execution) Outcome {
+    ret Outcome{status: EXECUTION_PENDING, action: handler.PENDING,
+        token:        execution.token, app_error: error.no_error(),
+        render_error: empty_render_failure()};
+}
+
+fun finished_outcome(execution: *Execution) Outcome {
+    execution.active = false;
+    context.release_execution(execution.context, execution.execution_id);
+    if (sel execution.carry.err) {
+        ret map_error(execution.carry.err, execution.mapper,
+            execution.context);
+    }
+    val disposition: handler.Disposition = execution.carry.ok;
+    if (disposition.action == handler.RESPOND) {
+        ret outcome(EXECUTION_RESPOND, handler.RESPOND, error.no_error(),
+            empty_render_failure());
+    }
+    ret outcome(EXECUTION_NEXT, handler.NEXT, error.no_error(),
+        empty_render_failure());
+}
+
+fun pump(execution: *Execution) Outcome {
+    for (!execution.suspended && execution.phase != PHASE_DONE) {
+        step_before(execution);
+        step_terminal(execution);
+        step_after(execution);
+    }
+    if (execution.suspended) { ret pending_outcome(execution); }
+    ret finished_outcome(execution);
+}
+
+fun clear_execution(execution: *Execution) {
+    execution.terminal       = handler.Handler{ctx: nil, call: nil, resume: nil};
+    execution.terminal_state = nil;
+    execution.context        = nil;
+    execution.mapper         = error.Mapper{ctx: nil, render: nil};
+    execution.slots          = nil;
+    execution.len            = 0;
+    execution.cursor         = 0;
+    execution.pending_index  = 0;
+    execution.phase          = PHASE_IDLE;
+    execution.carry          = handler.proceed();
+    execution.token          = 0;
+    execution.generation     = 0;
+    execution.execution_id   = 0;
+    execution.suspended      = false;
+    execution.active         = false;
+}
+
+fun claimed(execution: *Execution, request_context: *context.Context) bool {
+    ret execution != nil && execution.active && execution.context != nil
+        && execution.context == request_context
+        && execution.generation != 0 && execution.execution_id != 0
+        && request_context.generation == execution.generation
+        && context.active_execution(request_context, execution.generation,
+        execution.execution_id) == execution::ptr;
+}
+
+fun snapshot(execution: *Execution, items: *Middleware, len: usize) bool {
+    if (len == 0) { ret true; }
+    val allocation: res[*Slot, A.Error] =
+        A.allocate[Slot](execution.context.alloc, len);
+    if (sel allocation.err) { ret false; }
+    execution.slots = allocation.ok;
+    var i: usize = 0;
+    for (i < len) {
+        execution.slots[i].middleware = items[i];
+        execution.slots[i].state      = nil;
+        i                             = i + 1;
+    }
+    ret true;
+}
+
+# the first entry. the execution record belongs to the host and is live from
+# here until a terminal outcome, across any number of suspensions
+pub fun execute(execution: *Execution, stack: *Stack,
+    terminal: handler.Handler, mapper: error.Mapper,
+    request_context: *context.Context, policy: Policy) Outcome {
+    if (execution == nil) {
+        ret unmapped(internal("middleware execution storage is missing"),
+            "middleware execution storage is missing");
+    }
+    if (execution.active) {
+        ret unmapped(internal("middleware execution storage is in use"),
+            "middleware execution storage is in use");
+    }
+    clear_execution(execution);
     if (request_context != nil) {
         val reason: cancel.Reason = context.reason(request_context);
         if ((sel reason.cancelled) || (sel reason.timed_out)) {
@@ -315,8 +461,8 @@ pub fun execute(stack: *Stack, terminal: handler.Handler,
     }
     if (request_context == nil || !context.active(request_context)
         || !context.allocator_valid(request_context.alloc)) {
-        val app_error: error.AppError = internal("invalid middleware policy or input");
-        ret unmapped(app_error, "error mapper unavailable");
+        ret unmapped(internal("invalid middleware policy or input"),
+            "error mapper unavailable");
     }
     var source_items:   *Middleware = nil;
     var source_len:     usize       = 0;
@@ -325,22 +471,133 @@ pub fun execute(stack: *Stack, terminal: handler.Handler,
         source_items = stack.items;
         source_len   = stack.len;
     }
-    var execution: Execution = Execution{terminal: terminal,
-        context:    request_context, slots: nil, len: source_len,
-        generation: request_context.generation, execution_id: 0, active: true};
+    execution.terminal   = terminal;
+    execution.context    = request_context;
+    execution.mapper     = mapper;
+    execution.len        = source_len;
+    execution.generation = request_context.generation;
+    execution.carry      = handler.proceed();
+    execution.active     = true;
+    if (!stack_supplied || (source_len != 0 && source_items == nil)
+        || terminal.call == nil || policy.max_depth == 0
+        || source_len > policy.max_depth || policy.panic_policy != PANIC_ABORT
+        || mapper.render == nil) {
+        execution.active = false;
+        ret map_error(internal("invalid middleware policy or input"), mapper,
+            request_context);
+    }
+    var i: usize = 0;
+    for (i < source_len) {
+        if (source_items[i].before == nil) {
+            execution.active = false;
+            ret map_error(internal("a middleware before callback is missing"),
+                mapper, request_context);
+        }
+        i = i + 1;
+    }
     var execution_id: u64 = 0;
-    if (!context.claim_execution(request_context, (?execution)::ptr,
+    if (!context.claim_execution(request_context, execution::ptr,
         ?execution_id)) {
         execution.active = false;
         ret unmapped(internal("middleware context already executing"),
             "middleware context already executing");
     }
     execution.execution_id = execution_id;
-    val completed: Outcome = execute_claimed(source_items, source_len,
-        stack_supplied, ?execution, mapper, policy);
-    execution.active = false;
-    context.release_execution(request_context, execution_id);
-    ret completed;
+    if (!snapshot(execution, source_items, source_len)) {
+        execution.carry = handler.fail(
+            unavailable("middleware snapshot allocation failed"));
+        execution.len   = 0;
+        execution.phase = PHASE_DONE;
+        ret finished_outcome(execution);
+    }
+    if (source_len == 0) { execution.phase = PHASE_TERMINAL; }
+    or                   { execution.phase = PHASE_BEFORE; }
+    ret pump(execution);
+}
+
+fun stale(request_context: *context.Context) Outcome {
+    ret unmapped(internal("the middleware execution is not suspended here"),
+        "the middleware execution is not suspended here");
+}
+
+fun enter_resume(execution: *Execution,
+    settlement: handler.Settlement) Outcome {
+    val index: usize = execution.pending_index;
+    val token: u64   = execution.token;
+    val phase: Phase = execution.phase;
+    execution.suspended = false;
+    execution.token     = 0;
+    var result: handler.Result = handler.proceed();
+    if (phase == PHASE_TERMINAL) {
+        result = execution.terminal.resume(execution.terminal.ctx,
+            execution.context, execution.terminal_state, settlement, token);
+    }
+    or {
+        val slot: *Slot = ?execution.slots[index];
+        result = slot.middleware.resume(slot.middleware.ctx, execution.context,
+            slot.state, settlement, token);
+    }
+    if (settlement == handler.SETTLE_ABANDONED) {
+        var app_error: error.AppError = current_cancellation(execution.context);
+        if (sel result.ok) {
+            if (result.ok.action == handler.PENDING) {
+                app_error = internal(
+                    "a middleware suspended again while being abandoned");
+            }
+        }
+        execution.carry = handler.fail(app_error);
+        if (phase == PHASE_AFTER) { execution.cursor = index; }
+        or                        { execution.phase = PHASE_AFTER; }
+        ret pump(execution);
+    }
+    if (phase == PHASE_TERMINAL) { settle_terminal(execution, result); }
+    or {
+        if (phase == PHASE_AFTER) { settle_after(execution, index, result); }
+        or                        { settle_entry(execution, index, result); }
+    }
+    ret pump(execution);
+}
+
+# the suspended step is re-entered, and nothing that already ran runs again. a
+# scope that died while the request was suspended abandons instead
+pub fun resume(execution: *Execution,
+    request_context: *context.Context) Outcome {
+    if (!claimed(execution, request_context) || !execution.suspended) {
+        ret stale(request_context);
+    }
+    if (!context.active(request_context)) {
+        ret enter_resume(execution, handler.SETTLE_ABANDONED);
+    }
+    ret enter_resume(execution, handler.SETTLE_READY);
+}
+
+# the request is going away while a step holds it. the suspended step is entered
+# once to release, every exit half that is owed still runs, and the execution
+# reaches a terminal outcome so the host can release the context
+pub fun abandon(execution: *Execution,
+    request_context: *context.Context) Outcome {
+    if (!claimed(execution, request_context)) { ret stale(request_context); }
+    # abandonment is cancellation stated plainly, so the scope says so too and
+    # every observer of this request describes the same thing
+    if (context.active(request_context)) {
+        transition_ok(cancel.cancel(request_context.scope));
+    }
+    if (!execution.suspended) {
+        execution.carry = handler.fail(current_cancellation(request_context));
+        execution.phase = PHASE_AFTER;
+        ret pump(execution);
+    }
+    ret enter_resume(execution, handler.SETTLE_ABANDONED);
+}
+
+pub fun suspended(execution: *Execution) bool {
+    ret execution != nil && execution.active && execution.suspended;
+}
+
+# the body token a suspended execution is waiting on, zero when it is not
+pub fun pending_token(execution: *Execution) u64 {
+    if (!suspended(execution)) { ret 0; }
+    ret execution.token;
 }
 
 rec Fixture {
@@ -362,18 +619,13 @@ rec Fixture {
 }
 
 rec Trace {
-    events:         [16]u8;
+    events:         [32]u8;
     len:            usize;
     terminal_calls: usize;
 }
 
 rec MutableError {
     message: [14]u8;
-}
-
-rec RetainedNext {
-    token: Next;
-    saved: bool;
 }
 
 rec StackMutation {
@@ -388,6 +640,7 @@ rec Reentrant {
     stack:        *Stack;
     terminal:     handler.Handler;
     mapper:       error.Mapper;
+    inner:        *Execution;
     calls:        usize;
     inner_status: ExecutionStatus;
 }
@@ -395,8 +648,36 @@ rec Reentrant {
 rec ReentrantMapper {
     stack:        *Stack;
     terminal:     handler.Handler;
+    inner:        *Execution;
     calls:        usize;
     inner_status: ExecutionStatus;
+}
+
+# per-request state a step leaves in its driver slot, allocated from the request
+# arena so it survives a suspension
+rec Work {
+    done:    usize;
+    resumes: usize;
+    carried: handler.Result;
+}
+
+rec Suspender {
+    trace:      *Trace;
+    suspends:   usize;
+    entries:    usize;
+    work:       usize;
+    resumes:    usize;
+    settlement: handler.Settlement;
+    token:      u64;
+}
+
+rec Halves {
+    trace:  *Trace;
+    before: u8;
+    after:  u8;
+    action: u8;
+    states: usize;
+    token:  u64;
 }
 
 fun fixture_init(fixture: *Fixture, generation: u64) bool {
@@ -446,142 +727,149 @@ fun fixture_end(fixture: *Fixture) bool {
 }
 
 fun record(trace: *Trace, event: u8) bool {
-    if (trace == nil || trace.len >= 16) { ret false; }
+    if (trace == nil || trace.len >= 32) { ret false; }
     trace.events[trace.len] = event;
     trace.len               = trace.len + 1;
     ret true;
 }
 
-fun first_middleware(ctx: ptr, next_handler: Next,
-    request_context: *context.Context) res[u8, error.AppError] {
+fun trace_error(detail: str) handler.Result {
+    ret handler.fail(internal(detail));
+}
+
+fun first_before(ctx: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
     val trace: *Trace = ctx::*Trace;
-    if (!record(trace, 1)) { ret res[u8, error.AppError].err{internal("trace overflow")}; }
-    val result: res[u8, error.AppError] = call(next_handler, request_context);
-    if (!record(trace, 5)) { ret res[u8, error.AppError].err{internal("trace overflow")}; }
-    ret result;
+    if (!record(trace, 1)) { ret trace_error("trace overflow"); }
+    ret handler.proceed();
 }
 
-fun second_middleware(ctx: ptr, next_handler: Next,
-    request_context: *context.Context) res[u8, error.AppError] {
+fun first_after(ctx: ptr, request_context: *context.Context, state: ptr,
+    carried: handler.Result) handler.Result {
     val trace: *Trace = ctx::*Trace;
-    if (!record(trace, 2)) { ret res[u8, error.AppError].err{internal("trace overflow")}; }
-    val result: res[u8, error.AppError] = call(next_handler, request_context);
-    if (!record(trace, 4)) { ret res[u8, error.AppError].err{internal("trace overflow")}; }
-    ret result;
+    if (!record(trace, 5)) { ret trace_error("trace overflow"); }
+    ret carried;
 }
 
-fun traced_terminal(ctx: ptr, request_context: *context.Context)
-    res[u8, error.AppError] {
+fun second_before(ctx: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
     val trace: *Trace = ctx::*Trace;
-    trace.terminal_calls = trace.terminal_calls + 1;
-    if (!record(trace, 3)) { ret res[u8, error.AppError].err{internal("trace overflow")}; }
-    ret res[u8, error.AppError].ok{handler.RESPOND};
+    if (!record(trace, 2)) { ret trace_error("trace overflow"); }
+    ret handler.proceed();
 }
 
-fun short_middleware(ctx: ptr, next_handler: Next,
-    request_context: *context.Context) res[u8, error.AppError] {
+fun second_after(ctx: ptr, request_context: *context.Context, state: ptr,
+    carried: handler.Result) handler.Result {
     val trace: *Trace = ctx::*Trace;
-    if (!record(trace, 7)) { ret res[u8, error.AppError].err{internal("trace overflow")}; }
-    ret res[u8, error.AppError].ok{handler.RESPOND};
+    if (!record(trace, 4)) { ret trace_error("trace overflow"); }
+    ret carried;
 }
 
-fun double_middleware(ctx: ptr, next_handler: Next,
-    request_context: *context.Context) res[u8, error.AppError] {
-    val first:  res[u8, error.AppError] = call(next_handler, request_context);
-    val second: res[u8, error.AppError] = call(next_handler, request_context);
-    if (sel second.ok) {
-        ret res[u8, error.AppError].err{internal("second next call succeeded")};
-    }
-    ret first;
-}
-
-fun invalid_terminal(ctx: ptr, request_context: *context.Context)
-    res[u8, error.AppError] {
+fun traced_terminal(ctx: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
     val trace: *Trace = ctx::*Trace;
     trace.terminal_calls = trace.terminal_calls + 1;
-    ret res[u8, error.AppError].ok{99};
+    if (!record(trace, 3)) { ret trace_error("trace overflow"); }
+    ret handler.respond();
 }
 
-fun private_error_terminal(ctx: ptr, request_context: *context.Context)
-    res[u8, error.AppError] {
-    ret res[u8, error.AppError].err{error.make(error.INTERNAL, 500,
-        "unsafe public text", "top-secret database detail", false)};
+fun short_before(ctx: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
+    val trace: *Trace = ctx::*Trace;
+    if (!record(trace, 7)) { ret trace_error("trace overflow"); }
+    ret handler.respond();
 }
 
-fun mutable_error_terminal(ctx: ptr, request_context: *context.Context)
-    res[u8, error.AppError] {
+fun invalid_terminal(ctx: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
+    val trace: *Trace = ctx::*Trace;
+    trace.terminal_calls = trace.terminal_calls + 1;
+    ret handler.Result.ok{handler.Disposition{action: 99, token: 0}};
+}
+
+fun private_error_terminal(ctx: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
+    ret handler.fail(error.make(error.INTERNAL, 500,
+        "unsafe public text", "top-secret database detail", false));
+}
+
+fun mutable_error_terminal(ctx: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
     val source: *MutableError = ctx::*MutableError;
-    ret res[u8, error.AppError].err{error.make_view(error.CONFLICT, 418,
+    ret handler.fail(error.make_view(error.CONFLICT, 418,
         view.view(?source.message[0], 14),
-        view.view("private detail", 14), false)};
+        view.view("private detail", 14), false));
 }
 
-fun inner_error(ctx: ptr, next_handler: Next,
-    request_context: *context.Context) res[u8, error.AppError] {
+fun inner_error_before(ctx: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
     val trace: *Trace = ctx::*Trace;
-    if (!record(trace, 2)) { ret res[u8, error.AppError].err{internal("trace overflow")}; }
-    ret res[u8, error.AppError].err{error.make(error.FORBIDDEN, 403,
-        "inner forbidden", "inner private detail", false)};
+    if (!record(trace, 2)) { ret trace_error("trace overflow"); }
+    ret handler.fail(error.make(error.FORBIDDEN, 403,
+        "inner forbidden", "inner private detail", false));
 }
 
-fun replace_error(ctx: ptr, next_handler: Next,
-    request_context: *context.Context) res[u8, error.AppError] {
+fun replace_error_before(ctx: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
     val trace: *Trace = ctx::*Trace;
-    if (!record(trace, 1)) { ret res[u8, error.AppError].err{internal("trace overflow")}; }
-    val result: res[u8, error.AppError] = call(next_handler, request_context);
-    if (!record(trace, 3)) { ret res[u8, error.AppError].err{internal("trace overflow")}; }
-    if (sel result.err) {
-        ret res[u8, error.AppError].err{error.make(error.CONFLICT, 409,
-            "outer conflict", "outer private detail", false)};
+    if (!record(trace, 1)) { ret trace_error("trace overflow"); }
+    ret handler.proceed();
+}
+
+fun replace_error_after(ctx: ptr, request_context: *context.Context,
+    state: ptr, carried: handler.Result) handler.Result {
+    val trace: *Trace = ctx::*Trace;
+    if (!record(trace, 3)) { ret trace_error("trace overflow"); }
+    if (sel carried.err) {
+        ret handler.fail(error.make(error.CONFLICT, 409,
+            "outer conflict", "outer private detail", false));
     }
-    ret result;
+    ret carried;
 }
 
-fun cancel_middleware(ctx: ptr, next_handler: Next,
-    request_context: *context.Context) res[u8, error.AppError] {
+fun cancel_before(ctx: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
     val trace: *Trace = ctx::*Trace;
     if (!record(trace, 1) || !transition_ok(cancel.cancel(request_context.scope))) {
-        ret res[u8, error.AppError].err{internal("cancellation failed")};
+        ret trace_error("cancellation failed");
     }
-    val result: res[u8, error.AppError] = call(next_handler, request_context);
-    if (!record(trace, 2)) { ret res[u8, error.AppError].err{internal("trace overflow")}; }
-    ret result;
+    ret handler.proceed();
 }
 
-fun retain_middleware(ctx: ptr, next_handler: Next,
-    request_context: *context.Context) res[u8, error.AppError] {
-    val retained: *RetainedNext = ctx::*RetainedNext;
-    retained.token = next_handler;
-    retained.saved = true;
-    ret call(next_handler, request_context);
+fun cancel_after(ctx: ptr, request_context: *context.Context, state: ptr,
+    carried: handler.Result) handler.Result {
+    val trace: *Trace = ctx::*Trace;
+    if (!record(trace, 2)) { ret trace_error("trace overflow"); }
+    ret carried;
 }
 
-fun mutate_stack_middleware(ctx: ptr, next_handler: Next,
-    request_context: *context.Context) res[u8, error.AppError] {
+fun mutate_stack_before(ctx: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
     val mutation: *StackMutation = ctx::*StackMutation;
     if (mutation == nil || mutation.stack == nil || mutation.trace == nil
         || !record(mutation.trace, 8)) {
-        ret res[u8, error.AppError].err{internal("invalid stack mutation test")};
+        ret trace_error("invalid stack mutation test");
     }
     mutation.stack.items = mutation.replacement_items;
     mutation.stack.len   = mutation.replacement_len;
-    ret call(next_handler, request_context);
+    ret handler.proceed();
 }
 
-fun reentrant_middleware(ctx: ptr, next_handler: Next,
-    request_context: *context.Context) res[u8, error.AppError] {
+fun reentrant_before(ctx: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
     val reentrant: *Reentrant = ctx::*Reentrant;
     if (reentrant == nil || reentrant.stack == nil || reentrant.trace == nil) {
-        ret res[u8, error.AppError].err{internal("invalid reentrant test")};
+        ret trace_error("invalid reentrant test");
     }
-    val inner: Outcome = execute(reentrant.stack, reentrant.terminal,
-        reentrant.mapper, request_context, policy_default());
+    val inner: Outcome = execute(reentrant.inner, reentrant.stack,
+        reentrant.terminal, reentrant.mapper, request_context,
+        policy_default());
     reentrant.calls        = reentrant.calls + 1;
     reentrant.inner_status = inner.status;
     if (inner.status != EXECUTION_ERROR_UNMAPPED) {
-        ret res[u8, error.AppError].err{internal("reentrant execution was accepted")};
+        ret trace_error("reentrant execution was accepted");
     }
-    ret call(next_handler, request_context);
+    ret handler.proceed();
 }
 
 fun failing_mapper(ctx: ptr, app_error: error.AppError,
@@ -598,13 +886,109 @@ fun reentrant_mapper(ctx: ptr, app_error: error.AppError,
         ret res[u8, error.RenderFailure].err{error.render_failure(
             "invalid reentrant mapper test")};
     }
-    val inner: Outcome = execute(reentrant.stack, reentrant.terminal,
-        error.Mapper{ctx: nil, render: failing_mapper}, request_context,
-        policy_default());
+    val inner: Outcome = execute(reentrant.inner, reentrant.stack,
+        reentrant.terminal, error.Mapper{ctx: nil, render: failing_mapper},
+        request_context, policy_default());
     reentrant.calls        = reentrant.calls + 1;
     reentrant.inner_status = inner.status;
     ret res[u8, error.RenderFailure].err{error.render_failure(
         "mapper stack-local failure")};
+}
+
+fun suspending_terminal(ctx: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
+    val suspender: *Suspender = ctx::*Suspender;
+    suspender.entries = suspender.entries + 1;
+    val allocation: res[*Work, A.Error] =
+        A.allocate[Work](request_context.alloc, 1);
+    if (sel allocation.err) { ret trace_error("work allocation failed"); }
+    val work: *Work = allocation.ok;
+    work.done    = 0;
+    work.resumes = 0;
+    work.carried = handler.proceed();
+    @state       = work::ptr;
+    if (!record(suspender.trace, 3)) { ret trace_error("trace overflow"); }
+    suspender.work = suspender.work + 1;
+    if (suspender.suspends == 0) { ret handler.respond(); }
+    work.done = 1;
+    ret handler.suspend(1001);
+}
+
+fun suspending_resume(ctx: ptr, request_context: *context.Context,
+    state: ptr, settlement: handler.Settlement, token: u64) handler.Result {
+    val suspender: *Suspender = ctx::*Suspender;
+    val work:      *Work      = state::*Work;
+    suspender.entries    = suspender.entries + 1;
+    suspender.settlement = settlement;
+    suspender.token      = token;
+    if (work == nil || work.done != 1) {
+        ret trace_error("terminal state did not survive the suspension");
+    }
+    work.resumes      = work.resumes + 1;
+    suspender.resumes = work.resumes;
+    if (settlement == handler.SETTLE_ABANDONED) {
+        if (!record(suspender.trace, 9)) { ret trace_error("trace overflow"); }
+        ret handler.respond();
+    }
+    if (work.resumes < suspender.suspends) {
+        ret handler.suspend(1001 + work.resumes);
+    }
+    if (!record(suspender.trace, 6)) { ret trace_error("trace overflow"); }
+    ret handler.respond();
+}
+
+fun no_resume_terminal(ctx: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
+    ret handler.suspend(7);
+}
+
+# a middleware that suspends in whichever half the test arms
+fun halves_before(ctx: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
+    val halves: *Halves = ctx::*Halves;
+    if (!record(halves.trace, halves.before)) { ret trace_error("trace overflow"); }
+    val allocation: res[*Work, A.Error] =
+        A.allocate[Work](request_context.alloc, 1);
+    if (sel allocation.err) { ret trace_error("work allocation failed"); }
+    val work: *Work = allocation.ok;
+    work.done     = 1;
+    work.resumes  = 0;
+    work.carried  = handler.proceed();
+    @state        = work::ptr;
+    halves.states = halves.states + 1;
+    if (halves.action == 1) { ret handler.suspend(2001); }
+    ret handler.proceed();
+}
+
+fun halves_after(ctx: ptr, request_context: *context.Context, state: ptr,
+    carried: handler.Result) handler.Result {
+    val halves: *Halves = ctx::*Halves;
+    val work:   *Work   = state::*Work;
+    if (work == nil || work.done != 1) {
+        ret trace_error("middleware state did not survive");
+    }
+    if (!record(halves.trace, halves.after)) { ret trace_error("trace overflow"); }
+    if (halves.action == 2 && work.resumes == 0) {
+        work.resumes = 1;
+        work.carried = carried;
+        ret handler.suspend(2002);
+    }
+    ret carried;
+}
+
+fun halves_resume(ctx: ptr, request_context: *context.Context, state: ptr,
+    settlement: handler.Settlement, token: u64) handler.Result {
+    val halves: *Halves = ctx::*Halves;
+    val work:   *Work   = state::*Work;
+    if (work == nil || work.done != 1) {
+        ret trace_error("middleware state did not survive");
+    }
+    if (!record(halves.trace, 10)) { ret trace_error("trace overflow"); }
+    halves.token = token;
+    if (settlement == handler.SETTLE_ABANDONED) { ret handler.respond(); }
+    # an exit half that suspends owns the result it was carrying
+    if (halves.action == 2) { ret work.carried; }
+    ret handler.proceed();
 }
 
 fun response_text(fixture: *Fixture, output: *u8,
@@ -640,7 +1024,16 @@ fun default_error_mapper(fixture: *Fixture,
     ret error.default_mapper(renderer);
 }
 
-test "laurel.middleware: before next and after order is single pass" {
+fun traced_handler(trace: *Trace) handler.Handler {
+    ret handler.Handler{ctx: trace::ptr, call: traced_terminal, resume: nil};
+}
+
+fun traced_middleware(trace: *Trace, before: handler.EnterFun,
+    after: LeaveFun) Middleware {
+    ret Middleware{ctx: trace::ptr, before: before, resume: nil, after: after};
+}
+
+test "laurel.middleware: before terminal and after run once in order" {
     var fixture: Fixture;
     if (!fixture_init(?fixture, 31)) { ret 1; }
     var renderer: error.Default;
@@ -648,29 +1041,38 @@ test "laurel.middleware: before next and after order is single pass" {
     if (mapper.render == nil) { ret 2; }
     var trace: Trace;
     var items: [2]Middleware;
-    items[0] = Middleware{ctx: ?trace, call: first_middleware};
-    items[1] = Middleware{ctx: ?trace, call: second_middleware};
-    var stack:     Stack   = Stack{items: ?items[0], len: 2};
-    val completed: Outcome = execute(?stack,
-        handler.Handler{ctx: ?trace, call: traced_terminal}, mapper,
-        ?fixture.request_context, policy_default());
+    items[0] = traced_middleware(?trace, first_before, first_after);
+    items[1] = traced_middleware(?trace, second_before, second_after);
+    var stack:     Stack = Stack{items: ?items[0], len: 2};
+    var execution: Execution;
+    execution.active = false;
+    val completed: Outcome = execute(?execution, ?stack, traced_handler(?trace),
+        mapper, ?fixture.request_context, policy_default());
     if (completed.status != EXECUTION_RESPOND || trace.len != 5
         || trace.terminal_calls != 1 || trace.events[0] != 1
         || trace.events[1] != 2 || trace.events[2] != 3
-        || trace.events[3] != 4 || trace.events[4] != 5) { ret 3; }
+        || trace.events[3] != 4 || trace.events[4] != 5
+        || suspended(?execution) || pending_token(?execution) != 0) { ret 3; }
+
+    # a short-circuiting before still owes its own after
     trace.len            = 0;
     trace.terminal_calls = 0;
-    items[0]             = Middleware{ctx: ?trace, call: short_middleware};
+    items[0]             = traced_middleware(?trace, short_before, first_after);
     stack.len            = 1;
-    val shorted: Outcome = execute(?stack,
-        handler.Handler{ctx: ?trace, call: traced_terminal}, mapper,
-        ?fixture.request_context, policy_default());
-    if (shorted.status != EXECUTION_RESPOND || trace.len != 1
-        || trace.events[0] != 7 || trace.terminal_calls != 0) { ret 4; }
+    var shorted_execution: Execution;
+    shorted_execution.active = false;
+    val shorted: Outcome = execute(?shorted_execution, ?stack,
+        traced_handler(?trace), mapper, ?fixture.request_context,
+        policy_default());
+    if (shorted.status != EXECUTION_RESPOND || trace.len != 2
+        || trace.events[0] != 7 || trace.events[1] != 5
+        || trace.terminal_calls != 0) { ret 4; }
+
     trace.len = 0;
-    val invalid: Outcome = execute(?stack,
-        handler.Handler{ctx: ?trace, call: traced_terminal}, mapper,
-        ?fixture.request_context,
+    var invalid_execution: Execution;
+    invalid_execution.active = false;
+    val invalid: Outcome = execute(?invalid_execution, ?stack,
+        traced_handler(?trace), mapper, ?fixture.request_context,
         Policy{max_depth: 1, panic_policy: 0});
     if (invalid.status != EXECUTION_ERROR_RENDERED
         || invalid.app_error.kind != error.INTERNAL
@@ -684,65 +1086,46 @@ test "laurel.middleware: before next and after order is single pass" {
     ret 0;
 }
 
-test "laurel.middleware: next is at most once and private errors never render" {
-    var fixture: Fixture;
-    if (!fixture_init(?fixture, 41)) { ret 1; }
-    var renderer: error.Default;
-    val mapper:   error.Mapper = default_error_mapper(?fixture, ?renderer);
-    var trace:    Trace;
-    var item:     Middleware   = Middleware{ctx: ?trace, call: double_middleware};
-    if (message.add_field(?fixture.response, field.Field{
-        name:      view.view("x-private", 9), value: view.view("top-secret", 10),
-        sensitive: true
-    }) != field.ADD_OK) { ret 2; }
-    var stack:   Stack   = Stack{items: ?item, len: 1};
-    val doubled: Outcome = execute(?stack,
-        handler.Handler{ctx: ?trace, call: traced_terminal}, mapper,
-        ?fixture.request_context, policy_default());
-    if (doubled.status != EXECUTION_ERROR_RENDERED
-        || doubled.app_error.kind != error.INTERNAL
-        || trace.terminal_calls != 1 || fixture.response.status != 500
-        || fixture.response.fields.len != 2) { ret 3; }
-    var rendered:     [64]u8;
-    var rendered_len: usize = 0;
-    if (!response_text(?fixture, ?rendered[0], 64, ?rendered_len)
-        || !bytes_equal(?rendered[0], rendered_len,
-        "internal server error", 21) || !fixture_end(?fixture)) { ret 4; }
-
+test "laurel.middleware: private errors never render" {
     var private_fixture: Fixture;
-    if (!fixture_init(?private_fixture, 42)) { ret 5; }
+    if (!fixture_init(?private_fixture, 42)) { ret 1; }
     var private_renderer: error.Default;
     val private_mapper:   error.Mapper = default_error_mapper(
         ?private_fixture, ?private_renderer);
-    var empty_stack: Stack   = Stack{items: nil, len: 0};
-    val hidden:      Outcome = execute(?empty_stack,
-        handler.Handler{ctx: nil, call: private_error_terminal}, private_mapper,
-        ?private_fixture.request_context, policy_default());
-    rendered_len = 0;
+    var empty_stack:      Stack = Stack{items: nil, len: 0};
+    var hidden_execution: Execution;
+    hidden_execution.active = false;
+    val hidden: Outcome = execute(?hidden_execution, ?empty_stack,
+        handler.Handler{ctx: nil, call: private_error_terminal, resume: nil},
+        private_mapper, ?private_fixture.request_context, policy_default());
+    var rendered:     [64]u8;
+    var rendered_len: usize = 0;
     if (hidden.status != EXECUTION_ERROR_RENDERED
         || !response_text(?private_fixture, ?rendered[0], 64, ?rendered_len)
         || !bytes_equal(?rendered[0], rendered_len,
-        "internal server error", 21) || !fixture_end(?private_fixture)) { ret 6; }
+        "internal server error", 21) || !fixture_end(?private_fixture)) { ret 2; }
 
     var action_fixture: Fixture;
-    if (!fixture_init(?action_fixture, 43)) { ret 7; }
+    if (!fixture_init(?action_fixture, 43)) { ret 3; }
     var action_renderer: error.Default;
     val action_mapper:   error.Mapper = default_error_mapper(
         ?action_fixture, ?action_renderer);
-    trace.terminal_calls = 0;
-    val bad_action: Outcome = execute(?empty_stack,
-        handler.Handler{ctx: ?trace, call: invalid_terminal}, action_mapper,
-        ?action_fixture.request_context, policy_default());
+    var trace:            Trace;
+    var action_execution: Execution;
+    action_execution.active = false;
+    val bad_action: Outcome = execute(?action_execution, ?empty_stack,
+        handler.Handler{ctx: ?trace, call: invalid_terminal, resume: nil},
+        action_mapper, ?action_fixture.request_context, policy_default());
     if (bad_action.status != EXECUTION_ERROR_RENDERED
         || bad_action.app_error.kind != error.INTERNAL
-        || trace.terminal_calls != 1) { ret 8; }
+        || trace.terminal_calls != 1) { ret 4; }
     rendered_len = 0;
     if (!response_text(?action_fixture, ?rendered[0], 64, ?rendered_len)
         || !bytes_equal(?rendered[0], rendered_len,
-        "internal server error", 21) || !fixture_end(?action_fixture)) { ret 9; }
+        "internal server error", 21) || !fixture_end(?action_fixture)) { ret 5; }
 
     var copied_fixture: Fixture;
-    if (!fixture_init(?copied_fixture, 44)) { ret 10; }
+    if (!fixture_init(?copied_fixture, 44)) { ret 6; }
     var copied_renderer: error.Default;
     val copied_mapper:   error.Mapper = default_error_mapper(
         ?copied_fixture, ?copied_renderer);
@@ -752,9 +1135,12 @@ test "laurel.middleware: next is at most once and private errors never render" {
         source.message[i] = "original error"[i];
         i                 = i + 1;
     }
-    val copied: Outcome = execute(?empty_stack,
-        handler.Handler{ctx: ?source, call: mutable_error_terminal},
-        copied_mapper, ?copied_fixture.request_context, policy_default());
+    var copied_execution: Execution;
+    copied_execution.active = false;
+    val copied: Outcome = execute(?copied_execution, ?empty_stack,
+        handler.Handler{ctx: ?source, call: mutable_error_terminal,
+        resume: nil}, copied_mapper, ?copied_fixture.request_context,
+        policy_default());
     i = 0;
     for (i < 14) {
         source.message[i] = 'x';
@@ -769,7 +1155,7 @@ test "laurel.middleware: next is at most once and private errors never render" {
         || !bytes_equal(error.public_text(?copied.app_error).data,
         error.public_text(?copied.app_error).len,
         "original error", 14)
-        || !fixture_end(?copied_fixture)) { ret 11; }
+        || !fixture_end(?copied_fixture)) { ret 7; }
     ret 0;
 }
 
@@ -780,12 +1166,14 @@ test "laurel.middleware: nested errors and cancellation unwind in order" {
     val mapper:   error.Mapper = default_error_mapper(?fixture, ?renderer);
     var trace:    Trace;
     var items:    [2]Middleware;
-    items[0] = Middleware{ctx: ?trace, call: replace_error};
-    items[1] = Middleware{ctx: ?trace, call: inner_error};
-    var stack:  Stack   = Stack{items: ?items[0], len: 2};
-    val nested: Outcome = execute(?stack,
-        handler.Handler{ctx: ?trace, call: traced_terminal}, mapper,
-        ?fixture.request_context, policy_default());
+    items[0] = traced_middleware(?trace, replace_error_before,
+        replace_error_after);
+    items[1] = traced_middleware(?trace, inner_error_before, nil);
+    var stack:     Stack = Stack{items: ?items[0], len: 2};
+    var execution: Execution;
+    execution.active = false;
+    val nested: Outcome = execute(?execution, ?stack, traced_handler(?trace),
+        mapper, ?fixture.request_context, policy_default());
     if (nested.status != EXECUTION_ERROR_RENDERED
         || nested.app_error.kind != error.CONFLICT || trace.len != 3
         || trace.events[0] != 1 || trace.events[1] != 2
@@ -803,12 +1191,14 @@ test "laurel.middleware: nested errors and cancellation unwind in order" {
     val cancelled_mapper:   error.Mapper = default_error_mapper(
         ?cancelled_fixture, ?cancelled_renderer);
     var cancelled_trace: Trace;
-    var cancel_item:     Middleware = Middleware{ctx: ?cancelled_trace,
-        call: cancel_middleware};
+    var cancel_item:     Middleware = traced_middleware(?cancelled_trace,
+        cancel_before, cancel_after);
     stack = Stack{items: ?cancel_item, len: 1};
-    val cancelled: Outcome = execute(?stack,
-        handler.Handler{ctx: ?cancelled_trace, call: traced_terminal},
-        cancelled_mapper, ?cancelled_fixture.request_context, policy_default());
+    var cancelled_execution: Execution;
+    cancelled_execution.active = false;
+    val cancelled: Outcome = execute(?cancelled_execution, ?stack,
+        traced_handler(?cancelled_trace), cancelled_mapper,
+        ?cancelled_fixture.request_context, policy_default());
     if (cancelled.status != EXECUTION_CANCELLED
         || cancelled.app_error.kind != error.CANCELLED
         || cancelled_trace.len != 2 || cancelled_trace.events[0] != 1
@@ -830,13 +1220,16 @@ test "laurel.middleware: stack snapshots survive growth and shrinkage" {
     var shrink_state: StackMutation = StackMutation{trace: ?shrink_trace,
         stack: ?shrink_stack, replacement_items: nil, replacement_len: 0};
     var shrink_items: [2]Middleware;
-    shrink_items[0] = Middleware{ctx: ?shrink_state,
-        call: mutate_stack_middleware};
-    shrink_items[1] = Middleware{ctx: ?shrink_trace, call: second_middleware};
-    shrink_stack    = Stack{items: ?shrink_items[0], len: 2};
-    val shrunk: Outcome = execute(?shrink_stack,
-        handler.Handler{ctx: ?shrink_trace, call: traced_terminal},
-        shrink_mapper, ?shrink_fixture.request_context, policy_default());
+    shrink_items[0] = Middleware{ctx: ?shrink_state, before: mutate_stack_before,
+        resume: nil, after: nil};
+    shrink_items[1] = traced_middleware(?shrink_trace, second_before,
+        second_after);
+    shrink_stack = Stack{items: ?shrink_items[0], len: 2};
+    var shrink_execution: Execution;
+    shrink_execution.active = false;
+    val shrunk: Outcome = execute(?shrink_execution, ?shrink_stack,
+        traced_handler(?shrink_trace), shrink_mapper,
+        ?shrink_fixture.request_context, policy_default());
     if (shrunk.status != EXECUTION_RESPOND || shrink_trace.len != 4
         || shrink_trace.events[0] != 8 || shrink_trace.events[1] != 2
         || shrink_trace.events[2] != 3 || shrink_trace.events[3] != 4
@@ -852,17 +1245,19 @@ test "laurel.middleware: stack snapshots survive growth and shrinkage" {
     var grow_trace:  Trace;
     var grow_stack:  Stack;
     var replacement: [2]Middleware;
-    replacement[0] = Middleware{ctx: ?grow_trace, call: short_middleware};
-    replacement[1] = Middleware{ctx: ?grow_trace, call: short_middleware};
+    replacement[0] = traced_middleware(?grow_trace, short_before, nil);
+    replacement[1] = traced_middleware(?grow_trace, short_before, nil);
     var grow_state: StackMutation = StackMutation{trace: ?grow_trace,
         stack:           ?grow_stack, replacement_items: ?replacement[0],
         replacement_len: 2};
     var grow_item: Middleware = Middleware{ctx: ?grow_state,
-        call: mutate_stack_middleware};
+        before: mutate_stack_before, resume: nil, after: nil};
     grow_stack = Stack{items: ?grow_item, len: 1};
-    val grown: Outcome = execute(?grow_stack,
-        handler.Handler{ctx: ?grow_trace, call: traced_terminal},
-        grow_mapper, ?grow_fixture.request_context, policy_default());
+    var grow_execution: Execution;
+    grow_execution.active = false;
+    val grown: Outcome = execute(?grow_execution, ?grow_stack,
+        traced_handler(?grow_trace), grow_mapper,
+        ?grow_fixture.request_context, policy_default());
     if (grown.status != EXECUTION_RESPOND || grow_trace.len != 2
         || grow_trace.events[0] != 8 || grow_trace.events[1] != 3
         || grow_trace.terminal_calls != 1 || !fixture_end(?grow_fixture)) {
@@ -871,52 +1266,36 @@ test "laurel.middleware: stack snapshots survive growth and shrinkage" {
     ret 0;
 }
 
-test "laurel.middleware: next retention and reentrancy fail closed" {
-    var retained_fixture: Fixture;
-    if (!fixture_init(?retained_fixture, 71)) { ret 1; }
-    var retained_renderer: error.Default;
-    val retained_mapper:   error.Mapper = default_error_mapper(
-        ?retained_fixture, ?retained_renderer);
-    var retained:      RetainedNext;
-    var trace:         Trace;
-    var retained_item: Middleware = Middleware{ctx: ?retained,
-        call: retain_middleware};
-    var retained_stack: Stack   = Stack{items: ?retained_item, len: 1};
-    val completed:      Outcome = execute(?retained_stack,
-        handler.Handler{ctx: ?trace, call: traced_terminal}, retained_mapper,
-        ?retained_fixture.request_context, policy_default());
-    if (completed.status != EXECUTION_RESPOND || !retained.saved
-        || trace.terminal_calls != 1) { ret 2; }
-    val stale: res[u8, error.AppError] = call(retained.token,
-        ?retained_fixture.request_context);
-    if (sel stale.ok) { ret 3; }
-    if (stale.err.kind != error.INTERNAL
-        || !fixture_end(?retained_fixture)) { ret 3; }
-
+test "laurel.middleware: reentrancy fails closed" {
     var reentrant_fixture: Fixture;
-    if (!fixture_init(?reentrant_fixture, 72)) { ret 4; }
+    if (!fixture_init(?reentrant_fixture, 72)) { ret 1; }
     var reentrant_renderer: error.Default;
     val reentrant_mapper:   error.Mapper = default_error_mapper(
         ?reentrant_fixture, ?reentrant_renderer);
     var reentrant_trace: Trace;
     var reentrant_stack: Stack;
-    var reentrant:       Reentrant = Reentrant{trace: ?reentrant_trace,
-        stack:    ?reentrant_stack,
-        terminal: handler.Handler{ctx: ?reentrant_trace,
-        call:     traced_terminal}, mapper: reentrant_mapper, calls: 0, inner_status: 0};
+    var inner_execution: Execution;
+    inner_execution.active = false;
+    var reentrant: Reentrant = Reentrant{trace: ?reentrant_trace,
+        stack:        ?reentrant_stack, terminal: traced_handler(?reentrant_trace),
+        mapper:       reentrant_mapper, inner: ?inner_execution, calls: 0,
+        inner_status: 0};
     var reentrant_item: Middleware = Middleware{ctx: ?reentrant,
-        call: reentrant_middleware};
+        before: reentrant_before, resume: nil, after: nil};
     reentrant_stack = Stack{items: ?reentrant_item, len: 1};
-    val first: Outcome = execute(?reentrant_stack, reentrant.terminal,
-        reentrant_mapper, ?reentrant_fixture.request_context,
-        policy_default());
-    val second: Outcome = execute(?reentrant_stack, reentrant.terminal,
-        reentrant_mapper, ?reentrant_fixture.request_context,
-        policy_default());
+    var outer_execution: Execution;
+    outer_execution.active = false;
+    val first: Outcome = execute(?outer_execution, ?reentrant_stack,
+        reentrant.terminal, reentrant_mapper,
+        ?reentrant_fixture.request_context, policy_default());
+    val second: Outcome = execute(?outer_execution, ?reentrant_stack,
+        reentrant.terminal, reentrant_mapper,
+        ?reentrant_fixture.request_context, policy_default());
     if (first.status != EXECUTION_RESPOND || second.status != EXECUTION_RESPOND
-        || reentrant.calls != 2 || reentrant.inner_status != EXECUTION_ERROR_UNMAPPED
+        || reentrant.calls != 2
+        || reentrant.inner_status != EXECUTION_ERROR_UNMAPPED
         || reentrant_trace.terminal_calls != 2
-        || !fixture_end(?reentrant_fixture)) { ret 5; }
+        || !fixture_end(?reentrant_fixture)) { ret 2; }
     ret 0;
 }
 
@@ -929,8 +1308,10 @@ test "laurel.middleware: pre-cancel and allocator failures do not render" {
     var trace:       Trace;
     var empty_stack: Stack = Stack{items: nil, len: 0};
     if (!transition_ok(cancel.cancel(?cancelled_fixture.scope))) { ret 2; }
-    val cancelled: Outcome = execute(?empty_stack,
-        handler.Handler{ctx: ?trace, call: traced_terminal}, cancelled_mapper,
+    var cancelled_execution: Execution;
+    cancelled_execution.active = false;
+    val cancelled: Outcome = execute(?cancelled_execution, ?empty_stack,
+        traced_handler(?trace), cancelled_mapper,
         ?cancelled_fixture.request_context, policy_default());
     if (cancelled.status != EXECUTION_CANCELLED
         || cancelled.app_error.kind != error.CANCELLED
@@ -944,9 +1325,11 @@ test "laurel.middleware: pre-cancel and allocator failures do not render" {
     val timed_mapper:   error.Mapper = default_error_mapper(
         ?timed_fixture, ?timed_renderer);
     if (!transition_ok(cancel.timeout(?timed_fixture.scope))) { ret 5; }
-    val timed: Outcome = execute(?empty_stack,
-        handler.Handler{ctx: ?trace, call: traced_terminal}, timed_mapper,
-        ?timed_fixture.request_context, policy_default());
+    var timed_execution: Execution;
+    timed_execution.active = false;
+    val timed: Outcome = execute(?timed_execution, ?empty_stack,
+        traced_handler(?trace), timed_mapper, ?timed_fixture.request_context,
+        policy_default());
     if (timed.status != EXECUTION_CANCELLED
         || timed.app_error.kind != error.CANCELLED
         || timed.app_error.retryable == false || trace.terminal_calls != 0
@@ -962,8 +1345,10 @@ test "laurel.middleware: pre-cancel and allocator failures do not render" {
     val direct: res[u8, error.RenderFailure] = allocator_mapper.render(
         allocator_mapper.ctx, internal("direct allocator test"),
         ?allocator_fixture.request_context);
-    val failed: Outcome = execute(?empty_stack,
-        handler.Handler{ctx: ?trace, call: traced_terminal}, allocator_mapper,
+    var allocator_execution: Execution;
+    allocator_execution.active = false;
+    val failed: Outcome = execute(?allocator_execution, ?empty_stack,
+        traced_handler(?trace), allocator_mapper,
         ?allocator_fixture.request_context, policy_default());
     if ((sel direct.ok)
         || failed.status != EXECUTION_ERROR_UNMAPPED
@@ -975,9 +1360,11 @@ test "laurel.middleware: pre-cancel and allocator failures do not render" {
 test "laurel.middleware: mapper failures are value owned" {
     var fixture: Fixture;
     if (!fixture_init(?fixture, 91)) { ret 1; }
-    var empty_stack: Stack   = Stack{items: nil, len: 0};
-    val mapped:      Outcome = execute(?empty_stack,
-        handler.Handler{ctx: nil, call: private_error_terminal},
+    var empty_stack: Stack = Stack{items: nil, len: 0};
+    var execution:   Execution;
+    execution.active = false;
+    val mapped: Outcome = execute(?execution, ?empty_stack,
+        handler.Handler{ctx: nil, call: private_error_terminal, resume: nil},
         error.Mapper{ctx: nil, render: failing_mapper},
         ?fixture.request_context, policy_default());
     val detail: view.View = error.render_failure_view(?mapped.render_error);
@@ -988,17 +1375,210 @@ test "laurel.middleware: mapper failures are value owned" {
 
     var reentrant_fixture: Fixture;
     if (!fixture_init(?reentrant_fixture, 92)) { ret 3; }
-    var reentrant_stack: Stack           = Stack{items: nil, len: 0};
-    var mapper_state:    ReentrantMapper = ReentrantMapper{
+    var reentrant_stack: Stack = Stack{items: nil, len: 0};
+    var inner_execution: Execution;
+    inner_execution.active = false;
+    var mapper_state: ReentrantMapper = ReentrantMapper{
         stack:    ?reentrant_stack,
-        terminal: handler.Handler{ctx: nil, call: private_error_terminal}, calls: 0, inner_status: 0
+        terminal: handler.Handler{ctx: nil, call: private_error_terminal,
+            resume: nil}, inner: ?inner_execution, calls: 0, inner_status: 0
     };
-    val reentrant: Outcome = execute(?reentrant_stack, mapper_state.terminal,
+    var outer_execution: Execution;
+    outer_execution.active = false;
+    val reentrant: Outcome = execute(?outer_execution, ?reentrant_stack,
+        mapper_state.terminal,
         error.Mapper{ctx: ?mapper_state, render: reentrant_mapper},
         ?reentrant_fixture.request_context, policy_default());
     if (reentrant.status != EXECUTION_ERROR_UNMAPPED
         || mapper_state.calls != 1
         || mapper_state.inner_status != EXECUTION_ERROR_UNMAPPED
         || !fixture_end(?reentrant_fixture)) { ret 4; }
+    ret 0;
+}
+
+test "laurel.middleware: a resumed terminal never re-runs what already ran" {
+    var fixture: Fixture;
+    if (!fixture_init(?fixture, 101)) { ret 1; }
+    var renderer: error.Default;
+    val mapper:   error.Mapper = default_error_mapper(?fixture, ?renderer);
+    var trace:    Trace;
+    var items:    [2]Middleware;
+    items[0] = traced_middleware(?trace, first_before, first_after);
+    items[1] = traced_middleware(?trace, second_before, second_after);
+    var stack:     Stack     = Stack{items: ?items[0], len: 2};
+    var suspender: Suspender = Suspender{trace: ?trace, suspends: 3,
+        entries: 0, work: 0, resumes: 0, settlement: 0, token: 0};
+    var execution: Execution;
+    execution.active = false;
+    var current: Outcome = execute(?execution, ?stack,
+        handler.Handler{ctx: ?suspender, call: suspending_terminal,
+        resume: suspending_resume}, mapper, ?fixture.request_context,
+        policy_default());
+    if (current.status != EXECUTION_PENDING || current.token != 1001
+        || pending_token(?execution) != 1001 || !suspended(?execution)
+        || suspender.entries != 1 || suspender.work != 1) { ret 2; }
+
+    # a suspended request still holds its context, so a host that drops it
+    # without abandoning it cannot release the context behind laurel's back
+    if (context.unbind(?fixture.request_context, (?fixture)::ptr, 1)) { ret 3; }
+
+    current = resume(?execution, ?fixture.request_context);
+    if (current.status != EXECUTION_PENDING || current.token != 1002
+        || suspender.settlement != handler.SETTLE_READY
+        || suspender.token != 1001) { ret 4; }
+    current = resume(?execution, ?fixture.request_context);
+    if (current.status != EXECUTION_PENDING || current.token != 1003) { ret 5; }
+    current = resume(?execution, ?fixture.request_context);
+    if (current.status != EXECUTION_RESPOND || current.action != handler.RESPOND
+        || suspended(?execution) || pending_token(?execution) != 0) { ret 6; }
+
+    # the terminal was entered once and resumed three times, and every half of
+    # every middleware ran exactly once around all four entries
+    if (suspender.work != 1 || suspender.entries != 4
+        || suspender.resumes != 3 || trace.len != 6
+        || trace.events[0] != 1 || trace.events[1] != 2
+        || trace.events[2] != 3 || trace.events[3] != 6
+        || trace.events[4] != 4 || trace.events[5] != 5) { ret 7; }
+    if (!fixture_end(?fixture)) { ret 8; }
+    ret 0;
+}
+
+test "laurel.middleware: an abandoned suspension releases every entered half" {
+    var fixture: Fixture;
+    if (!fixture_init(?fixture, 102)) { ret 1; }
+    var renderer: error.Default;
+    val mapper:   error.Mapper = default_error_mapper(?fixture, ?renderer);
+    var trace:    Trace;
+    var items:    [2]Middleware;
+    items[0] = traced_middleware(?trace, first_before, first_after);
+    items[1] = traced_middleware(?trace, second_before, second_after);
+    var stack:     Stack     = Stack{items: ?items[0], len: 2};
+    var suspender: Suspender = Suspender{trace: ?trace, suspends: 2,
+        entries: 0, work: 0, resumes: 0, settlement: 0, token: 0};
+    var execution: Execution;
+    execution.active = false;
+    val pending: Outcome = execute(?execution, ?stack,
+        handler.Handler{ctx: ?suspender, call: suspending_terminal,
+        resume: suspending_resume}, mapper, ?fixture.request_context,
+        policy_default());
+    if (pending.status != EXECUTION_PENDING) { ret 2; }
+    val abandoned: Outcome = abandon(?execution, ?fixture.request_context);
+    if (abandoned.status != EXECUTION_CANCELLED
+        || abandoned.app_error.kind != error.CANCELLED
+        || suspender.settlement != handler.SETTLE_ABANDONED
+        || suspender.token != 1001 || suspender.entries != 2
+        || suspender.work != 1 || trace.len != 6
+        || trace.events[3] != 9 || trace.events[4] != 4
+        || trace.events[5] != 5
+        || fixture.response.body_kind != message.BODY_NONE) { ret 3; }
+    # the context is releasable again once the execution has been wound up
+    if (suspended(?execution) || !fixture_end(?fixture)) { ret 4; }
+    ret 0;
+}
+
+test "laurel.middleware: a scope that dies under a suspension abandons" {
+    var fixture: Fixture;
+    if (!fixture_init(?fixture, 103)) { ret 1; }
+    var renderer: error.Default;
+    val mapper:   error.Mapper = default_error_mapper(?fixture, ?renderer);
+    var trace:    Trace;
+    var item:     Middleware   = traced_middleware(?trace, first_before,
+        first_after);
+    var stack:     Stack     = Stack{items: ?item, len: 1};
+    var suspender: Suspender = Suspender{trace: ?trace, suspends: 2,
+        entries: 0, work: 0, resumes: 0, settlement: 0, token: 0};
+    var execution: Execution;
+    execution.active = false;
+    val pending: Outcome = execute(?execution, ?stack,
+        handler.Handler{ctx: ?suspender, call: suspending_terminal,
+        resume: suspending_resume}, mapper, ?fixture.request_context,
+        policy_default());
+    if (pending.status != EXECUTION_PENDING)           { ret 2; }
+    if (!transition_ok(cancel.cancel(?fixture.scope))) { ret 3; }
+    val cancelled: Outcome = resume(?execution, ?fixture.request_context);
+    if (cancelled.status != EXECUTION_CANCELLED
+        || suspender.settlement != handler.SETTLE_ABANDONED
+        || suspender.entries != 2 || trace.len != 4
+        || trace.events[3] != 5
+        || fixture.response.body_kind != message.BODY_NONE
+        || !fixture_end(?fixture)) { ret 4; }
+    ret 0;
+}
+
+test "laurel.middleware: a middleware suspends in either half" {
+    var fixture: Fixture;
+    if (!fixture_init(?fixture, 104)) { ret 1; }
+    var renderer: error.Default;
+    val mapper:   error.Mapper = default_error_mapper(?fixture, ?renderer);
+    var trace:    Trace;
+    var halves:   Halves       = Halves{trace: ?trace, before: 11, after: 12,
+        action: 1, states: 0, token: 0};
+    var item: Middleware = Middleware{ctx: ?halves, before: halves_before,
+        resume: halves_resume, after: halves_after};
+    var stack:     Stack = Stack{items: ?item, len: 1};
+    var execution: Execution;
+    execution.active = false;
+    var current: Outcome = execute(?execution, ?stack, traced_handler(?trace),
+        mapper, ?fixture.request_context, policy_default());
+    if (current.status != EXECUTION_PENDING || current.token != 2001
+        || trace.terminal_calls != 0) { ret 2; }
+    current = resume(?execution, ?fixture.request_context);
+    if (current.status != EXECUTION_RESPOND || halves.token != 2001
+        || halves.states != 1 || trace.terminal_calls != 1
+        || trace.len != 4 || trace.events[0] != 11 || trace.events[1] != 10
+        || trace.events[2] != 3 || trace.events[3] != 12) { ret 3; }
+    if (!fixture_end(?fixture)) { ret 4; }
+
+    var exit_fixture: Fixture;
+    if (!fixture_init(?exit_fixture, 105)) { ret 5; }
+    var exit_renderer: error.Default;
+    val exit_mapper:   error.Mapper = default_error_mapper(?exit_fixture,
+        ?exit_renderer);
+    var exit_trace:  Trace;
+    var exit_halves: Halves = Halves{trace: ?exit_trace, before: 11,
+        after: 12, action: 2, states: 0, token: 0};
+    var exit_item: Middleware = Middleware{ctx: ?exit_halves,
+        before: halves_before, resume: halves_resume, after: halves_after};
+    var exit_stack:     Stack = Stack{items: ?exit_item, len: 1};
+    var exit_execution: Execution;
+    exit_execution.active = false;
+    var exit_current: Outcome = execute(?exit_execution, ?exit_stack,
+        traced_handler(?exit_trace), exit_mapper,
+        ?exit_fixture.request_context, policy_default());
+    if (exit_current.status != EXECUTION_PENDING || exit_current.token != 2002
+        || exit_trace.terminal_calls != 1) { ret 6; }
+    exit_current = resume(?exit_execution, ?exit_fixture.request_context);
+    if (exit_current.status != EXECUTION_RESPOND || exit_halves.token != 2002
+        || exit_trace.len != 4 || exit_trace.events[0] != 11
+        || exit_trace.events[1] != 3 || exit_trace.events[2] != 12
+        || exit_trace.events[3] != 10
+        || !fixture_end(?exit_fixture)) { ret 7; }
+    ret 0;
+}
+
+test "laurel.middleware: suspending with no resume fails closed" {
+    var fixture: Fixture;
+    if (!fixture_init(?fixture, 106)) { ret 1; }
+    var renderer: error.Default;
+    val mapper:   error.Mapper = default_error_mapper(?fixture, ?renderer);
+    var trace:    Trace;
+    var item:     Middleware   = traced_middleware(?trace, first_before,
+        first_after);
+    var stack:     Stack = Stack{items: ?item, len: 1};
+    var execution: Execution;
+    execution.active = false;
+    val refused: Outcome = execute(?execution, ?stack,
+        handler.Handler{ctx: nil, call: no_resume_terminal, resume: nil},
+        mapper, ?fixture.request_context, policy_default());
+    if (refused.status != EXECUTION_ERROR_RENDERED
+        || refused.app_error.kind != error.INTERNAL
+        || suspended(?execution) || trace.len != 2
+        || trace.events[1] != 5) { ret 2; }
+
+    # a resume that nothing is waiting on is refused, and a settled execution
+    # cannot be resumed a second time
+    val stale_resume: Outcome = resume(?execution, ?fixture.request_context);
+    if (stale_resume.status != EXECUTION_ERROR_UNMAPPED
+        || !fixture_end(?fixture)) { ret 3; }
     ret 0;
 }

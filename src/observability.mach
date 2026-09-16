@@ -565,6 +565,8 @@ pub fun observe_execution(recorder: *Recorder, outcome: middleware.Outcome,
         || outcome.status == middleware.EXECUTION_NEXT) {
         ret finish(recorder, status_code, now_ns);
     }
+    # a suspended execution is not a termination. a host that reports one here
+    # has skipped resume or abandon, and that is a fault, not a finish
     ret RECORD_INVALID;
 }
 
@@ -810,7 +812,7 @@ test "laurel.observability: one start and one terminal event per request" {
     if (begin(?recorder, ?faulted.context, view.view(nil, 0), 0) != RECORD_OK
         || sink.starts != 2) { ret 10; }
     val outcome: middleware.Outcome = middleware.Outcome{
-        status:       middleware.EXECUTION_ERROR_RENDERED, action: 0,
+        status:       middleware.EXECUTION_ERROR_RENDERED, action: 0, token: 0,
         app_error:    error.make(error.NOT_FOUND, 404, "not found", "absent", false),
         render_error: error.render_failure("none")
     };
@@ -825,7 +827,7 @@ test "laurel.observability: one start and one terminal event per request" {
     if (begin(?recorder, ?cancelled_fixture.context, view.view(nil, 0), 0)
         != RECORD_OK) { ret 14; }
     val stopped: middleware.Outcome = middleware.Outcome{
-        status:       middleware.EXECUTION_CANCELLED, action: 0,
+        status:       middleware.EXECUTION_CANCELLED, action: 0, token: 0,
         app_error:    error.make(error.CANCELLED, 408, "request cancelled", "stop", false),
         render_error: error.render_failure("none")
     };
