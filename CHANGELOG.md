@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Changed
+- The std pin advances to v3.2.0, the crypto pin to v0.10.1 and the http pin to v0.9.0 (#115). Laurel does not use the std io surfaces that changed in 3.x, so no source changes were needed.
 - CI runs the shared family pipeline from briar-systems/.github behind a single `gate` check (#111). A pull request into `dev` runs the light tier on x86_64-linux, a pull request into `main` adds the native aarch64-linux, x86_64-windows, aarch64-darwin and x86_64-darwin legs, and nothing runs on push. The format check is now enforced, and demo/ and doc/bench/laurel/ are built on every run.
 
 ## [0.11.0] - 2026-09-16
