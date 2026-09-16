@@ -626,6 +626,50 @@ pub fun invoke(router: *Router, matched: *Dispatch,
     ret matched.handler.call(matched.handler.ctx, request_context);
 }
 
+# every host ends its middleware chain in the dispatched route, so the mapping
+# from a dispatch status to what runs belongs here rather than in each host. a
+# host keeps one Terminal per request, arms it with the dispatch it took, and
+# passes terminal_handler to app.execute.
+pub rec Terminal {
+    routes:   *Router;
+    fallback: handler.Handler;
+    matched:  Dispatch;
+}
+
+pub fun terminal(routes: *Router, fallback: handler.Handler,
+    matched: Dispatch) Terminal {
+    ret Terminal{routes: routes, fallback: fallback, matched: matched};
+}
+
+fun terminal_call(ctx: ptr, request_context: *context.Context)
+    res[u8, error.AppError] {
+    val value: *Terminal = ctx::*Terminal;
+    if (value == nil || value.routes == nil || value.fallback.call == nil) {
+        ret res[u8, error.AppError].err{route_error(error.INTERNAL, 500,
+            "internal server error", "route terminal is invalid", false)};
+    }
+    if (value.matched.status == DISPATCH_MATCH) {
+        ret invoke(value.routes, ?value.matched, request_context);
+    }
+    if (value.matched.status == DISPATCH_NOT_FOUND) {
+        ret value.fallback.call(value.fallback.ctx, request_context);
+    }
+    # a terminal reached before it was armed carries no error to report, so it
+    # states that rather than failing the request with an empty one
+    if (value.matched.status != DISPATCH_BAD_REQUEST
+        && value.matched.status != DISPATCH_REJECTED
+        && value.matched.status != DISPATCH_PARAMETER_ERROR) {
+        ret res[u8, error.AppError].err{route_error(error.INTERNAL, 500,
+            "internal server error", "route terminal was not armed", false)};
+    }
+    ret res[u8, error.AppError].err{value.matched.app_error};
+}
+
+pub fun terminal_handler(value: *Terminal) handler.Handler {
+    if (value == nil) { ret handler.Handler{ctx: nil, call: nil}; }
+    ret handler.Handler{ctx: value::ptr, call: terminal_call};
+}
+
 fun text_decode(ctx: ptr, allocator: *A.Allocator,
     input: view.View, output: *Value) res[u8, error.AppError] {
     if (output == nil || (input.len != 0 && input.data == nil)) {
@@ -973,5 +1017,73 @@ test "laurel.router: built-in decoders reject overflow and malformed values" {
         || value.uuid_value[1] != 0x11 || value.uuid_value[15] != 0xff) { ret 8; }
     if (is_ok_u8_error_apperror(uuid_decode(nil, nil,
         view.view("001122334455-6677-8899-aabbccddeeff", 36), ?value))) { ret 9; }
+    ret 0;
+}
+
+fun test_fallback(ctx: ptr, request_context: *context.Context)
+    res[u8, error.AppError] {
+    val seen: *usize = ctx::*usize;
+    if (seen != nil) { @seen = @seen + 1; }
+    ret res[u8, error.AppError].ok{handler.RESPOND};
+}
+
+test "laurel.router: the shared terminal maps every dispatch status" {
+    var routes: [1]Route;
+    routes[0] = test_route(any_method(), any_host(),
+        path(view.view("/hello", 6)), nil, 0, "hello");
+    var specifications: [1]http_router.Route;
+    var compiled:       [1]http_router.CompiledRoute;
+    var segments:       [8]http_router.Segment;
+    val storage: Storage = Storage{specifications: ?specifications[0],
+        specification_cap:  1, compiled_routes: ?compiled[0],
+        compiled_route_cap: 1, segments: ?segments[0], segment_cap: 8};
+    var router: Router;
+    if (compile(?router, ?routes[0], 1, storage, limits_default()).status
+        != COMPILE_OK) { ret 1; }
+    var calls: usize = 0;
+    val fallback: handler.Handler =
+        handler.Handler{ctx: (?calls)::ptr, call: test_fallback};
+
+    val missing: Terminal = terminal(?router, fallback,
+        dispatch_result(DISPATCH_NOT_FOUND, no_error()));
+    val to_fallback: res[u8, error.AppError] =
+        terminal_call((?missing)::ptr, nil);
+    if (sel to_fallback.ok) {
+        if (to_fallback.ok != handler.RESPOND || calls != 1) { ret 2; }
+    }
+    or { ret 2; }
+
+    val refused: Terminal = terminal(?router, fallback,
+        dispatch_result(DISPATCH_BAD_REQUEST, bad_parameter()));
+    val reported: res[u8, error.AppError] = terminal_call((?refused)::ptr, nil);
+    if (sel reported.err) {
+        if (reported.err.kind != error.BAD_REQUEST
+            || reported.err.status != 400 || calls != 1) { ret 3; }
+    }
+    or { ret 3; }
+
+    # a terminal reached before a dispatch was stored carries no error of its
+    # own, so it must report that rather than fail with an empty one
+    val unarmed: Terminal = terminal(?router, fallback,
+        dispatch_result(0, no_error()));
+    val stated: res[u8, error.AppError] = terminal_call((?unarmed)::ptr, nil);
+    if (sel stated.err) {
+        if (stated.err.kind != error.INTERNAL || stated.err.status != 500
+            || calls != 1) { ret 4; }
+    }
+    or { ret 4; }
+
+    val invalid: Terminal = terminal(nil, fallback,
+        dispatch_result(DISPATCH_NOT_FOUND, no_error()));
+    val refused_routes: res[u8, error.AppError] =
+        terminal_call((?invalid)::ptr, nil);
+    if (sel refused_routes.err) {
+        if (refused_routes.err.kind != error.INTERNAL || calls != 1) { ret 5; }
+    }
+    or { ret 5; }
+
+    if (terminal_handler(nil).call != nil
+        || terminal_handler(?missing).call == nil
+        || terminal_handler(?missing).ctx != (?missing)::ptr) { ret 6; }
     ret 0;
 }
