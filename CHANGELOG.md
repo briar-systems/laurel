@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-16
+
 ### Added
 - A handler can suspend on request body I/O and be resumed (#96). `handler.suspend(token)` leaves the chain, `app.execute` returns `EXECUTION_PENDING` carrying that token, and `app.resume` re-enters only the suspended step. `app.abandon` winds a suspended request up when resumption will never come. A streaming upload no longer has to be buffered in the host before the application is entered.
 
@@ -11,9 +13,8 @@
 - **Breaking.** `app.execute` takes a `*middleware.Execution` the host owns per exchange, because a suspended execution outlives the call that started it (#96).
 - `observability.observe_execution` refuses `EXECUTION_PENDING` rather than describing a suspended request as a terminated one (#96).
 - demo/ and doc/bench/laurel/ pin hedge v0.4.1.
-
-### Changed
 - demo/ and doc/bench/laurel/ pin laurel v0.10.0 and end their middleware chains through `router.terminal_handler` instead of each carrying the mapping (#105).
+- The std pin advances to v2.2.0 and the crypto pin to v0.9.2.
 
 ## [0.10.0] - 2026-09-15
 
