@@ -50,12 +50,9 @@ val REQUEST_ID_BYTES: usize = 32;
 # cannot wait for bytes the server has not read yet, because the server only
 # reads inside the same poll that is running the handler. so the request body is
 # buffered here first, and laurel is admitted once the whole body is in hand.
-# the buffer comes from the host's per-request arena, which hedge fixes at
-# 12 KiB, so this bounds how large a body a laurel handler can be given.
+# the buffer comes from the host's per-request arena, whose size the application
+# declares at registration, so this bounds how large a body a handler is given.
 val MAX_BUFFERED_BODY: usize = 1024;
-
-
-val MAX_BODY_WAITS: usize = 2;
 
 val PHASE_BUFFERING: u8 = 1;
 val PHASE_READY: u8 = 2;
@@ -94,7 +91,6 @@ pub rec RequestState {
     too_large:   bool;
     pending:     bool;
     pending_tok: u64;
-    waited:      usize;
     offset:      usize;
     reader:      body.Reader;
     trailers:    field.Fields;
@@ -146,68 +142,61 @@ fun buffered_release(ctx: ptr) {}
 # pull whatever the connection has, reporting whether the whole body is in hand.
 #
 # hedge enters a service at the request headers, before any body byte is parsed,
-# so the first read normally suspends. the only way to let the bytes arrive is to
-# return to the server's poll, which is what SERVICE_PENDING does. when the body
-# event does arrive hedge resolves the suspended read itself and discards the
-# progress, so the byte count is taken from the reader rather than from that
-# call: `transferred` is the authoritative number of bytes delivered here.
+# so the first read suspends. the read belongs to this host until it completes
+# it: returning SERVICE_PENDING gives the connection a turn to collect the bytes,
+# and the next entry resolves the token this host is holding.
 fun accumulate(state: *RequestState, source: *body.Reader) bool {
     var turns: usize = 0;
     for (turns < 64) {
         turns = turns + 1;
-        var delivered: usize = source.transferred::usize;
-        if (delivered > MAX_BUFFERED_BODY) { delivered = MAX_BUFFERED_BODY; }
-        state.body_len = delivered;
-        # the suspended read belongs to the reader until the connection resolves
-        # it; issuing a second one while it is outstanding is a protocol error
-        if (source.pending_kind != body.OP_NONE) {
-            state.pending = true;
-            ret false;
-        }
-        state.pending = false;
-        # hedge enters a service at the request headers, so on the first turn the
-        # body has not been parsed yet and a read would suspend. a suspended read
-        # is resolved by hedge with a zero-capacity re-read that delivers nothing
-        # (connection.mach body_complete), so the bytes would be lost. waiting for
-        # the engine to hold the body first keeps every read synchronous.
-        if (source.has_length && source.declared_length != 0
-            && source.transferred == 0 && state.waited < MAX_BODY_WAITS) {
-            state.waited = state.waited + 1;
-            ret false;
-        }
         if (body.reader_terminal_state(source)) {
             state.body_done = true;
             ret true;
         }
-        # the buffer is taken only once a body actually needs one, because a
-        # bodyless GET must not spend the arena a handler is about to need
-        if (state.body == nil) {
-            val buffer: res[*u8, A.Error] =
-                A.allocate[u8](state.arena, MAX_BUFFERED_BODY);
-            if (sel buffer.err) {
+        var progress: body.Progress;
+        if (state.pending_tok != 0) {
+            progress          = body.complete_reader(source, state.pending_tok);
+            state.pending_tok = 0;
+            state.pending     = false;
+        }
+        or {
+            # a read this host did not issue is not this host's to resolve
+            if (source.pending_kind != body.OP_NONE) {
+                state.pending = true;
+                ret false;
+            }
+            # the buffer is taken only once a body actually needs one, because a
+            # bodyless GET must not spend the arena a handler is about to need
+            if (state.body == nil) {
+                val buffer: res[*u8, A.Error] =
+                    A.allocate[u8](state.arena, MAX_BUFFERED_BODY);
+                if (sel buffer.err) {
+                    state.body_failed = true;
+                    ret true;
+                }
+                state.body = buffer.ok;
+            }
+            val room: usize = MAX_BUFFERED_BODY - state.body_len;
+            if (room == 0) {
+                state.too_large   = true;
                 state.body_failed = true;
                 ret true;
             }
-            state.body = buffer.ok;
+            progress = body.read(source, ?state.body[state.body_len], room);
         }
-        val room: usize = MAX_BUFFERED_BODY - state.body_len;
-        if (room == 0) {
-            state.too_large = true;
-            state.body_failed = true;
-            ret true;
-        }
-        val progress: body.Progress =
-            body.read(source, ?state.body[state.body_len], room);
         if (progress.status == body.DATA) {
             state.body_len = state.body_len + progress.count;
-        } or (progress.status == body.PENDING) {
-            state.pending = true;
+        }
+        or (progress.status == body.PENDING) {
+            state.pending     = true;
             state.pending_tok = progress.token;
             ret false;
-        } or (progress.status == body.COMPLETE) {
+        }
+        or (progress.status == body.COMPLETE) {
             state.body_done = true;
             ret true;
-        } or {
+        }
+        or {
             state.body_failed = true;
             ret true;
         }
@@ -304,7 +293,6 @@ fun acquire(adapter: *Adapter, active: *call.Call) *RequestState {
             slot.too_large = false;
             slot.pending = false;
             slot.pending_tok = 0;
-            slot.waited = 0;
             slot.offset = 0;
             slot.bound = false;
             ret slot;

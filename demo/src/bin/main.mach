@@ -164,7 +164,7 @@ fun construct(context: ptr, graph: *schema.Graph,
     }
     if (!service.make_applications(?boot.applications, ?boot.application_slots[0], 4)
         || !service.register_application(?boot.applications, APPLICATION_NAME,
-            host.bound_handler(?boot.adapter))) {
+            host.bound_handler(?boot.adapter), 65536)) {
         schema.add_diagnostic(diagnostics, schema.ERROR, schema.SOURCE_ERROR,
             "application", "application", "the laurel application could not be registered");
         ret false;
@@ -287,7 +287,7 @@ fun main(argc: i64, argv: **u8) i64 {
 
     var quic_controls: quic_runtime.ControlView;
     if (!serve.make(?boot.runtime, ?boot.slots[0], ?boot.connections[0], POOL,
-        ?boot.plan, ?boot.candidate.graph)) {
+        ?boot.plan, ?boot.candidate.graph, ?heap)) {
         print.eprintln("laurel-demo: the serving runtime was refused");
         ret EXIT_RUNTIME;
     }

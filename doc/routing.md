@@ -26,3 +26,11 @@ The successful flow is:
 4. release the context and its request scope together
 
 `invoke` rejects a changed router generation, request generation, handler, context, or parameter set. Dispatch results therefore cannot be replayed across requests or router generations.
+
+## The routed terminal
+
+A host ends its middleware chain in the dispatched route, and what a dispatch status means is the same wherever it is ended: `DISPATCH_MATCH` invokes the route, `DISPATCH_NOT_FOUND` runs the application's fallback, and `DISPATCH_BAD_REQUEST`, `DISPATCH_REJECTED` and `DISPATCH_PARAMETER_ERROR` return the dispatch's own `AppError`.
+
+`terminal(routes, fallback, matched)` builds that mapping and `terminal_handler` gives it as a `handler.Handler` to pass to `app.execute`. The `Terminal` is caller-owned and lives as long as the request. A `Terminal` holding a status outside the five above, which is what a caller that never stored a dispatch has, returns an internal error naming that rather than a failure with no error in it.
+
+A host that wrote this mapping itself would have to be changed when a status is added or when one of them starts carrying something extra, such as a 405 with `Allow`. Ending the chain through `terminal_handler` means it does not.

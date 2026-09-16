@@ -120,7 +120,7 @@ fun respond_json(request_context: *context.Context, content: view.View)
         || !render.init_fixed(?holder.fixed, content, response.generation,
             bound.limits, ?response.trailers,
             context.cancellation(request_context))
-        || render.respond(request_context, status.OK, ?holder.media,
+        || render.respond_with_limits(request_context, status.OK, ?holder.media,
             render.fixed_body(?holder.fixed), bound.limits) != render.RESPOND_OK) {
         ret res[u8, error.AppError].err{internal("response installation failed")};
     }
