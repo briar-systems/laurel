@@ -151,7 +151,7 @@ fun valid_stack(stack: *middleware.Stack) bool {
     if (stack == nil || (stack.len > 0 && stack.items == nil)) { ret false; }
     var i: usize = 0;
     for (i < stack.len) {
-        if (stack.items[i].call == nil) { ret false; }
+        if (stack.items[i].before == nil) { ret false; }
         i = i + 1;
     }
     ret true;
@@ -366,24 +366,51 @@ fun invalid_execution(detail: str) middleware.Outcome {
     ret middleware.Outcome{
         status:    middleware.EXECUTION_ERROR_UNMAPPED,
         action:    0,
+        token:     0,
         app_error: error.make(error.INTERNAL, 500,
             "internal server error", detail, false),
         render_error: error.render_failure(detail),
     };
 }
 
-pub fun execute(app: *App, terminal: handler.Handler,
+fun executable(app: *App, request_context: *context.Context) bool {
+    ret app != nil && app.valid && request_context != nil
+        && context.owned_by(request_context, app_identity(app), app.generation);
+}
+
+# the execution record belongs to the host, alongside the context and the
+# recorder, because a request that suspends outlives this call
+pub fun execute(app: *App, execution: *middleware.Execution,
+    terminal: handler.Handler,
     request_context: *context.Context) middleware.Outcome {
-    if (app == nil || !app.valid || request_context == nil
-        || !context.owned_by(request_context, app_identity(app),
-        app.generation)) {
+    if (!executable(app, request_context)) {
         ret invalid_execution("middleware context is not owned by the application");
     }
-    ret middleware.execute(app.middleware, terminal, app.errors,
+    ret middleware.execute(execution, app.middleware, terminal, app.errors,
         request_context, middleware.Policy{
         max_depth:    app.config.limits.max_middleware_depth,
         panic_policy: app.config.panic_policy,
     });
+}
+
+# the body i/o the pending outcome named has settled. only the suspended step is
+# entered, and nothing that already ran runs again
+pub fun resume(app: *App, execution: *middleware.Execution,
+    request_context: *context.Context) middleware.Outcome {
+    if (!executable(app, request_context)) {
+        ret invalid_execution("middleware context is not owned by the application");
+    }
+    ret middleware.resume(execution, request_context);
+}
+
+# the request is going away while a step holds it. every exit half that is owed
+# still runs, and the host must call this before releasing a suspended context
+pub fun abandon(app: *App, execution: *middleware.Execution,
+    request_context: *context.Context) middleware.Outcome {
+    if (!executable(app, request_context)) {
+        ret invalid_execution("middleware context is not owned by the application");
+    }
+    ret middleware.abandon(execution, request_context);
 }
 
 pub fun drain(app: *App, deadline_ns: i64) lifecycle.Transition {
@@ -495,14 +522,15 @@ fun test_failed_lifecycle_stop(context: ptr) res[lifecycle.CallbackStatus, view.
     ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
-fun test_handler(context_ptr: ptr, request_context: *context.Context) res[u8, error.AppError] {
-    ret res[u8, error.AppError].ok{handler.RESPOND};
+fun test_handler(context_ptr: ptr, request_context: *context.Context,
+    state: *ptr) handler.Result {
+    ret handler.respond();
 }
 
 fun test_failing_handler(context_ptr: ptr,
-    request_context: *context.Context) res[u8, error.AppError] {
-    ret res[u8, error.AppError].err{error.make(error.NOT_FOUND, 404, "not found",
-        "no matching resource", false)};
+    request_context: *context.Context, state: *ptr) handler.Result {
+    ret handler.fail(error.make(error.NOT_FOUND, 404, "not found",
+        "no matching resource", false));
 }
 
 fun test_error(context_ptr: ptr, app_error: error.AppError,
@@ -667,7 +695,7 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
             panic_policy:           middleware.PANIC_ABORT},
         router:        ?routes,
         middleware:    ?middlewares,
-        fallback:      handler.Handler{ctx: nil, call: test_handler},
+        fallback:      handler.Handler{ctx: nil, call: test_handler, resume: nil},
         errors:        error.Mapper{ctx: nil, render: test_error},
         providers:     ?providers,
         lifecycle:     ?controller,
@@ -744,8 +772,10 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
         security.authenticate(?authenticator, ?request_context);
     if (sel authenticated.err)                                                                                                                                                                                                              { ret 15; }
     if (authenticated.ok != ?auth_state.principal || request_context.principal_state != context.PRINCIPAL_OWNED || auth_state.authenticate_calls != 3 || is_ok_ptr_error_apperror(security.authenticate(?authenticator, ?request_context))) { ret 15; }
-    val executed: middleware.Outcome = execute(?app,
-        handler.Handler{ctx: nil, call: test_handler}, ?request_context);
+    var executed_execution: middleware.Execution;
+    executed_execution.active = false;
+    val executed: middleware.Outcome = execute(?app, ?executed_execution,
+        handler.Handler{ctx: nil, call: test_handler, resume: nil}, ?request_context);
     if (executed.status != middleware.EXECUTION_RESPOND
         || executed.action != handler.RESPOND) { ret 10; }
     var rejected_context:  context.Context;
@@ -905,7 +935,7 @@ fun observed_app(app: *App, providers: *provider.Set,
             trust_proxy:            false, panic_policy: middleware.PANIC_ABORT},
         router:        routes,
         middleware:    stack,
-        fallback:      handler.Handler{ctx: nil, call: test_handler},
+        fallback:      handler.Handler{ctx: nil, call: test_handler, resume: nil},
         errors:        error.Mapper{ctx: nil, render: test_error},
         providers:     providers,
         lifecycle:     controller,
@@ -982,8 +1012,10 @@ test "laurel.app: an admitted request reaches the assembled observer" {
         view.view("orders.index", 12)))) { ret 5; }
     if (sink.start_calls != 1 || sink.route_len != 12 || sink.sequence != 1
         || request_recorder(?app, ?completed.request_context) != ?recorder) { ret 5; }
-    val responded: middleware.Outcome = execute(?app,
-        handler.Handler{ctx: nil, call: test_handler}, ?completed.request_context);
+    var responded_execution: middleware.Execution;
+    responded_execution.active = false;
+    val responded: middleware.Outcome = execute(?app, ?responded_execution,
+        handler.Handler{ctx: nil, call: test_handler, resume: nil}, ?completed.request_context);
     if (responded.status != middleware.EXECUTION_RESPOND) { ret 6; }
     if (observability.set_label(request_recorder(?app, ?completed.request_context),
         view.view("kind", 4), view.view("read", 4)) != observability.RECORD_OK) {
@@ -1005,8 +1037,10 @@ test "laurel.app: an admitted request reaches the assembled observer" {
         || sink.start_calls != 2 || sink.route_len != 0 || sink.sequence != 2) {
         ret 9;
     }
-    val refused: middleware.Outcome = execute(?app,
-        handler.Handler{ctx: nil, call: test_failing_handler},
+    var refused_execution: middleware.Execution;
+    refused_execution.active = false;
+    val refused: middleware.Outcome = execute(?app, ?refused_execution,
+        handler.Handler{ctx: nil, call: test_failing_handler, resume: nil},
         ?faulted.request_context);
     if (refused.status != middleware.EXECUTION_ERROR_RENDERED) { ret 10; }
     if (!release_context(?app, ?faulted.request_context,
@@ -1024,8 +1058,10 @@ test "laurel.app: an admitted request reaches the assembled observer" {
         view.view(nil, 0)))
         || sink.start_calls != 3 || sink.sequence != 3) { ret 13; }
     if (!transition_ok(cancel.cancel(?stopped.scope))) { ret 14; }
-    val abandoned: middleware.Outcome = execute(?app,
-        handler.Handler{ctx: nil, call: test_handler}, ?stopped.request_context);
+    var abandoned_execution: middleware.Execution;
+    abandoned_execution.active = false;
+    val abandoned: middleware.Outcome = execute(?app, ?abandoned_execution,
+        handler.Handler{ctx: nil, call: test_handler, resume: nil}, ?stopped.request_context);
     if (abandoned.status != middleware.EXECUTION_CANCELLED) { ret 15; }
     if (!release_context(?app, ?stopped.request_context,
         Termination{outcome: abandoned, reason: cancel.reason(?stopped.scope),
@@ -1046,8 +1082,10 @@ test "laurel.app: an admitted request reaches the assembled observer" {
         request_id: view.view("request-200", 11),
         route_name: view.view(nil, 0), started_ns: 10})
         || sink.start_calls != 4) { ret 17; }
-    val undescribed_out: middleware.Outcome = execute(?app,
-        handler.Handler{ctx: nil, call: test_handler},
+    var undescribed_out_execution: middleware.Execution;
+    undescribed_out_execution.active = false;
+    val undescribed_out: middleware.Outcome = execute(?app, ?undescribed_out_execution,
+        handler.Handler{ctx: nil, call: test_handler, resume: nil},
         ?undescribed.request_context);
     # a host clock that goes backwards cannot describe the request it served
     if (release_context(?app, ?undescribed.request_context,
@@ -1068,7 +1106,7 @@ test "laurel.app: an admitted request reaches the assembled observer" {
         fixture_admission(?unsettled, 104, view.view("request-104", 11),
         view.view(nil, 0))) || sink.start_calls != 5) { ret 19; }
     if (release_context(?app, ?unsettled.request_context,
-        Termination{outcome: middleware.Outcome{status: 0, action: 0,
+        Termination{outcome: middleware.Outcome{status: 0, action: 0, token: 0,
         app_error: error.make(error.INTERNAL, 500, "internal server error",
         "unmeasured", false),
         render_error: error.render_failure("unmeasured")},

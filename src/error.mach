@@ -885,11 +885,11 @@ test "laurel.error: default error renderer uses host limits and commits" {
     tight_limits.response_body = body.limits(16777216, 8192, 2048);
     var fixture: HostileFixture;
     if (!hostile_fixture_init_with_limits(?fixture, 108, 0, 999, tight_limits)) { ret 1; }
-    fixture.response.fields.len = 0;
+    fixture.response.fields.len   = 0;
     fixture.response.fields.bytes = 0;
     var renderer: Default;
     if (!initialize_default(?renderer, message.limits_default(), 128)) { ret 2; }
-    val mapper: Mapper = default_mapper(?renderer);
+    val mapper:   Mapper                 = default_mapper(?renderer);
     val rendered: res[u8, RenderFailure] = mapper.render(mapper.ctx,
         make(NOT_FOUND, 404, "not found", "private detail", false), ?fixture.request_context);
     if (sel rendered.err) { ret 3; }
@@ -899,6 +899,6 @@ test "laurel.error: default error renderer uses host limits and commits" {
     val committed: message.ResponseStatus = message.commit_response(?fixture.response,
         method.GET, tight_limits);
     if (committed != message.RESPONSE_OK) { ret 5; }
-    if (!hostile_fixture_end(?fixture)) { ret 6; }
+    if (!hostile_fixture_end(?fixture))   { ret 6; }
     ret 0;
 }
