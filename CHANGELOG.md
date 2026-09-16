@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+- demo/ and doc/bench/laurel/ pin laurel v0.9.2, hedge v0.4.0, mach-http v0.8.2 and mach-std v2.1.0, and each host completes the body read it suspended rather than waiting for hedge to do it (#97).
+- The demo is run with `mach dep pull`, `mach build` and `mach run` instead of `demo/run.sh`, which is removed (#101). Its README no longer describes the arena as a fixed 12 KiB: an application declares what it needs when it registers.
+
 ## [0.9.2] - 2026-09-15
 
 ### Fixed
