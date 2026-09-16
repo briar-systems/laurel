@@ -172,8 +172,8 @@ fun respond_bytes(request_context: *context.Context, state: *State,
             context.cancellation(request_context))) {
         ret res[u8, error.AppError].err{internal("response installation failed")};
     }
-    val installed: render.RespondStatus = render.respond(request_context, code,
-        ?holder.media, render.fixed_body(?holder.fixed), bound.limits);
+    val installed: render.RespondStatus = render.respond_with_limits(request_context,
+        code, ?holder.media, render.fixed_body(?holder.fixed), bound.limits);
     if (installed != render.RESPOND_OK) {
         ret res[u8, error.AppError].err{internal("response installation failed")};
     }
