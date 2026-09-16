@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-15
+
 ### Added
 - `router.Terminal`, `router.terminal` and `router.terminal_handler`: the mapping from a dispatch status to what runs at the end of a middleware chain, which every host was writing for itself (#98). A terminal holding no dispatch returns an internal error naming that instead of a failure with no error in it.
 
