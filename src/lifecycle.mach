@@ -219,6 +219,7 @@ pub fun poll_ready(controller: *Controller) Transition {
     ret transition(TRANSITION_OK, controller, NO_COMPONENT, view.view(nil, 0));
 }
 
+# deadline_ns is an absolute monotonic instant in ns, or NO_DEADLINE
 pub fun drain(controller: *Controller, deadline_ns: i64) Transition {
     if (!validate(controller) || deadline_ns < NO_DEADLINE) { ret invalid(controller); }
     if (controller.state == STARTED || controller.state == READY) {
