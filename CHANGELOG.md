@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-09-17
+
 ### Changed
 - The http pin advances to v0.11.0 (#133). That release adds `h1.connection.next_deadline` and documents that every http deadline is monotonic time. std v4.0.1 and crypto v0.12.0 are unchanged.
 
