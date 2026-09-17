@@ -60,12 +60,12 @@ need = []
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-ref = "tag/v3.2.0"
+ref = "tag/v4.0.1"
 
 [dep.crypto]
 git = "https://github.com/briar-systems/mach-crypto"
-ref = "tag/v0.10.1"
+ref = "tag/v0.11.0"
 
 [dep.http]
 git = "https://github.com/briar-systems/mach-http"
-ref = "tag/v0.9.0"
+ref = "tag/v0.10.0"
