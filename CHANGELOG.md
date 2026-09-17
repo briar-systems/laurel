@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- The copyright holder is now Briar Systems LLC (#137). The MIT license text is unchanged.
+
 ## [0.13.3] - 2026-09-17
 
 ### Changed
