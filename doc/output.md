@@ -118,10 +118,11 @@ media type is `text/event-stream; charset=utf-8` from
 `realtime.event_stream_media`.
 
 Heartbeats are explicit and caller-clocked. `realtime.stream_heartbeat` takes the
-current time and emits a comment only when `heartbeat_interval_ns` has elapsed
-since the last heartbeat; otherwise it returns `SEND_NOT_DUE` without queuing
-anything. An interval of zero disables heartbeats. `realtime.stream_observe`
-records an unrelated send so a busy stream does not also emit heartbeats.
+current monotonic `time.Instant` and emits a comment only when the policy's
+`heartbeat_interval` duration has elapsed since the last heartbeat; otherwise it
+returns `SEND_NOT_DUE` without queuing anything. An interval of zero disables
+heartbeats. `realtime.stream_observe` records an unrelated send so a busy stream
+does not also emit heartbeats.
 
 ### WebSockets
 
