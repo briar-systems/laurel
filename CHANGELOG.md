@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Changed
+- The crypto pin advances to v0.12.0, which brings faster X25519 and Ed25519 (#125).
 - Releases are published by `release.yml` when a `v*` tag is pushed, through the shared family release workflow (#123). It verifies the tag against the manifest and the changelog, runs the full CI tier, and publishes the GitHub release with this changelog's section as its notes. A dispatch of `release.yml` rehearses the same path without a tag.
 
 ## [0.13.0] - 2026-09-17
