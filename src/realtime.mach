@@ -9,6 +9,7 @@ use http.core.target;
 use http.websocket;
 use http.websocket.negotiation;
 use laurel.render;
+use std.chrono.duration;
 use std.chrono.time;
 use std.memory;
 use std.sync.cancel;
@@ -16,6 +17,7 @@ use std.text.utf8;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
+use std.types.option.opt;
 use std.types.size.usize;
 use std.types.view;
 
@@ -90,7 +92,7 @@ pub rec Queue {
 pub rec Policy {
     max_message_bytes:      usize;
     max_close_reason_bytes: usize;
-    heartbeat_interval_ns:  i64;
+    heartbeat_interval:     duration.Duration;
     close_code:             u16;
     allow_binary:           bool;
 }
@@ -117,7 +119,7 @@ pub rec Stream {
     pending_capacity: usize;
     pending_token:    u64;
     token_counter:    u64;
-    last_send_ns:     i64;
+    last_send:        time.Instant;
     close_code:       u16;
     reader:           body.Reader;
     initialized:      bool;
@@ -135,7 +137,7 @@ pub rec Socket {
     close_received:  bool;
     peer_close_code: u16;
     sent_close_code: u16;
-    last_send_ns:    i64;
+    last_send:       time.Instant;
     held:            bool;
     initialized:     bool;
 }
@@ -222,14 +224,14 @@ pub fun queue_take(queue: *Queue, output: *u8, capacity: usize) usize {
 pub fun default_policy(kind: u8) Policy {
     if (kind == KIND_SSE) {
         ret Policy{max_message_bytes: 65536, max_close_reason_bytes: 0,
-            heartbeat_interval_ns: 15000000000, close_code: 1000, allow_binary: false};
+            heartbeat_interval: 15 * duration.SECOND, close_code: 1000, allow_binary: false};
     }
     if (kind == KIND_WEBSOCKET) {
         ret Policy{max_message_bytes: 65536, max_close_reason_bytes: MAX_CLOSE_REASON_BYTES,
-            heartbeat_interval_ns: 30000000000, close_code: 1000, allow_binary: true};
+            heartbeat_interval: 30 * duration.SECOND, close_code: 1000, allow_binary: true};
     }
     ret Policy{max_message_bytes: 65536, max_close_reason_bytes: 0,
-        heartbeat_interval_ns: 0, close_code: 1000, allow_binary: true};
+        heartbeat_interval: 0, close_code: 1000, allow_binary: true};
 }
 
 fun close_code_sendable(code: u16) bool {
@@ -239,7 +241,7 @@ fun close_code_sendable(code: u16) bool {
 }
 
 pub fun policy_valid(policy: Policy, kind: u8) bool {
-    if (policy.max_message_bytes == 0 || policy.heartbeat_interval_ns < 0
+    if (policy.max_message_bytes == 0 || policy.heartbeat_interval < 0
         || policy.max_close_reason_bytes > MAX_CLOSE_REASON_BYTES) { ret false; }
     if (kind == KIND_WEBSOCKET) {
         ret close_code_sendable(policy.close_code);
@@ -248,7 +250,7 @@ pub fun policy_valid(policy: Policy, kind: u8) bool {
         ret policy.max_close_reason_bytes == 0 && !policy.allow_binary;
     }
     if (kind != KIND_STREAM) { ret false; }
-    ret policy.max_close_reason_bytes == 0 && policy.heartbeat_interval_ns == 0;
+    ret policy.max_close_reason_bytes == 0 && policy.heartbeat_interval == 0;
 }
 
 pub fun event_stream_media(media: *render.Media) bool {
@@ -517,9 +519,9 @@ fun stream_release_body(ctx: ptr) {}
 
 pub fun init_stream(stream: *Stream, kind: u8, policy: Policy, bytes: *u8, capacity: usize,
     max_bytes: u64, generation: u64, configured: message.Limits, trailers: *field.Fields,
-    scope: *cancel.Scope, start_ns: i64) bool {
+    scope: *cancel.Scope, start: time.Instant) bool {
     if (stream == nil || stream.initialized || generation == 0 || max_bytes == 0
-        || trailers == nil || scope == nil || start_ns < 0
+        || trailers == nil || scope == nil || !valid_instant(start)
         || (kind != KIND_STREAM && kind != KIND_SSE) || !policy_valid(policy, kind)
         || !init_queue(?stream.queue, bytes, capacity)
         || capacity < policy.max_message_bytes
@@ -538,7 +540,7 @@ pub fun init_stream(stream: *Stream, kind: u8, policy: Policy, bytes: *u8, capac
     stream.pending_capacity = 0;
     stream.pending_token    = 0;
     stream.token_counter    = 0;
-    stream.last_send_ns     = start_ns;
+    stream.last_send        = start;
     stream.close_code       = 0;
     stream.initialized      = true;
     stream.reader           = body.init_reader(stream::ptr, stream_read, stream_finish_body,
@@ -649,23 +651,31 @@ pub fun stream_comment(stream: *Stream, text: view.View) Sent {
 }
 
 # heartbeats are emitted only when the configured interval has elapsed
-pub fun stream_heartbeat(stream: *Stream, now_ns: i64) Sent {
+fun valid_instant(value: time.Instant) bool {
+    ret value.sec >= 0 && value.nsec >= 0 && value.nsec < 1000000000;
+}
+
+fun heartbeat_due(last: time.Instant, now: time.Instant, interval: duration.Duration) bool {
+    ret !time.instant_before(now, last) && time.instant_sub(now, last) >= interval;
+}
+
+pub fun stream_heartbeat(stream: *Stream, now: time.Instant) Sent {
     val writable: SendStatus = stream_writable(stream);
     if (writable != SEND_OK) { ret refuse(writable); }
-    if (stream.kind != KIND_SSE || stream.policy.heartbeat_interval_ns == 0
-        || now_ns < 0) { ret refuse(SEND_INVALID); }
-    if (now_ns < stream.last_send_ns
-        || now_ns - stream.last_send_ns < stream.policy.heartbeat_interval_ns) {
+    if (stream.kind != KIND_SSE || stream.policy.heartbeat_interval == 0
+        || !valid_instant(now)) { ret refuse(SEND_INVALID); }
+    if (!heartbeat_due(stream.last_send, now, stream.policy.heartbeat_interval)) {
         ret refuse(SEND_NOT_DUE);
     }
     val result: Sent = stream_comment(stream, view.view("heartbeat", 9));
-    if (result.status == SEND_OK) { stream.last_send_ns = now_ns; }
+    if (result.status == SEND_OK) { stream.last_send = now; }
     ret result;
 }
 
-pub fun stream_observe(stream: *Stream, now_ns: i64) bool {
-    if (stream == nil || !stream.initialized || now_ns < stream.last_send_ns) { ret false; }
-    stream.last_send_ns = now_ns;
+pub fun stream_observe(stream: *Stream, now: time.Instant) bool {
+    if (stream == nil || !stream.initialized || !valid_instant(now)
+        || time.instant_before(now, stream.last_send)) { ret false; }
+    stream.last_send = now;
     ret true;
 }
 
@@ -716,8 +726,8 @@ pub fun negotiate(exchange_value: *exchange.Exchange, extended_protocol: view.Vi
 
 pub fun init_socket(socket: *Socket, policy: Policy, bytes: *u8, capacity: usize,
     control: *u8, control_capacity: usize, limits: websocket.Limits,
-    scope: *cancel.Scope, start_ns: i64) bool {
-    if (socket == nil || socket.initialized || scope == nil || start_ns < 0
+    scope: *cancel.Scope, start: time.Instant) bool {
+    if (socket == nil || socket.initialized || scope == nil || !valid_instant(start)
         || !policy_valid(policy, KIND_WEBSOCKET) || control == nil
         || control_capacity < CONTROL_SCRATCH_BYTES
         || !init_queue(?socket.queue, bytes, capacity)
@@ -733,7 +743,7 @@ pub fun init_socket(socket: *Socket, policy: Policy, bytes: *u8, capacity: usize
     socket.close_received  = false;
     socket.peer_close_code = 0;
     socket.sent_close_code = 0;
-    socket.last_send_ns    = start_ns;
+    socket.last_send       = start;
     socket.held            = false;
     socket.initialized     = true;
     ret true;
@@ -860,22 +870,22 @@ pub fun socket_close(socket: *Socket, code: u16, reason: view.View) Sent {
     ret result;
 }
 
-pub fun socket_heartbeat(socket: *Socket, now_ns: i64) Sent {
+pub fun socket_heartbeat(socket: *Socket, now: time.Instant) Sent {
     val writable: SendStatus = socket_writable(socket);
-    if (writable != SEND_OK)                                    { ret refuse(writable); }
-    if (socket.policy.heartbeat_interval_ns == 0 || now_ns < 0) { ret refuse(SEND_INVALID); }
-    if (now_ns < socket.last_send_ns
-        || now_ns - socket.last_send_ns < socket.policy.heartbeat_interval_ns) {
+    if (writable != SEND_OK)                                          { ret refuse(writable); }
+    if (socket.policy.heartbeat_interval == 0 || !valid_instant(now)) { ret refuse(SEND_INVALID); }
+    if (!heartbeat_due(socket.last_send, now, socket.policy.heartbeat_interval)) {
         ret refuse(SEND_NOT_DUE);
     }
     val result: Sent = socket_frame(socket, websocket.OPCODE_PING, nil, 0);
-    if (result.status == SEND_OK) { socket.last_send_ns = now_ns; }
+    if (result.status == SEND_OK) { socket.last_send = now; }
     ret result;
 }
 
-pub fun socket_observe(socket: *Socket, now_ns: i64) bool {
-    if (socket == nil || !socket.initialized || now_ns < socket.last_send_ns) { ret false; }
-    socket.last_send_ns = now_ns;
+pub fun socket_observe(socket: *Socket, now: time.Instant) bool {
+    if (socket == nil || !socket.initialized || !valid_instant(now)
+        || time.instant_before(now, socket.last_send)) { ret false; }
+    socket.last_send = now;
     ret true;
 }
 
@@ -947,7 +957,7 @@ fun fixture_limits() message.Limits {
 }
 
 fun init_fixture(state: *Fixture, generation: u64, upgrade: bool) bool {
-    if (state == nil || !operation_ok(cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0}))) {
+    if (state == nil || !operation_ok(cancel.make_root(?state.scope, opt[time.Instant].none{}))) {
         ret false;
     }
     val configured: message.Limits = fixture_limits();
@@ -971,8 +981,7 @@ fun init_fixture(state: *Fixture, generation: u64, upgrade: bool) bool {
     val metadata: message.Metadata = message.Metadata{
         version:     message.version_h1(1, 1), secure: true, early_data: false,
         peer:        message.unspecified_endpoint(), local: message.unspecified_endpoint(),
-        received_at: time.Time{sec: 1, nsec: 0}, has_deadline: false,
-        deadline:    time.Time{sec: 0, nsec: 0}, request_index: 1
+        received_at: time.Time{sec: 1, nsec: 0}, deadline: opt[time.Instant].none{}, request_index: 1
     };
     if (!message.init_request(?state.request, method.from_kind(kind),
         target.origin(view.view("/live", 5), view.view("/live", 5), view.view(nil, 0)),
@@ -1005,17 +1014,17 @@ fun same(actual: *u8, length: usize, expected: view.View) bool {
 
 fun stream_policy() Policy {
     ret Policy{max_message_bytes: 16, max_close_reason_bytes: 0,
-        heartbeat_interval_ns: 0, close_code: 1000, allow_binary: true};
+        heartbeat_interval: 0, close_code: 1000, allow_binary: true};
 }
 
 fun sse_test_policy() Policy {
     ret Policy{max_message_bytes: 256, max_close_reason_bytes: 0,
-        heartbeat_interval_ns: 1000, close_code: 1000, allow_binary: false};
+        heartbeat_interval: 1000, close_code: 1000, allow_binary: false};
 }
 
 fun socket_test_policy() Policy {
     ret Policy{max_message_bytes: 128, max_close_reason_bytes: MAX_CLOSE_REASON_BYTES,
-        heartbeat_interval_ns: 1000, close_code: 1000, allow_binary: true};
+        heartbeat_interval: 1000, close_code: 1000, allow_binary: true};
 }
 
 fun repeated(output: *u8, length: usize, byte: u8) view.View {
@@ -1033,7 +1042,7 @@ test "laurel.realtime: a slow consumer applies backpressure to a bounded stream"
     var storage: [32]u8;
     var stream:  Stream;
     if (!init_stream(?stream, KIND_STREAM, stream_policy(), ?storage[0], 32, 4096, 61,
-        fixture_limits(), ?state.response.trailers, ?state.scope, 0)) { ret 2; }
+        fixture_limits(), ?state.response.trailers, ?state.scope, time.Instant{sec: 0, nsec: 0})) { ret 2; }
     var payload: [16]u8;
     val first:   Sent = stream_send(?stream, repeated(?payload[0], 16, 'a'), FRAME_TEXT);
     val second:  Sent = stream_send(?stream, repeated(?payload[0], 16, 'b'), FRAME_TEXT);
@@ -1084,7 +1093,7 @@ test "laurel.realtime: server-sent events frame data, identity, and heartbeats" 
     var storage: [512]u8;
     var stream:  Stream;
     if (!init_stream(?stream, KIND_SSE, sse_test_policy(), ?storage[0], 512, 65536, 71,
-        fixture_limits(), ?state.response.trailers, ?state.scope, 0)) { ret 3; }
+        fixture_limits(), ?state.response.trailers, ?state.scope, time.Instant{sec: 0, nsec: 0})) { ret 3; }
     val named: Sent = stream_event(?stream,
         named_event(view.view("tick", 4), view.view("hello", 5)));
     if (named.status != SEND_OK || named.count != 25) { ret 4; }
@@ -1094,12 +1103,12 @@ test "laurel.realtime: server-sent events frame data, identity, and heartbeats" 
     if (trailing.status != SEND_OK || trailing.count != 16) { ret 6; }
     val identified: Sent = stream_event(?stream, Event{name: view.view(nil, 0),
         id: view.view("42", 2), data: view.view("x", 1), retry_ms: 3000});
-    if (identified.status != SEND_OK || identified.count != 28)          { ret 7; }
-    if (stream_comment(?stream, view.view("ping", 4)).status != SEND_OK) { ret 8; }
-    if (stream_heartbeat(?stream, 500).status != SEND_NOT_DUE)           { ret 9; }
-    val beat: Sent = stream_heartbeat(?stream, 1000);
+    if (identified.status != SEND_OK || identified.count != 28)                            { ret 7; }
+    if (stream_comment(?stream, view.view("ping", 4)).status != SEND_OK)                   { ret 8; }
+    if (stream_heartbeat(?stream, time.Instant{sec: 0, nsec: 500}).status != SEND_NOT_DUE) { ret 9; }
+    val beat: Sent = stream_heartbeat(?stream, time.Instant{sec: 0, nsec: 1000});
     if (beat.status != SEND_OK || beat.count != 12
-        || stream_heartbeat(?stream, 1500).status != SEND_NOT_DUE) { ret 10; }
+        || stream_heartbeat(?stream, time.Instant{sec: 0, nsec: 1500}).status != SEND_NOT_DUE) { ret 10; }
     if (stream_event(?stream, named_event(view.view("bad\nname", 8),
         view.view("x", 1))).status != SEND_INVALID) { ret 11; }
     var control: [1]u8;
@@ -1132,7 +1141,7 @@ test "laurel.realtime: suspended readers resume and disconnects fail closed" {
     var storage: [32]u8;
     var stream:  Stream;
     if (!init_stream(?stream, KIND_STREAM, stream_policy(), ?storage[0], 32, 4096, 81,
-        fixture_limits(), ?state.response.trailers, ?state.scope, 0)) { ret 2; }
+        fixture_limits(), ?state.response.trailers, ?state.scope, time.Instant{sec: 0, nsec: 0})) { ret 2; }
     var received:  [32]u8;
     val suspended: body.Progress = body.read(?stream.reader, ?received[0], 16);
     val token:     u64           = stream_pending(?stream);
@@ -1151,7 +1160,7 @@ test "laurel.realtime: suspended readers resume and disconnects fail closed" {
     var other_storage: [32]u8;
     var other:         Stream;
     if (!init_stream(?other, KIND_STREAM, stream_policy(), ?other_storage[0], 32, 4096, 82,
-        fixture_limits(), ?disconnected.response.trailers, ?disconnected.scope, 0)) { ret 8; }
+        fixture_limits(), ?disconnected.response.trailers, ?disconnected.scope, time.Instant{sec: 0, nsec: 0})) { ret 8; }
     if (stream_send(?other, repeated(?payload[0], 8, 'q'), FRAME_TEXT).status != SEND_OK) {
         ret 9;
     }
@@ -1186,7 +1195,7 @@ test "laurel.realtime: websocket channels carry frames and close cleanly" {
     var control: [125]u8;
     var socket:  Socket;
     if (!init_socket(?socket, socket_test_policy(), ?storage[0], 256, ?control[0], 125,
-        websocket.limits_default(), ?state.scope, 0)) { ret 2; }
+        websocket.limits_default(), ?state.scope, time.Instant{sec: 0, nsec: 0})) { ret 2; }
     val channel: Channel = socket_channel(?socket);
     if (channel.kind != KIND_WEBSOCKET
         || send(channel, view.view("hello", 5), FRAME_TEXT).status != SEND_OK
@@ -1212,8 +1221,8 @@ test "laurel.realtime: websocket channels carry frames and close cleanly" {
     if (decoded.kind != websocket.EVENT_DATA || decoded.data_length != 3
         || !same(decoded.data, 3, view.view("abc", 3)) || !decoded.message_final
         || !socket_release(?socket)) { ret 5; }
-    if (socket_heartbeat(?socket, 500).status != SEND_NOT_DUE) { ret 6; }
-    val beat: Sent = socket_heartbeat(?socket, 2000);
+    if (socket_heartbeat(?socket, time.Instant{sec: 0, nsec: 500}).status != SEND_NOT_DUE) { ret 6; }
+    val beat: Sent = socket_heartbeat(?socket, time.Instant{sec: 0, nsec: 2000});
     if (beat.status != SEND_OK || socket_drain(?socket, ?wire[0], 64) != 2
         || wire[0] != 0x89 || wire[1] != 0x00) { ret 7; }
     var oversized: [200]u8;

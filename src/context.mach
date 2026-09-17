@@ -92,7 +92,7 @@ pub rec Context {
     executing:         bool;
     bound:             bool;
     narrowed:          bool;
-    narrowed_at:       time.Time;
+    narrowed_at:       time.Instant;
 }
 
 fun view_valid(value: view.View) bool {
@@ -166,7 +166,7 @@ fun clear(context: *Context) {
     context.executing         = false;
     context.bound             = false;
     context.narrowed          = false;
-    context.narrowed_at       = time.Time{sec: 0, nsec: 0};
+    context.narrowed_at       = time.Instant{sec: 0, nsec: 0};
 }
 
 pub fun allocator_valid(allocator: *A.Allocator) bool {
@@ -208,7 +208,7 @@ pub fun bind(context: *Context, exchange_ptr: *exchange.Exchange, params: Params
     context.executing         = false;
     context.bound             = true;
     context.narrowed          = false;
-    context.narrowed_at       = time.Time{sec: 0, nsec: 0};
+    context.narrowed_at       = time.Instant{sec: 0, nsec: 0};
     if (!exchange_matches(context) || !scope_active(context.scope)) {
         clear(context);
         ret false;
@@ -286,17 +286,17 @@ pub fun cancellation(context: *Context) *cancel.Scope {
 }
 
 # the earlier of the scope deadline and the narrowed one, absolute monotonic, for the host to enforce
-pub fun deadline(context: *Context, value: *time.Time) bool {
+pub fun deadline(context: *Context, value: *time.Instant) bool {
     if (!active(context) || value == nil) { ret false; }
     val query: cancel.DeadlineQuery = cancel.get_deadline(context.scope);
     if (sel query.err) { ret false; }
-    var found: bool      = false;
-    var at:    time.Time = time.Time{sec: 0, nsec: 0};
+    var found: bool         = false;
+    var at:    time.Instant = time.Instant{sec: 0, nsec: 0};
     if (sel query.ok.some) {
         at    = query.ok.some.at;
         found = true;
     }
-    if (context.narrowed && (!found || time.time_before(context.narrowed_at, at))) {
+    if (context.narrowed && (!found || time.instant_before(context.narrowed_at, at))) {
         at    = context.narrowed_at;
         found = true;
     }
@@ -306,11 +306,11 @@ pub fun deadline(context: *Context, value: *time.Time) bool {
 }
 
 # tightens the request deadline to an absolute monotonic instant, never widening it
-pub fun narrow_deadline(context: *Context, at: time.Time) bool {
+pub fun narrow_deadline(context: *Context, at: time.Instant) bool {
     if (!active(context) || at.sec < 0 || at.nsec < 0 || at.nsec >= duration.SECOND) {
         ret false;
     }
-    if (context.narrowed && !time.time_before(at, context.narrowed_at)) { ret true; }
+    if (context.narrowed && !time.instant_before(at, context.narrowed_at)) { ret true; }
     context.narrowed    = true;
     context.narrowed_at = at;
     ret true;
@@ -351,7 +351,7 @@ rec Fixture {
     allocator:         A.Allocator;
 }
 
-fun metadata(has_deadline: bool, deadline_value: time.Time) message.Metadata {
+fun metadata(deadline_value: opt[time.Instant]) message.Metadata {
     ret message.Metadata{
         version:       message.version_h1(1, 1),
         secure:        true,
@@ -359,15 +359,14 @@ fun metadata(has_deadline: bool, deadline_value: time.Time) message.Metadata {
         peer:          message.unspecified_endpoint(),
         local:         message.unspecified_endpoint(),
         received_at:   time.Time{sec: 1, nsec: 0},
-        has_deadline:  has_deadline,
         deadline:      deadline_value,
         request_index: 1,
     };
 }
 
 fun init_fixture(fixture: *Fixture, generation: u64,
-    has_deadline: bool, deadline_value: time.Time) bool {
-    if (fixture == nil || !operation_ok(cancel.make_root(?fixture.scope, has_deadline, deadline_value))) { ret false; }
+    deadline_value: opt[time.Instant]) bool {
+    if (fixture == nil || !operation_ok(cancel.make_root(?fixture.scope, deadline_value))) { ret false; }
     if (!fixed_ok(fixed.make(?fixture.allocator,
         ?fixture.allocation_state, ?fixture.allocation_bytes[0], 4096))) { ret false; }
     val configured:       message.Limits = message.limits_default();
@@ -376,7 +375,7 @@ fun init_fixture(fixture: *Fixture, generation: u64,
     fixture.request_body = body.empty_reader(generation);
     if (!message.init_request(?fixture.request, method.from_kind(method.GET),
         target.origin(view.view("/", 1), view.view("/", 1), view.view(nil, 0)),
-        metadata(has_deadline, deadline_value), request_fields, request_trailers,
+        metadata(deadline_value), request_fields, request_trailers,
         ?fixture.request_body, generation, configured)) { ret false; }
     if (!message.init_response(?fixture.response, ?fixture.response_fields[0], 100,
         ?fixture.response_trailers[0], 32, generation, configured)) { ret false; }
@@ -387,7 +386,7 @@ fun init_fixture(fixture: *Fixture, generation: u64,
 
 test "laurel.context: one binding borrows the exact exchange generation" {
     var fixture: Fixture;
-    if (!init_fixture(?fixture, 41, false, time.Time{sec: 0, nsec: 0})) { ret 1; }
+    if (!init_fixture(?fixture, 41, opt[time.Instant].none{})) { ret 1; }
     var items: [2]Param;
     items[0].name  = view.view("id", 2);
     items[0].value = view.view("42", 2);
@@ -417,7 +416,7 @@ test "laurel.context: one binding borrows the exact exchange generation" {
 
 test "laurel.context: stale generations and cancellation fail closed" {
     var fixture: Fixture;
-    if (!init_fixture(?fixture, 51, false, time.Time{sec: 0, nsec: 0})) { ret 1; }
+    if (!init_fixture(?fixture, 51, opt[time.Instant].none{})) { ret 1; }
     val params:  Params = Params{items: nil, len: 0, generation: 51};
     var owner:   i64    = 1;
     var context: Context;
@@ -438,7 +437,7 @@ test "laurel.context: stale generations and cancellation fail closed" {
 
 test "laurel.context: capture and identity bounds are transactional" {
     var fixture: Fixture;
-    if (!init_fixture(?fixture, 61, false, time.Time{sec: 0, nsec: 0})) { ret 1; }
+    if (!init_fixture(?fixture, 61, opt[time.Instant].none{})) { ret 1; }
     var duplicate: [2]Param;
     duplicate[0].name  = view.view("id", 2);
     duplicate[0].value = view.view("1", 1);
@@ -465,14 +464,14 @@ test "laurel.context: capture and identity bounds are transactional" {
 }
 
 test "laurel.context: deadlines remain owned by the exchange scope" {
-    val expected: time.Time = time.Time{sec: 20, nsec: 7};
+    val expected: time.Instant = time.Instant{sec: 20, nsec: 7};
     var fixture:  Fixture;
-    if (!init_fixture(?fixture, 71, true, expected)) { ret 1; }
+    if (!init_fixture(?fixture, 71, opt[time.Instant].some{expected})) { ret 1; }
     var owner:   i64 = 1;
     var context: Context;
     if (!bind(?context, ?fixture.exchange, Params{items: nil, len: 0, generation: 71},
         1, ?fixture.allocator, ?owner, 1, nil, view.view("request-71", 10), 32)) { ret 2; }
-    var actual: time.Time;
+    var actual: time.Instant;
     if (!deadline(?context, ?actual) || actual.sec != expected.sec || actual.nsec != expected.nsec) { ret 3; }
     if (!transition_ok(cancel.timeout(?fixture.scope)) || deadline(?context, ?actual))              { ret 4; }
     if (!unbind(?context, ?owner, 1) || !operation_ok(cancel.destroy(?fixture.scope)))              { ret 5; }

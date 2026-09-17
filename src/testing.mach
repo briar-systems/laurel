@@ -28,6 +28,7 @@ use laurel.session;
 use laurel.upload;
 use A:               std.allocator;
 use fixed_allocator: std.allocator.fixed;
+use std.chrono.duration;
 use std.chrono.time;
 use std.memory;
 use std.sync.cancel;
@@ -52,7 +53,6 @@ fun operation_ok(outcome: cancel.Operation) bool {
 
 pub val DRAIN_SCRATCH_BYTES: usize = 256;
 pub val DEFAULT_BODY_POLLS:  usize = 64;
-pub val NO_DEADLINE:         i64   = -1;
 
 pub def Status: u8;
 
@@ -76,18 +76,18 @@ pub rec Storage {
     captured_capacity:    usize;
 }
 
-# deadline_ns is an absolute monotonic instant in ns, or NO_DEADLINE
+# deadline is an absolute monotonic instant, and none leaves the request unbounded
 pub rec Request {
-    version:     message.Version;
-    secure:      bool;
-    method:      method.Method;
-    target:      target.Target;
-    fields:      field.Fields;
-    body:        view.View;
-    fragment:    usize;
-    suspend:     bool;
-    request_id:  view.View;
-    deadline_ns: i64;
+    version:    message.Version;
+    secure:     bool;
+    method:     method.Method;
+    target:     target.Target;
+    fields:     field.Fields;
+    body:       view.View;
+    fragment:   usize;
+    suspend:    bool;
+    request_id: view.View;
+    deadline:   opt[time.Instant];
 }
 
 pub rec Response {
@@ -153,7 +153,7 @@ pub rec Harness {
     storage:         Storage;
     limits:          message.Limits;
     max_body_polls:  usize;
-    clock_ns:        i64;
+    clock:           time.Instant;
     scope:           cancel.Scope;
     request_body:    RequestBody;
     request:         message.Request;
@@ -295,7 +295,7 @@ pub fun init(harness: *Harness, application: *app.App, routes: *router.Router,
     harness.storage        = storage;
     harness.limits         = limits;
     harness.max_body_polls = max_body_polls;
-    harness.clock_ns       = 0;
+    harness.clock          = time.Instant{sec: 0, nsec: 0};
     harness.active         = false;
     harness.initialized    = true;
     ret true;
@@ -309,8 +309,8 @@ pub fun ready(harness: *Harness) lifecycle.Transition {
     ret app.poll_ready(harness.application);
 }
 
-pub fun drain(harness: *Harness, deadline_ns: i64) lifecycle.Transition {
-    ret app.drain(harness.application, deadline_ns);
+pub fun drain(harness: *Harness, deadline: opt[time.Instant]) lifecycle.Transition {
+    ret app.drain(harness.application, deadline);
 }
 
 pub fun stop(harness: *Harness) lifecycle.Transition {
@@ -321,7 +321,7 @@ pub fun request(version: message.Version, request_method: method.Method,
     request_target: target.Target, fields: field.Fields, request_id: view.View) Request {
     ret Request{version: version, secure: true, method: request_method,
         target:   request_target, fields: fields, body: view.View{data: nil, len: 0},
-        fragment: 0, suspend: false, request_id: request_id, deadline_ns: NO_DEADLINE};
+        fragment: 0, suspend: false, request_id: request_id, deadline: opt[time.Instant].none{}};
 }
 
 fun empty_response() Response {
@@ -334,9 +334,14 @@ fun failure(result: *Result, outcome: Status) Status {
     ret outcome;
 }
 
+fun valid_deadline(deadline: opt[time.Instant]) bool {
+    if (sel deadline.none) { ret true; }
+    ret deadline.some.sec >= 0 && deadline.some.nsec >= 0 && deadline.some.nsec < 1000000000;
+}
+
 fun request_valid(one: Request) bool {
     ret view_valid(one.body) && view_valid(one.request_id) && one.request_id.len != 0
-        && message.valid_version(one.version) && one.deadline_ns >= NO_DEADLINE;
+        && message.valid_version(one.version) && valid_deadline(one.deadline);
 }
 
 fun settle_request_body(harness: *Harness) bool {
@@ -410,14 +415,8 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
         if (!request_valid(one)) { ret INVOKE_INVALID; }
         ret failure(result, INVOKE_REJECTED);
     }
-    val generation:   u64       = harness.application.generation;
-    val has_deadline: bool      = one.deadline_ns != NO_DEADLINE;
-    var deadline:     time.Time = time.Time{sec: 0, nsec: 0};
-    if (has_deadline) {
-        deadline = time.Time{sec: one.deadline_ns / 1000000000,
-            nsec: one.deadline_ns % 1000000000};
-    }
-    if (!operation_ok(cancel.make_root(?harness.scope, has_deadline, deadline))) { ret INVOKE_INVALID; }
+    val generation: u64 = harness.application.generation;
+    if (!operation_ok(cancel.make_root(?harness.scope, one.deadline))) { ret INVOKE_INVALID; }
     harness.active                        = true;
     harness.request_body.content          = one.body;
     harness.request_body.offset           = 0;
@@ -431,9 +430,9 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
         body_finish, body_complete, body_release, body.OWNER_APPLICATION, generation,
         true, one.body.len::u64, harness.limits.request_body, nil, ?harness.scope);
     val metadata: message.Metadata = message.Metadata{version: one.version,
-        secure:       one.secure, early_data: false, peer: message.unspecified_endpoint(),
-        local:        message.unspecified_endpoint(), received_at: time.Time{sec: 1, nsec: 0},
-        has_deadline: has_deadline, deadline: deadline, request_index: 1};
+        secure:   one.secure, early_data: false, peer: message.unspecified_endpoint(),
+        local:    message.unspecified_endpoint(), received_at: time.Time{sec: 1, nsec: 0},
+        deadline: one.deadline, request_index: 1};
     val trailers: field.Fields = field.init(nil, 0, field.limits(0, 0, 0, 0));
     if (!harness.request_body.reader.valid
         || !message.init_request(?harness.request, one.method, one.target, metadata,
@@ -470,7 +469,7 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
     if (!app.bind_context(harness.application, ?harness.request_context,
         ?harness.recorder, app.Admission{exchange: ?harness.exchange, params: params,
         allocator:  ?harness.allocator, request_id: one.request_id,
-        route_name: route_name, started_ns: harness.clock_ns})) {
+        route_name: route_name, started: harness.clock})) {
         harness.active = false;
         cancel.destroy(?harness.scope);
         ret failure(result, INVOKE_REJECTED);
@@ -497,7 +496,7 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
     result.suspensions = suspensions;
     result.execution   = outcome.status;
     result.app_error   = outcome.app_error;
-    harness.clock_ns   = harness.clock_ns + 1;
+    harness.clock      = time.instant_add(harness.clock, 1);
     val reason:       cancel.Reason = cancel.reason(?harness.scope);
     var status_value: Status        = INVOKE_OK;
     if (!(sel reason.active) || outcome.status == middleware.EXECUTION_CANCELLED) {
@@ -550,8 +549,8 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
     result.response.bytes_out = harness.exchange.completion.bytes_out;
     if (!app.release_context(harness.application, ?harness.request_context,
         app.Termination{outcome: outcome, reason: reason,
-        status: harness.response.status, transfer: harness.exchange.completion,
-        now_ns: harness.clock_ns})) {
+        status:   harness.response.status, transfer: harness.exchange.completion,
+        finished: harness.clock})) {
         status_value = INVOKE_INVALID;
     }
     harness.active = false;
@@ -1029,7 +1028,7 @@ fun service_ready(ctx: ptr) lifecycle.Readiness {
 }
 
 fun service_drain(ctx: ptr,
-    deadline_ns: i64) res[lifecycle.CallbackStatus, view.View] {
+    deadline: opt[time.Instant]) res[lifecycle.CallbackStatus, view.View] {
     ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
@@ -1294,7 +1293,7 @@ fun init_application(fixture: *AppFixture, limits: message.Limits) bool {
         config: app.Config{limits: app.Limits{max_body_bytes: 65536,
             max_form_fields:         16, max_upload_bytes: 65536, max_route_params: 4,
             max_request_id_bytes:    64, max_active_requests: 1,
-            max_middleware_depth:    8, handler_deadline_ns: lifecycle.NO_DEADLINE,
+            max_middleware_depth:    8, handler_timeout: opt[duration.Duration].none{},
             max_providers:           1, max_provider_key_bytes: 32,
             max_background_services: 1}, trust_proxy: false,
             panic_policy:            middleware.PANIC_ABORT},
@@ -1426,7 +1425,7 @@ test "laurel.testing: the harness drives a whole application without a socket" {
         || result.response.status != 409
         || !same(response_body(?result), view.view("conflict", 8))
         || result.app_error.kind != error.CONFLICT) { ret 11; }
-    if (drain(?harness, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_OK
+    if (drain(?harness, opt[time.Instant].none{}).status != lifecycle.TRANSITION_OK
         || stop(?harness).status != lifecycle.TRANSITION_OK
         || !lifecycle.terminal(?fixture.controller)) { ret 12; }
     val released: usize = release_code(?fixture);
@@ -1476,7 +1475,7 @@ test "laurel.testing: a suspension that is never resumed is abandoned" {
         || fixture.sink.starts != 1 || fixture.sink.finishes != 1
         || fixture.sink.errors != 0
         || fixture.sink.outcome != observability.OUTCOME_CANCELLED) { ret 6; }
-    if (drain(?harness, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_OK
+    if (drain(?harness, opt[time.Instant].none{}).status != lifecycle.TRANSITION_OK
         || stop(?harness).status != lifecycle.TRANSITION_OK
         || !release_application(?fixture)) { ret 7; }
     ret 0;
@@ -1515,7 +1514,7 @@ test "laurel.testing: a handler reaches its session through the application" {
         || response_field(?result, view.view("set-cookie", 10)) != nil) {
         ret 8;
     }
-    if (drain(?harness, lifecycle.NO_DEADLINE).status
+    if (drain(?harness, opt[time.Instant].none{}).status
         != lifecycle.TRANSITION_OK
         || stop(?harness).status != lifecycle.TRANSITION_OK
         || release_code(?fixture) != 0) { ret 9; }
@@ -1586,7 +1585,7 @@ test "laurel.testing: streaming request and response bodies flow in process" {
         != INVOKE_ERROR || result.response.status != 413
         || result.app_error.kind != error.TOO_LARGE
         || !same(response_body(?result), view.view("request too large", 17))) { ret 7; }
-    if (drain(?harness, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_OK
+    if (drain(?harness, opt[time.Instant].none{}).status != lifecycle.TRANSITION_OK
         || stop(?harness).status != lifecycle.TRANSITION_OK
         || !release_application(?fixture)) { ret 8; }
     ret 0;
@@ -1668,7 +1667,7 @@ test "laurel.testing: the security corpus runs against every http version" {
     if (run_suite(?harness, ?wrong[0], 1, ?versions[0], 4, ?negative)
         || negative.failed != 4 || negative.first_case != 0
         || negative.first_version != 0) { ret 7; }
-    if (drain(?harness, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_OK
+    if (drain(?harness, opt[time.Instant].none{}).status != lifecycle.TRANSITION_OK
         || stop(?harness).status != lifecycle.TRANSITION_OK
         || !release_application(?fixture)) { ret 8; }
     ret 0;
@@ -1695,7 +1694,7 @@ test "laurel.testing: admission follows the driven application lifecycle" {
     if (ready(?harness).status != lifecycle.TRANSITION_OK
         || invoke(?harness, probe, ?result) != INVOKE_OK
         || !same(response_body(?result), view.view("order:7", 7))) { ret 6; }
-    if (drain(?harness, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_OK
+    if (drain(?harness, opt[time.Instant].none{}).status != lifecycle.TRANSITION_OK
         || invoke(?harness, probe, ?result) != INVOKE_REJECTED
         || fixture.sink.starts != 1) { ret 7; }
     if (stop(?harness).status != lifecycle.TRANSITION_OK

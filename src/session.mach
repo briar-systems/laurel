@@ -21,6 +21,7 @@ use std.sync.thread;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
+use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
@@ -2894,7 +2895,7 @@ fun init_request_fixture(fixture: *RequestFixture) bool {
         fixture.codec_fixture.codec, secure_cookie("laurel_session"),
         "laurel.request")
         || start_manager(?fixture.manager) != STORE_OK) { ret false; }
-    if (!operation_ok(cancel.make_root(?fixture.scope, false, time.Time{sec: 0, nsec: 0}))) {
+    if (!operation_ok(cancel.make_root(?fixture.scope, opt[time.Instant].none{}))) {
         ret false;
     }
     fixture.request.fields = field.init(?fixture.request_items[0], 4,
@@ -3913,8 +3914,7 @@ test "laurel.session: stores enforce versions, generations, capacity, and releas
     loaded.generation = first_generation;
 
     var cancelled: cancel.Scope;
-    if (!operation_ok(cancel.make_root(?cancelled, false,
-        time.Time{sec: 0, nsec: 0})) || !transition_ok(cancel.cancel(?cancelled))) { ret 7; }
+    if (!operation_ok(cancel.make_root(?cancelled, opt[time.Instant].none{})) || !transition_ok(cancel.cancel(?cancelled))) { ret 7; }
     var untouched: Session = value;
     if (store.load(store.ctx, value.id, 1, ?data[0], 2048, ?untouched,
         ?cancelled) != STORE_CANCELLED || untouched.generation != 0
@@ -3986,7 +3986,7 @@ test "laurel.session: store scopes are disjoint from every operation range" {
     if (store.load(store.ctx, value.id, 1, ?data[0], 2048, ?loaded, nil)
         != STORE_OK) { ret 4; }
     var scope: cancel.Scope;
-    if (!operation_ok(cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0}))) {
+    if (!operation_ok(cancel.make_root(?scope, opt[time.Instant].none{}))) {
         ret 5;
     }
     val scope_bytes: *u8 = (?scope)::*u8;
