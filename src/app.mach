@@ -20,6 +20,7 @@ use laurel.security.csrf;
 use laurel.session;
 use A: std.allocator;
 use std.allocator.fixed;
+use std.chrono.duration;
 use std.chrono.time;
 use std.sync.atomic;
 use std.sync.cancel;
@@ -56,6 +57,7 @@ fun app_identity(app: *App) ptr {
     ret (?app.config)::ptr;
 }
 
+# handler_deadline_ns bounds each request from Admission.started_ns, and the host enforces it
 pub rec Limits {
     max_body_bytes:          usize;
     max_form_fields:         usize;
@@ -119,7 +121,10 @@ pub rec Assembly {
     app_state:     ptr;
 }
 
+val MAX_INSTANT_NS: i64 = 9223372036854775807;
+
 # everything one admitted request needs, gathered where the server dispatches it
+# started_ns is the monotonic admission instant and the handler deadline base, an Instant from std 5
 pub rec Admission {
     exchange:   *exchange.Exchange;
     params:     context.Params;
@@ -290,6 +295,17 @@ fun release_reservation(app: *App) bool {
     ret false;
 }
 
+# the handler deadline counts from the host's monotonic started_ns, so laurel reads no clock
+fun narrow_handler_deadline(app: *App, request_context: *context.Context,
+    started_ns: i64) bool {
+    val limit: i64 = app.config.limits.handler_deadline_ns;
+    if (limit == lifecycle.NO_DEADLINE)                        { ret true; }
+    if (started_ns < 0 || started_ns > MAX_INSTANT_NS - limit) { ret false; }
+    val at_ns: i64 = started_ns + limit;
+    ret context.narrow_deadline(request_context,
+        time.Time{sec: at_ns / duration.SECOND, nsec: at_ns % duration.SECOND});
+}
+
 # admission and the start event are one step, so an admitted request is always
 # an observed request
 pub fun bind_context(app: *App, request_context: *context.Context,
@@ -300,6 +316,11 @@ pub fun bind_context(app: *App, request_context: *context.Context,
         app.config.limits.max_route_params, admission.allocator, app_identity(app),
         app.generation, app.app_state, admission.request_id,
         app.config.limits.max_request_id_bytes)) {
+        release_reservation(app);
+        ret false;
+    }
+    if (!narrow_handler_deadline(app, request_context, admission.started_ns)) {
+        context.unbind(request_context, app_identity(app), app.generation);
         release_reservation(app);
         ret false;
     }
@@ -851,7 +872,7 @@ test "laurel.app: cleanup failure remains observable after primary failure" {
     if (!test_vocabulary(?vocabulary, ?label_specs[0])) { ret 2; }
     var application: App;
     if (!observed_app(?application, ?providers, ?controller, ?routes, ?middlewares,
-        ?headers, ?observer, ?vocabulary)) { ret 3; }
+        ?headers, ?observer, ?vocabulary, lifecycle.NO_DEADLINE)) { ret 3; }
     val primary:    lifecycle.Transition = start(?application);
     val no_cleanup: lifecycle.Transition = cleanup_failure(?application);
     if (primary.status != lifecycle.TRANSITION_FAILED || primary.component != 0
@@ -887,8 +908,13 @@ rec RequestFixture {
 }
 
 fun request_fixture(state: *RequestFixture, generation: u64, path: view.View) bool {
+    ret request_fixture_until(state, generation, path, false, time.Time{sec: 0, nsec: 0});
+}
+
+fun request_fixture_until(state: *RequestFixture, generation: u64, path: view.View,
+    has_deadline: bool, deadline: time.Time) bool {
     if (state == nil
-        || !operation_ok(cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0}))) {
+        || !operation_ok(cancel.make_root(?state.scope, has_deadline, deadline))) {
         ret false;
     }
     if (!fixed_ok(fixed.make(?state.allocator, ?state.allocation_state,
@@ -900,8 +926,8 @@ fun request_fixture(state: *RequestFixture, generation: u64, path: view.View) bo
     val metadata: message.Metadata = message.Metadata{
         version:     message.version_h1(1, 1), secure: true, early_data: false,
         peer:        message.unspecified_endpoint(), local: message.unspecified_endpoint(),
-        received_at: time.Time{sec: 1, nsec: 0}, has_deadline: false,
-        deadline:    time.Time{sec: 0, nsec: 0}, request_index: 1
+        received_at: time.Time{sec: 1, nsec: 0}, has_deadline: has_deadline,
+        deadline:    deadline, request_index: 1
     };
     if (!message.init_request(?state.request, method.from_kind(method.GET),
         target.origin(path, path, view.view(nil, 0)), metadata, request_fields,
@@ -925,12 +951,12 @@ fun observed_app(app: *App, providers: *provider.Set,
     controller: *lifecycle.Controller, routes: *router.Router,
     stack: *middleware.Stack, headers: *security.HeadersPolicy,
     observer: *observability.Observer,
-    vocabulary: *observability.Vocabulary) bool {
+    vocabulary: *observability.Vocabulary, handler_deadline_ns: i64) bool {
     val assembly: Assembly = Assembly{
         config: Config{limits: Limits{max_body_bytes: 1024, max_form_fields: 16,
             max_upload_bytes:       4096, max_route_params: 8, max_request_id_bytes: 64,
             max_active_requests:    1, max_middleware_depth: 16,
-            handler_deadline_ns:    lifecycle.NO_DEADLINE, max_providers: 0,
+            handler_deadline_ns:    handler_deadline_ns, max_providers: 0,
             max_provider_key_bytes: 32, max_background_services: 1},
             trust_proxy:            false, panic_policy: middleware.PANIC_ABORT},
         router:        routes,
@@ -987,7 +1013,7 @@ test "laurel.app: an admitted request reaches the assembled observer" {
     if (!test_vocabulary(?vocabulary, ?label_specs[0])) { ret 2; }
     var app: App;
     if (!observed_app(?app, ?providers, ?controller, ?routes, ?middlewares,
-        ?headers, ?observer, ?vocabulary)
+        ?headers, ?observer, ?vocabulary, lifecycle.NO_DEADLINE)
         || start(?app).status != lifecycle.TRANSITION_OK
         || poll_ready(?app).status != lifecycle.TRANSITION_OK) { ret 3; }
 
@@ -1121,5 +1147,109 @@ test "laurel.app: an admitted request reaches the assembled observer" {
         || stop(?app).status != lifecycle.TRANSITION_OK || !release(?app)) {
         ret 21;
     }
+    ret 0;
+}
+
+fun admit_at(app: *App, state: *RequestFixture, recorder: *observability.Recorder,
+    generation: u64, has_deadline: bool, deadline: time.Time, started_ns: i64) bool {
+    if (!request_fixture_until(state, generation, view.view("/orders", 7),
+        has_deadline, deadline)) { ret false; }
+    ret bind_context(app, ?state.request_context, recorder,
+        Admission{exchange: ?state.exchange,
+        params:     context.Params{items: nil, len: 0, generation: generation},
+        allocator:  ?state.allocator, request_id: view.view("request", 7),
+        route_name: view.view(nil, 0), started_ns: started_ns});
+}
+
+fun finish_at(app: *App, state: *RequestFixture, now_ns: i64) bool {
+    var execution: middleware.Execution;
+    execution.active = false;
+    val outcome: middleware.Outcome = execute(app, ?execution,
+        handler.Handler{ctx: nil, call: test_handler, resume: nil}, ?state.request_context);
+    var status: u16 = 200;
+    if (outcome.status == middleware.EXECUTION_CANCELLED) { status = 408; }
+    ret release_context(app, ?state.request_context,
+        Termination{outcome: outcome, reason: cancel.reason(?state.scope), status: status,
+        transfer: state.exchange.completion, now_ns: now_ns})
+        && operation_ok(cancel.destroy(?state.scope));
+}
+
+fun deadline_is(state: *RequestFixture, sec: i64, nsec: i64) bool {
+    var at: time.Time;
+    ret context.deadline(?state.request_context, ?at) && at.sec == sec && at.nsec == nsec;
+}
+
+test "laurel.app: the handler deadline narrows the exchange deadline from started_ns" {
+    var providers: provider.Set;
+    if (!provider.init(?providers, nil, 0, 0, 32)) { ret 1; }
+    var lifecycle_item: lifecycle.Lifecycle = lifecycle.Lifecycle{ctx: nil,
+        start: test_lifecycle_start, ready: test_lifecycle_ready,
+        drain: test_lifecycle_drain, stop: test_lifecycle_stop};
+    var controller: lifecycle.Controller;
+    if (!lifecycle.init(?controller, ?lifecycle_item, 1, 1)) { ret 1; }
+    var routes: router.Router;
+    if (router.compile(?routes, nil, 0, router.Storage{specifications: nil, specification_cap: 0,
+        compiled_routes: nil, compiled_route_cap: 0, segments: nil,
+        segment_cap:     0},
+        router.limits_default()).status != router.COMPILE_OK) { ret 1; }
+    var middlewares: middleware.Stack = middleware.Stack{items: nil, len: 0};
+    var headers:     security.HeadersPolicy;
+    if (!security.secure_headers(?headers)) { ret 1; }
+    var sink: EventSink;
+    sink.start_calls  = 0;
+    sink.finish_calls = 0;
+    sink.error_calls  = 0;
+    var observer: observability.Observer = observability.Observer{ctx: (?sink)::ptr,
+        start: test_observer_start, finish: test_observer_finish,
+        error: test_observer_error};
+    var label_specs: [1]observability.LabelSpec;
+    var vocabulary:  observability.Vocabulary;
+    if (!test_vocabulary(?vocabulary, ?label_specs[0])) { ret 1; }
+    var app: App;
+    if (!observed_app(?app, ?providers, ?controller, ?routes, ?middlewares,
+        ?headers, ?observer, ?vocabulary, 5000000000)
+        || start(?app).status != lifecycle.TRANSITION_OK
+        || poll_ready(?app).status != lifecycle.TRANSITION_OK) { ret 2; }
+    var recorder: observability.Recorder;
+    val none:     time.Time = time.Time{sec: 0, nsec: 0};
+
+    # instants sit far past any real monotonic reading, since std expires a scope
+    # whose deadline has already passed
+
+    # with no exchange deadline the handler deadline is started_ns plus the limit
+    var open: RequestFixture;
+    if (!admit_at(?app, ?open, ?recorder, 300, false, none, 1000000010000000007)) { ret 3; }
+    if (!deadline_is(?open, 1000000015, 7))                                       { ret 4; }
+    if (!finish_at(?app, ?open, 1000000010000000008))                             { ret 5; }
+
+    # an earlier exchange deadline is never widened
+    var tight: RequestFixture;
+    if (!admit_at(?app, ?tight, ?recorder, 301, true, time.Time{sec: 1000000012, nsec: 0},
+        1000000010000000000)) { ret 6; }
+    if (!deadline_is(?tight, 1000000012, 0))           { ret 7; }
+    if (!finish_at(?app, ?tight, 1000000010000000001)) { ret 8; }
+
+    # a later exchange deadline is narrowed to the handler deadline
+    var loose: RequestFixture;
+    if (!admit_at(?app, ?loose, ?recorder, 302, true, time.Time{sec: 1000000020, nsec: 0},
+        1000000010000000000)) { ret 9; }
+    if (!deadline_is(?loose, 1000000015, 0)) { ret 10; }
+
+    # a timed out scope reports no deadline at all
+    if (!transition_ok(cancel.timeout(?loose.scope)) || deadline_is(?loose, 1000000015, 0)) { ret 11; }
+    if (!finish_at(?app, ?loose, 1000000010000000001))                                      { ret 12; }
+
+    # a started_ns that is not a monotonic instant cannot base a deadline
+    var negative: RequestFixture;
+    if (admit_at(?app, ?negative, ?recorder, 303, false, none, -1)
+        || negative.request_context.bound || active_request_count(?app) != 0
+        || !operation_ok(cancel.destroy(?negative.scope))) { ret 13; }
+    var overflow: RequestFixture;
+    if (admit_at(?app, ?overflow, ?recorder, 304, false, none, 9223372036854775807)
+        || overflow.request_context.bound || active_request_count(?app) != 0
+        || !operation_ok(cancel.destroy(?overflow.scope))) { ret 14; }
+
+    if (drain(?app, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_OK
+        || stop(?app).status != lifecycle.TRANSITION_OK || !release(?app)) { ret 15; }
     ret 0;
 }
