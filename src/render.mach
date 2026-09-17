@@ -761,7 +761,7 @@ fun fixture_limits() message.Limits {
 }
 
 fun init_fixture_with_limits(state: *Fixture, generation: u64, configured: message.Limits) bool {
-    if (state == nil || !operation_ok(cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0}))) {
+    if (state == nil || !operation_ok(cancel.make_root(?state.scope, opt[time.Instant].none{}))) {
         ret false;
     }
     if (!fixed_ok(fixed_allocator.make(?state.allocator, ?state.allocation_state,
@@ -772,8 +772,7 @@ fun init_fixture_with_limits(state: *Fixture, generation: u64, configured: messa
     val metadata: message.Metadata = message.Metadata{
         version:     message.version_h1(1, 1), secure: true, early_data: false,
         peer:        message.unspecified_endpoint(), local: message.unspecified_endpoint(),
-        received_at: time.Time{sec: 1, nsec: 0}, has_deadline: false,
-        deadline:    time.Time{sec: 0, nsec: 0}, request_index: 1
+        received_at: time.Time{sec: 1, nsec: 0}, deadline: opt[time.Instant].none{}, request_index: 1
     };
     if (!message.init_request(?state.request, method.from_kind(method.GET),
         target.origin(view.view("/", 1), view.view("/", 1), view.view(nil, 0)), metadata,

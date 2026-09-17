@@ -683,8 +683,7 @@ rec Halves {
 fun fixture_init(fixture: *Fixture, generation: u64) bool {
     if (fixture == nil || generation == 0) { ret false; }
     fixture.limits = message.limits_default();
-    if (!operation_ok(cancel.make_root(?fixture.scope, false,
-        time.Time{sec: 0, nsec: 0}))) { ret false; }
+    if (!operation_ok(cancel.make_root(?fixture.scope, opt[time.Instant].none{}))) { ret false; }
     fixture.request_body = body.empty_reader(generation);
     val request_fields: field.Fields = field.init(?fixture.request_fields[0], 1,
         fixture.limits.request_fields);
@@ -693,8 +692,7 @@ fun fixture_init(fixture: *Fixture, generation: u64) bool {
     val metadata: message.Metadata = message.Metadata{
         version:     message.version_h1(1, 1), secure: true, early_data: false,
         peer:        message.unspecified_endpoint(), local: message.unspecified_endpoint(),
-        received_at: time.Time{sec: 1, nsec: 0}, has_deadline: false,
-        deadline:    time.Time{sec: 0, nsec: 0}, request_index: generation,
+        received_at: time.Time{sec: 1, nsec: 0}, deadline: opt[time.Instant].none{}, request_index: generation,
     };
     if (!message.init_request(?fixture.request,
         method.from_kind(method.GET),

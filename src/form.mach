@@ -9,6 +9,7 @@ use std.text.utf8;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
+use std.types.option.opt;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_len;
@@ -927,7 +928,7 @@ test "laurel.form: body state cannot overlap result storage" {
         bytes:                                     ?bytes[0], byte_capacity: 32
     }, limits)) { ret 1; }
     var scope: cancel.Scope;
-    if (!operation_ok(cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0}))) { ret 2; }
+    if (!operation_ok(cancel.make_root(?scope, opt[time.Instant].none{}))) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
     var state:       TestBody    = TestBody{input: view.view("a=b", 3), offset: 0, pending_output: nil, pending_capacity: 0, read_pending_once: false, finish_pending_once: false, pending_mode: 0, finish_calls: 0, release_calls: 0};
@@ -951,7 +952,7 @@ test "laurel.form: body polling retains pending buffers across fragmentation" {
         ret 1;
     }
     var scope: cancel.Scope;
-    if (!operation_ok(cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0}))) { ret 2; }
+    if (!operation_ok(cancel.make_root(?scope, opt[time.Instant].none{}))) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
     var state: TestBody = TestBody{
@@ -994,7 +995,7 @@ test "laurel.form: parse failure settles the body exactly once" {
         ret 1;
     }
     var scope: cancel.Scope;
-    if (!operation_ok(cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0}))) { ret 2; }
+    if (!operation_ok(cancel.make_root(?scope, opt[time.Instant].none{}))) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
     var state: TestBody = TestBody{input: view.view("a=1234567", 9),
@@ -1029,7 +1030,7 @@ test "laurel.form: body cancellation never publishes fields" {
         ret 1;
     }
     var scope: cancel.Scope;
-    if (!operation_ok(cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0})) ||
+    if (!operation_ok(cancel.make_root(?scope, opt[time.Instant].none{})) ||
         !transition_ok(cancel.cancel(?scope))) { ret 2; }
     var trailers: field.Fields = field.init(nil, 0,
         field.limits(0, 0, 0, 0));
