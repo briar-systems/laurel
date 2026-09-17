@@ -8,6 +8,8 @@
 ### Changed
 - Every deadline laurel accepts or exposes is documented as an absolute monotonic instant: `Admission.started_ns`, `context.deadline`, `testing.Request.deadline_ns` and `lifecycle.drain`'s `deadline_ns` (#126). A deadline built from wall time never fires (hedge#168). `Admission.started_ns` changes from `i64` to std's `Instant` in the std 5 migration.
 
+## [0.13.1] - 2026-09-17
+
 ### Changed
 - The crypto pin advances to v0.12.0, which brings faster X25519 and Ed25519 (#125).
 - Releases are published by `release.yml` when a `v*` tag is pushed, through the shared family release workflow (#123). It verifies the tag against the manifest and the changelog, runs the full CI tier, and publishes the GitHub release with this changelog's section as its notes. A dispatch of `release.yml` rehearses the same path without a tag.
