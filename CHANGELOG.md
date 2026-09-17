@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-17
+
 ### Changed
 - **Breaking.** Dependencies: std v5.3.0 (was v4.0.1), crypto v0.13.2 (was v0.12.0) and http v0.12.0 (was v0.11.0), and `mach.toml` requires mach `^5.3` (#139). A consumer must be on std 5.x as well. laurel consumes no std io completion and uses none of http's transport or h1, h2 and h3 engines, so neither std 5.3's cancelled-completion transfers nor http's borrowed per-request memory reach its own code. Rebuild from a clean `out/`, since std changed record layouts without changing signatures.
 - **Breaking.** Every instant and deadline is a monotonic `time.Instant`, and the one relative bound is a `Duration` (#139). A wall-clock `time.Time` or a raw integer no longer type-checks in any of these places. Old and new, side by side:
