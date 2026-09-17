@@ -76,6 +76,7 @@ pub rec Storage {
     captured_capacity:    usize;
 }
 
+# deadline_ns is an absolute monotonic instant in ns, or NO_DEADLINE
 pub rec Request {
     version:     message.Version;
     secure:      bool;

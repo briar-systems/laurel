@@ -8,6 +8,7 @@ use http.core.method;
 use http.core.target;
 use A: std.allocator;
 use std.allocator.fixed;
+use std.chrono.duration;
 use std.chrono.time;
 use std.sync.cancel;
 use std.types.bool.bool;
@@ -90,6 +91,8 @@ pub rec Context {
     execution_counter: u64;
     executing:         bool;
     bound:             bool;
+    narrowed:          bool;
+    narrowed_at:       time.Time;
 }
 
 fun view_valid(value: view.View) bool {
@@ -162,6 +165,8 @@ fun clear(context: *Context) {
     context.execution_counter = 0;
     context.executing         = false;
     context.bound             = false;
+    context.narrowed          = false;
+    context.narrowed_at       = time.Time{sec: 0, nsec: 0};
 }
 
 pub fun allocator_valid(allocator: *A.Allocator) bool {
@@ -202,6 +207,8 @@ pub fun bind(context: *Context, exchange_ptr: *exchange.Exchange, params: Params
     context.execution_counter = 0;
     context.executing         = false;
     context.bound             = true;
+    context.narrowed          = false;
+    context.narrowed_at       = time.Time{sec: 0, nsec: 0};
     if (!exchange_matches(context) || !scope_active(context.scope)) {
         clear(context);
         ret false;
@@ -278,12 +285,34 @@ pub fun cancellation(context: *Context) *cancel.Scope {
     ret context.scope;
 }
 
+# the earlier of the scope deadline and the narrowed one, absolute monotonic, for the host to enforce
 pub fun deadline(context: *Context, value: *time.Time) bool {
     if (!active(context) || value == nil) { ret false; }
     val query: cancel.DeadlineQuery = cancel.get_deadline(context.scope);
-    if (sel query.err)     { ret false; }
-    if (sel query.ok.none) { ret false; }
-    @value = query.ok.some.at;
+    if (sel query.err) { ret false; }
+    var found: bool      = false;
+    var at:    time.Time = time.Time{sec: 0, nsec: 0};
+    if (sel query.ok.some) {
+        at    = query.ok.some.at;
+        found = true;
+    }
+    if (context.narrowed && (!found || time.time_before(context.narrowed_at, at))) {
+        at    = context.narrowed_at;
+        found = true;
+    }
+    if (!found) { ret false; }
+    @value = at;
+    ret true;
+}
+
+# tightens the request deadline to an absolute monotonic instant, never widening it
+pub fun narrow_deadline(context: *Context, at: time.Time) bool {
+    if (!active(context) || at.sec < 0 || at.nsec < 0 || at.nsec >= duration.SECOND) {
+        ret false;
+    }
+    if (context.narrowed && !time.time_before(at, context.narrowed_at)) { ret true; }
+    context.narrowed    = true;
+    context.narrowed_at = at;
     ret true;
 }
 

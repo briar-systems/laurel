@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Security
+- `app.Limits.handler_deadline_ns` is now applied (#126). Before this release it was validated and then ignored, so an application that set it had no handler timeout at all. `app.bind_context` narrows the request deadline to `Admission.started_ns + handler_deadline_ns`, never widening a deadline the exchange scope already carries, and `context.deadline` returns the earlier of the two. The host arms its own timer from `context.deadline` and times out the exchange scope. laurel reads no clock itself and never assumes std fires the deadline. A `started_ns` that is negative, or too large to add the limit to, fails the bind.
+
+### Changed
+- Every deadline laurel accepts or exposes is documented as an absolute monotonic instant: `Admission.started_ns`, `context.deadline`, `testing.Request.deadline_ns` and `lifecycle.drain`'s `deadline_ns` (#126). A deadline built from wall time never fires (hedge#168). `Admission.started_ns` changes from `i64` to std's `Instant` in the std 5 migration.
+
 ## [0.13.1] - 2026-09-17
 
 ### Changed
