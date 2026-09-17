@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Breaking.** Dependencies: the std pin advances to v4.0.1, the crypto pin to v0.11.0 and the http pin to v0.10.0 (#119). std 4 requires mach 5.2.0 or later, and a consumer must be on std 4.x as well. Laurel builds no std io errors, branches on no std error kind or code, and holds no socket, so its own source is unchanged.
+
 ## [0.12.0] - 2026-09-16
 
 ### Changed
