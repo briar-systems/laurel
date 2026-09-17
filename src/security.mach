@@ -11,6 +11,7 @@ use std.chrono.time;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
+use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.view;
@@ -778,8 +779,7 @@ fun init_policy_fixture(fixture: *PolicyFixture, request_method: method.Method,
         version:     message.version_h1(1, 1), secure: secure, early_data: false,
         peer:        message.unspecified_endpoint(),
         local:       message.unspecified_endpoint(),
-        received_at: time.Time{sec: 1, nsec: 0}, has_deadline: false,
-        deadline:    time.Time{sec: 0, nsec: 0}, request_index: 1
+        received_at: time.Time{sec: 1, nsec: 0}, deadline: opt[time.Instant].none{}, request_index: 1
     };
     fixture.request.fields = field.init(?fixture.request_items[0], 8,
         field.limits(8, 8192, 64, 2048));

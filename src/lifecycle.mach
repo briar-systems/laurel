@@ -1,8 +1,10 @@
 # deterministic caller-driven application lifecycle
 
+use std.chrono.time;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
+use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.view;
@@ -34,11 +36,10 @@ pub val TRANSITION_INVALID: TransitionStatus = 3;
 pub val TRANSITION_FAILED:  TransitionStatus = 4;
 
 pub val NO_COMPONENT: usize = 18446744073709551615;
-pub val NO_DEADLINE:  i64   = -1;
 
 pub def StartFun: fun(ptr) res[CallbackStatus, view.View];
 pub def ReadyFun: fun(ptr) Readiness;
-pub def DrainFun: fun(ptr, i64) res[CallbackStatus, view.View];
+pub def DrainFun: fun(ptr, opt[time.Instant]) res[CallbackStatus, view.View];
 pub def StopFun:  fun(ptr) res[CallbackStatus, view.View];
 
 pub rec Lifecycle {
@@ -58,7 +59,7 @@ pub rec Controller {
     start_index:       usize;
     start_pending:     bool;
     drain_cursor:      usize;
-    drain_deadline_ns: i64;
+    drain_deadline:    opt[time.Instant];
     stop_cursor:       usize;
     generation:        u64;
     failure_phase:     State;
@@ -121,7 +122,7 @@ pub fun init(controller: *Controller, items: *Lifecycle, length: usize,
     controller.start_index       = 0;
     controller.start_pending     = false;
     controller.drain_cursor      = 0;
-    controller.drain_deadline_ns = NO_DEADLINE;
+    controller.drain_deadline    = opt[time.Instant].none{};
     controller.stop_cursor       = 0;
     controller.generation        = 0;
     controller.failure_phase     = 0;
@@ -219,21 +220,31 @@ pub fun poll_ready(controller: *Controller) Transition {
     ret transition(TRANSITION_OK, controller, NO_COMPONENT, view.view(nil, 0));
 }
 
-# deadline_ns is an absolute monotonic instant in ns, or NO_DEADLINE
-pub fun drain(controller: *Controller, deadline_ns: i64) Transition {
-    if (!validate(controller) || deadline_ns < NO_DEADLINE) { ret invalid(controller); }
+fun valid_deadline(deadline: opt[time.Instant]) bool {
+    if (sel deadline.none) { ret true; }
+    ret deadline.some.sec >= 0 && deadline.some.nsec >= 0 && deadline.some.nsec < 1000000000;
+}
+
+fun same_deadline(a: opt[time.Instant], b: opt[time.Instant]) bool {
+    if (sel a.none) { ret sel b.none; }
+    ret sel b.some && time.instant_equal(a.some, b.some);
+}
+
+# the drain deadline is an absolute monotonic instant that services enforce themselves
+pub fun drain(controller: *Controller, deadline: opt[time.Instant]) Transition {
+    if (!validate(controller) || !valid_deadline(deadline)) { ret invalid(controller); }
     if (controller.state == STARTED || controller.state == READY) {
-        controller.state             = DRAINING;
-        controller.drain_cursor      = controller.active;
-        controller.drain_deadline_ns = deadline_ns;
+        controller.state          = DRAINING;
+        controller.drain_cursor   = controller.active;
+        controller.drain_deadline = deadline;
     }
-    or (controller.state != DRAINING || controller.drain_deadline_ns != deadline_ns) {
+    or (controller.state != DRAINING || !same_deadline(controller.drain_deadline, deadline)) {
         ret invalid(controller);
     }
     for (controller.drain_cursor > 0) {
         val index:  usize      = controller.drain_cursor - 1;
         val result: Transition = callback_result(controller, DRAINING, index,
-            controller.items[index].drain(controller.items[index].ctx, deadline_ns));
+            controller.items[index].drain(controller.items[index].ctx, deadline));
         if (result.status == TRANSITION_FAILED) {
             controller.stop_cursor = controller.active;
             ret result;
@@ -344,7 +355,7 @@ fun test_ready(context: ptr) Readiness {
     ret (context::*TestService).readiness;
 }
 
-fun test_drain(context: ptr, deadline_ns: i64) res[CallbackStatus, view.View] {
+fun test_drain(context: ptr, deadline: opt[time.Instant]) res[CallbackStatus, view.View] {
     val service: *TestService = context::*TestService;
     service.drain_calls = service.drain_calls + 1;
     if (service.fail_drain) { ret res[CallbackStatus, view.View].err{view.view("drain failed", 12)}; }
@@ -397,7 +408,7 @@ test "laurel.lifecycle: startup readiness drain and stop have fixed order" {
     if (poll_ready(?controller).status != TRANSITION_PENDING || accepting(?controller)) { ret 3; }
     states[1].readiness = READY_NOW;
     if (poll_ready(?controller).status != TRANSITION_OK || !accepting(?controller)) { ret 4; }
-    if (drain(?controller, 99).status != TRANSITION_OK || controller.state != DRAINED
+    if (drain(?controller, opt[time.Instant].some{time.Instant{sec: 0, nsec: 99}}).status != TRANSITION_OK || controller.state != DRAINED
         || trace[2] != 102 || trace[3] != 101) { ret 5; }
     if (stop(?controller).status != TRANSITION_OK || controller.state != STOPPED || controller.active != 0
         || trace[4] != 202 || trace[5] != 201 || !terminal(?controller)) { ret 6; }

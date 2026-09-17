@@ -57,7 +57,7 @@ fun app_identity(app: *App) ptr {
     ret (?app.config)::ptr;
 }
 
-# handler_deadline_ns bounds each request from Admission.started_ns, and the host enforces it
+# handler_timeout bounds each request from Admission.started, and the host enforces it
 pub rec Limits {
     max_body_bytes:          usize;
     max_form_fields:         usize;
@@ -66,7 +66,7 @@ pub rec Limits {
     max_request_id_bytes:    usize;
     max_active_requests:     usize;
     max_middleware_depth:    usize;
-    handler_deadline_ns:     i64;
+    handler_timeout:         opt[duration.Duration];
     max_providers:           usize;
     max_provider_key_bytes:  usize;
     max_background_services: usize;
@@ -121,17 +121,17 @@ pub rec Assembly {
     app_state:     ptr;
 }
 
-val MAX_INSTANT_NS: i64 = 9223372036854775807;
+val MAX_SECONDS: i64 = 9223372036854775807;
 
 # everything one admitted request needs, gathered where the server dispatches it
-# started_ns is the monotonic admission instant and the handler deadline base, an Instant from std 5
+# started is the host's monotonic admission instant and the handler deadline base
 pub rec Admission {
     exchange:   *exchange.Exchange;
     params:     context.Params;
     allocator:  *A.Allocator;
     request_id: view.View;
     route_name: view.View;
-    started_ns: i64;
+    started:    time.Instant;
 }
 
 # the facts only the server measures, carried back for the one terminal event
@@ -140,7 +140,12 @@ pub rec Termination {
     reason:   cancel.Reason;
     status:   u16;
     transfer: exchange.Completion;
-    now_ns:   i64;
+    finished: time.Instant;
+}
+
+fun valid_timeout(timeout: opt[duration.Duration]) bool {
+    if (sel timeout.none) { ret true; }
+    ret timeout.some >= 0;
 }
 
 pub fun validate_limits(limits: Limits) bool {
@@ -148,7 +153,7 @@ pub fun validate_limits(limits: Limits) bool {
         && limits.max_route_params > 0 && limits.max_request_id_bytes > 0
         && limits.max_active_requests > 0 && limits.max_active_requests <= 9223372036854775807
         && limits.max_middleware_depth > 0
-        && limits.handler_deadline_ns >= lifecycle.NO_DEADLINE
+        && valid_timeout(limits.handler_timeout)
         && limits.max_provider_key_bytes > 0 && limits.max_background_services > 0;
 }
 
@@ -295,15 +300,14 @@ fun release_reservation(app: *App) bool {
     ret false;
 }
 
-# the handler deadline counts from the host's monotonic started_ns, so laurel reads no clock
+# the handler deadline counts from the host's monotonic admission instant, so laurel reads no clock
 fun narrow_handler_deadline(app: *App, request_context: *context.Context,
-    started_ns: i64) bool {
-    val limit: i64 = app.config.limits.handler_deadline_ns;
-    if (limit == lifecycle.NO_DEADLINE)                        { ret true; }
-    if (started_ns < 0 || started_ns > MAX_INSTANT_NS - limit) { ret false; }
-    val at_ns: i64 = started_ns + limit;
-    ret context.narrow_deadline(request_context,
-        time.Time{sec: at_ns / duration.SECOND, nsec: at_ns % duration.SECOND});
+    started: time.Instant) bool {
+    val timeout: opt[duration.Duration] = app.config.limits.handler_timeout;
+    if (sel timeout.none) { ret true; }
+    if (started.sec < 0 || started.nsec < 0 || started.nsec >= duration.SECOND
+        || timeout.some / duration.SECOND >= MAX_SECONDS - started.sec) { ret false; }
+    ret context.narrow_deadline(request_context, time.instant_add(started, timeout.some));
 }
 
 # admission and the start event are one step, so an admitted request is always
@@ -319,7 +323,7 @@ pub fun bind_context(app: *App, request_context: *context.Context,
         release_reservation(app);
         ret false;
     }
-    if (!narrow_handler_deadline(app, request_context, admission.started_ns)) {
+    if (!narrow_handler_deadline(app, request_context, admission.started)) {
         context.unbind(request_context, app_identity(app), app.generation);
         release_reservation(app);
         ret false;
@@ -329,7 +333,7 @@ pub fun bind_context(app: *App, request_context: *context.Context,
     if (!observability.init_recorder(recorder, @observer_ref, app.vocabulary,
         app.event_policy)
         || observability.begin(recorder, request_context, admission.route_name,
-        admission.started_ns) != observability.RECORD_OK) {
+        admission.started) != observability.RECORD_OK) {
         context.unbind(request_context, app_identity(app), app.generation);
         release_reservation(app);
         ret false;
@@ -371,7 +375,7 @@ pub fun release_context(app: *App, request_context: *context.Context,
         if (observability.observe_completion(recorder, termination.transfer)
             != observability.RECORD_OK
             || observability.observe_execution(recorder, termination.outcome,
-            termination.reason, termination.status, termination.now_ns)
+            termination.reason, termination.status, termination.finished)
             != observability.RECORD_OK) {
             settled = false;
             observability.unreported(recorder,
@@ -434,7 +438,7 @@ pub fun abandon(app: *App, execution: *middleware.Execution,
     ret middleware.abandon(execution, request_context);
 }
 
-pub fun drain(app: *App, deadline_ns: i64) lifecycle.Transition {
+pub fun drain(app: *App, deadline: opt[time.Instant]) lifecycle.Transition {
     if (app == nil || !app.valid) {
         ret lifecycle.Transition{status: lifecycle.TRANSITION_INVALID, state: lifecycle.FAILED,
             component: lifecycle.NO_COMPONENT, error: view.view("invalid application", 19)};
@@ -445,7 +449,7 @@ pub fun drain(app: *App, deadline_ns: i64) lifecycle.Transition {
         result = request_transition(app, lifecycle.TRANSITION_OK);
     }
     or {
-        result = lifecycle.drain(app.lifecycle, deadline_ns);
+        result = lifecycle.drain(app.lifecycle, deadline);
     }
     if (result.status == lifecycle.TRANSITION_OK && active_request_count(app) > 0) {
         ret request_transition(app, lifecycle.TRANSITION_PENDING);
@@ -513,7 +517,7 @@ fun test_lifecycle_ready(context: ptr) lifecycle.Readiness {
     ret lifecycle.READY_NOW;
 }
 
-fun test_lifecycle_drain(context: ptr, deadline_ns: i64) res[lifecycle.CallbackStatus, view.View] {
+fun test_lifecycle_drain(context: ptr, deadline: opt[time.Instant]) res[lifecycle.CallbackStatus, view.View] {
     ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
@@ -711,7 +715,7 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
         config: Config{limits: Limits{max_body_bytes: 1024, max_form_fields: 16, max_upload_bytes: 4096,
             max_route_params:       8, max_request_id_bytes: 64, max_active_requests: 1,
             max_middleware_depth:   16,
-            handler_deadline_ns:    lifecycle.NO_DEADLINE, max_providers: 0,
+            handler_timeout:        opt[duration.Duration].none{}, max_providers: 0,
             max_provider_key_bytes: 32, max_background_services: 1}, trust_proxy: false,
             panic_policy:           middleware.PANIC_ABORT},
         router:        ?routes,
@@ -737,7 +741,7 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
 
     val configured: message.Limits = message.limits_default();
     var scope:      cancel.Scope;
-    if (!operation_ok(cancel.make_root(?scope, false, time.Time{sec: 0, nsec: 0}))) { ret 6; }
+    if (!operation_ok(cancel.make_root(?scope, opt[time.Instant].none{}))) { ret 6; }
     var request_fields:   field.Fields     = field.init(nil, 0, field.limits(0, 0, 0, 0));
     var request_trailers: field.Fields     = field.init(nil, 0, field.limits(0, 0, 0, 0));
     var request_body:     body.Reader      = body.empty_reader(101);
@@ -745,8 +749,7 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     val metadata:         message.Metadata = message.Metadata{
         version:     message.version_h1(1, 1), secure: true, early_data: false,
         peer:        message.unspecified_endpoint(), local: message.unspecified_endpoint(),
-        received_at: time.Time{sec: 1, nsec: 0}, has_deadline: false,
-        deadline:    time.Time{sec: 0, nsec: 0}, request_index: 1,
+        received_at: time.Time{sec: 1, nsec: 0}, deadline: opt[time.Instant].none{}, request_index: 1,
     };
     if (!message.init_request(?request, method.from_kind(method.GET),
         target.origin(view.view("/", 1), view.view("/", 1), view.view(nil, 0)), metadata,
@@ -770,7 +773,7 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     val admission:       Admission = Admission{exchange: ?http_exchange,
         params:     context.Params{items: nil, len: 0, generation: 101},
         allocator:  ?allocator, request_id: view.view("request-101", 11),
-        route_name: view.view("orders.show", 11), started_ns: 0};
+        route_name: view.view("orders.show", 11), started: test_instant(0)};
     if (!bind_context(?app, ?request_context, ?recorder, admission)
         || active_request_count(?app) != 1 || sink.start_calls != 1
         || sink.route_len != 11
@@ -804,16 +807,16 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     val rejected:          Admission = Admission{exchange: ?http_exchange,
         params:     context.Params{items: nil, len: 0, generation: 101},
         allocator:  ?allocator, request_id: view.view("rejected-101", 12),
-        route_name: view.view(nil, 0), started_ns: 0};
+        route_name: view.view(nil, 0), started: test_instant(0)};
     if (can_accept(?app)
         || bind_context(?app, ?rejected_context, ?rejected_recorder, rejected)
         || rejected_context.bound || active_request_count(?app) != 1
         || sink.start_calls != 1) { ret 10; }
-    if (drain(?app, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_PENDING
+    if (drain(?app, opt[time.Instant].none{}).status != lifecycle.TRANSITION_PENDING
         || can_accept(?app) || stop(?app).status != lifecycle.TRANSITION_PENDING) { ret 11; }
     val termination: Termination = Termination{outcome: executed,
         reason:   cancel.Reason.active{}, status: 200,
-        transfer: http_exchange.completion, now_ns: 1};
+        transfer: http_exchange.completion, finished: test_instant(1)};
     auth_state.fail_release = true;
     if (release_context(?app, ?request_context, termination) ||
         request_context.principal_state != context.PRINCIPAL_OWNED ||
@@ -822,7 +825,7 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     auth_state.fail_release = false;
     if (!release_context(?app, ?request_context, termination)
         || release_context(?app, ?request_context, termination)
-        || drain(?app, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_OK
+        || drain(?app, opt[time.Instant].none{}).status != lifecycle.TRANSITION_OK
         || !drained(?app) || auth_state.release_calls != 2 ||
         auth_state.owned) { ret 12; }
     if (sink.start_calls != 1 || sink.finish_calls != 1 || sink.error_calls != 0
@@ -872,7 +875,7 @@ test "laurel.app: cleanup failure remains observable after primary failure" {
     if (!test_vocabulary(?vocabulary, ?label_specs[0])) { ret 2; }
     var application: App;
     if (!observed_app(?application, ?providers, ?controller, ?routes, ?middlewares,
-        ?headers, ?observer, ?vocabulary, lifecycle.NO_DEADLINE)) { ret 3; }
+        ?headers, ?observer, ?vocabulary, opt[duration.Duration].none{})) { ret 3; }
     val primary:    lifecycle.Transition = start(?application);
     val no_cleanup: lifecycle.Transition = cleanup_failure(?application);
     if (primary.status != lifecycle.TRANSITION_FAILED || primary.component != 0
@@ -908,13 +911,13 @@ rec RequestFixture {
 }
 
 fun request_fixture(state: *RequestFixture, generation: u64, path: view.View) bool {
-    ret request_fixture_until(state, generation, path, false, time.Time{sec: 0, nsec: 0});
+    ret request_fixture_until(state, generation, path, opt[time.Instant].none{});
 }
 
 fun request_fixture_until(state: *RequestFixture, generation: u64, path: view.View,
-    has_deadline: bool, deadline: time.Time) bool {
+    deadline: opt[time.Instant]) bool {
     if (state == nil
-        || !operation_ok(cancel.make_root(?state.scope, has_deadline, deadline))) {
+        || !operation_ok(cancel.make_root(?state.scope, deadline))) {
         ret false;
     }
     if (!fixed_ok(fixed.make(?state.allocator, ?state.allocation_state,
@@ -926,8 +929,7 @@ fun request_fixture_until(state: *RequestFixture, generation: u64, path: view.Vi
     val metadata: message.Metadata = message.Metadata{
         version:     message.version_h1(1, 1), secure: true, early_data: false,
         peer:        message.unspecified_endpoint(), local: message.unspecified_endpoint(),
-        received_at: time.Time{sec: 1, nsec: 0}, has_deadline: has_deadline,
-        deadline:    deadline, request_index: 1
+        received_at: time.Time{sec: 1, nsec: 0}, deadline: deadline, request_index: 1
     };
     if (!message.init_request(?state.request, method.from_kind(method.GET),
         target.origin(path, path, view.view(nil, 0)), metadata, request_fields,
@@ -942,21 +944,21 @@ fun request_fixture_until(state: *RequestFixture, generation: u64, path: view.Vi
 fun fixture_admission(state: *RequestFixture, generation: u64, request_id: view.View,
     route_name: view.View) Admission {
     ret Admission{exchange: ?state.exchange,
-        params:     context.Params{items: nil, len: 0, generation: generation},
-        allocator:  ?state.allocator, request_id: request_id, route_name: route_name,
-        started_ns: 0};
+        params:    context.Params{items: nil, len: 0, generation: generation},
+        allocator: ?state.allocator, request_id: request_id, route_name: route_name,
+        started:   test_instant(0)};
 }
 
 fun observed_app(app: *App, providers: *provider.Set,
     controller: *lifecycle.Controller, routes: *router.Router,
     stack: *middleware.Stack, headers: *security.HeadersPolicy,
     observer: *observability.Observer,
-    vocabulary: *observability.Vocabulary, handler_deadline_ns: i64) bool {
+    vocabulary: *observability.Vocabulary, handler_timeout: opt[duration.Duration]) bool {
     val assembly: Assembly = Assembly{
         config: Config{limits: Limits{max_body_bytes: 1024, max_form_fields: 16,
             max_upload_bytes:       4096, max_route_params: 8, max_request_id_bytes: 64,
             max_active_requests:    1, max_middleware_depth: 16,
-            handler_deadline_ns:    handler_deadline_ns, max_providers: 0,
+            handler_timeout:        handler_timeout, max_providers: 0,
             max_provider_key_bytes: 32, max_background_services: 1},
             trust_proxy:            false, panic_policy: middleware.PANIC_ABORT},
         router:        routes,
@@ -1013,7 +1015,7 @@ test "laurel.app: an admitted request reaches the assembled observer" {
     if (!test_vocabulary(?vocabulary, ?label_specs[0])) { ret 2; }
     var app: App;
     if (!observed_app(?app, ?providers, ?controller, ?routes, ?middlewares,
-        ?headers, ?observer, ?vocabulary, lifecycle.NO_DEADLINE)
+        ?headers, ?observer, ?vocabulary, opt[duration.Duration].none{})
         || start(?app).status != lifecycle.TRANSITION_OK
         || poll_ready(?app).status != lifecycle.TRANSITION_OK) { ret 3; }
 
@@ -1049,7 +1051,7 @@ test "laurel.app: an admitted request reaches the assembled observer" {
     }
     if (!release_context(?app, ?completed.request_context,
         Termination{outcome: responded, reason: cancel.Reason.active{}, status: 200,
-        transfer: completed.exchange.completion, now_ns: 3})
+        transfer: completed.exchange.completion, finished: test_instant(3)})
         || !operation_ok(cancel.destroy(?completed.scope))) { ret 7; }
     if (sink.start_calls != 1 || sink.finish_calls != 1 || sink.error_calls != 0
         || sink.status != 200 || sink.outcome != observability.OUTCOME_COMPLETED
@@ -1071,7 +1073,7 @@ test "laurel.app: an admitted request reaches the assembled observer" {
     if (refused.status != middleware.EXECUTION_ERROR_RENDERED) { ret 10; }
     if (!release_context(?app, ?faulted.request_context,
         Termination{outcome: refused, reason: cancel.Reason.active{}, status: 404,
-        transfer: faulted.exchange.completion, now_ns: 3})
+        transfer: faulted.exchange.completion, finished: test_instant(3)})
         || !operation_ok(cancel.destroy(?faulted.scope))) { ret 11; }
     if (sink.start_calls != 2 || sink.finish_calls != 1 || sink.error_calls != 1
         || sink.status != 404 || sink.kind != error.NOT_FOUND
@@ -1091,7 +1093,7 @@ test "laurel.app: an admitted request reaches the assembled observer" {
     if (abandoned.status != middleware.EXECUTION_CANCELLED) { ret 15; }
     if (!release_context(?app, ?stopped.request_context,
         Termination{outcome: abandoned, reason: cancel.reason(?stopped.scope),
-        status: 408, transfer: stopped.exchange.completion, now_ns: 3})
+        status: 408, transfer: stopped.exchange.completion, finished: test_instant(3)})
         || !operation_ok(cancel.destroy(?stopped.scope))) { ret 16; }
     if (sink.start_calls != 3 || sink.finish_calls != 2 || sink.error_calls != 1
         || sink.status != 408
@@ -1106,7 +1108,7 @@ test "laurel.app: an admitted request reaches the assembled observer" {
         params:     context.Params{items: nil, len: 0, generation: 200},
         allocator:  ?undescribed.allocator,
         request_id: view.view("request-200", 11),
-        route_name: view.view(nil, 0), started_ns: 10})
+        route_name: view.view(nil, 0), started: test_instant(10)})
         || sink.start_calls != 4) { ret 17; }
     var undescribed_out_execution: middleware.Execution;
     undescribed_out_execution.active = false;
@@ -1116,8 +1118,8 @@ test "laurel.app: an admitted request reaches the assembled observer" {
     # a host clock that goes backwards cannot describe the request it served
     if (release_context(?app, ?undescribed.request_context,
         Termination{outcome: undescribed_out, reason: cancel.Reason.active{},
-        status: 200, transfer: undescribed.exchange.completion,
-        now_ns: 5})
+        status:   200, transfer: undescribed.exchange.completion,
+        finished: test_instant(5)})
         || sink.finish_calls != 2 || sink.error_calls != 2
         || sink.outcome != observability.OUTCOME_UNREPORTED
         || sink.kind != error.INTERNAL
@@ -1137,31 +1139,36 @@ test "laurel.app: an admitted request reaches the assembled observer" {
         "unmeasured", false),
         render_error: error.render_failure("unmeasured")},
         reason:       cancel.Reason.active{}, status: 0,
-        transfer:     unsettled.exchange.completion, now_ns: 3})
+        transfer:     unsettled.exchange.completion, finished: test_instant(3)})
         || sink.finish_calls != 2 || sink.error_calls != 3
         || sink.outcome != observability.OUTCOME_UNREPORTED
         || active_request_count(?app) != 0 || !can_accept(?app)
         || !operation_ok(cancel.destroy(?unsettled.scope))) { ret 20; }
 
-    if (drain(?app, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_OK
+    if (drain(?app, opt[time.Instant].none{}).status != lifecycle.TRANSITION_OK
         || stop(?app).status != lifecycle.TRANSITION_OK || !release(?app)) {
         ret 21;
     }
     ret 0;
 }
 
+fun test_instant(ns: i64) time.Instant {
+    ret time.Instant{sec: ns / duration.SECOND, nsec: ns % duration.SECOND};
+}
+
 fun admit_at(app: *App, state: *RequestFixture, recorder: *observability.Recorder,
-    generation: u64, has_deadline: bool, deadline: time.Time, started_ns: i64) bool {
-    if (!request_fixture_until(state, generation, view.view("/orders", 7),
-        has_deadline, deadline)) { ret false; }
+    generation: u64, deadline: opt[time.Instant], started: time.Instant) bool {
+    if (!request_fixture_until(state, generation, view.view("/orders", 7), deadline)) {
+        ret false;
+    }
     ret bind_context(app, ?state.request_context, recorder,
         Admission{exchange: ?state.exchange,
         params:     context.Params{items: nil, len: 0, generation: generation},
         allocator:  ?state.allocator, request_id: view.view("request", 7),
-        route_name: view.view(nil, 0), started_ns: started_ns});
+        route_name: view.view(nil, 0), started: started});
 }
 
-fun finish_at(app: *App, state: *RequestFixture, now_ns: i64) bool {
+fun finish_at(app: *App, state: *RequestFixture, finished: time.Instant) bool {
     var execution: middleware.Execution;
     execution.active = false;
     val outcome: middleware.Outcome = execute(app, ?execution,
@@ -1170,16 +1177,16 @@ fun finish_at(app: *App, state: *RequestFixture, now_ns: i64) bool {
     if (outcome.status == middleware.EXECUTION_CANCELLED) { status = 408; }
     ret release_context(app, ?state.request_context,
         Termination{outcome: outcome, reason: cancel.reason(?state.scope), status: status,
-        transfer: state.exchange.completion, now_ns: now_ns})
+        transfer: state.exchange.completion, finished: finished})
         && operation_ok(cancel.destroy(?state.scope));
 }
 
 fun deadline_is(state: *RequestFixture, sec: i64, nsec: i64) bool {
-    var at: time.Time;
+    var at: time.Instant;
     ret context.deadline(?state.request_context, ?at) && at.sec == sec && at.nsec == nsec;
 }
 
-test "laurel.app: the handler deadline narrows the exchange deadline from started_ns" {
+test "laurel.app: the handler timeout narrows the exchange deadline from the admission instant" {
     var providers: provider.Set;
     if (!provider.init(?providers, nil, 0, 0, 32)) { ret 1; }
     var lifecycle_item: lifecycle.Lifecycle = lifecycle.Lifecycle{ctx: nil,
@@ -1207,49 +1214,51 @@ test "laurel.app: the handler deadline narrows the exchange deadline from starte
     if (!test_vocabulary(?vocabulary, ?label_specs[0])) { ret 1; }
     var app: App;
     if (!observed_app(?app, ?providers, ?controller, ?routes, ?middlewares,
-        ?headers, ?observer, ?vocabulary, 5000000000)
+        ?headers, ?observer, ?vocabulary, opt[duration.Duration].some{5 * duration.SECOND})
         || start(?app).status != lifecycle.TRANSITION_OK
         || poll_ready(?app).status != lifecycle.TRANSITION_OK) { ret 2; }
-    var recorder: observability.Recorder;
-    val none:     time.Time = time.Time{sec: 0, nsec: 0};
+    var recorder:   observability.Recorder;
+    val open_ended: opt[time.Instant] = opt[time.Instant].none{};
 
-    # instants sit far past any real monotonic reading, since std expires a scope
-    # whose deadline has already passed
-
-    # with no exchange deadline the handler deadline is started_ns plus the limit
+    # with no exchange deadline the handler deadline is the admission instant plus the timeout
     var open: RequestFixture;
-    if (!admit_at(?app, ?open, ?recorder, 300, false, none, 1000000010000000007)) { ret 3; }
-    if (!deadline_is(?open, 1000000015, 7))                                       { ret 4; }
-    if (!finish_at(?app, ?open, 1000000010000000008))                             { ret 5; }
+    if (!admit_at(?app, ?open, ?recorder, 300, open_ended, test_instant(10000000007))) { ret 3; }
+    if (!deadline_is(?open, 15, 7))                                                    { ret 4; }
+    if (!finish_at(?app, ?open, test_instant(10000000008)))                            { ret 5; }
 
     # an earlier exchange deadline is never widened
     var tight: RequestFixture;
-    if (!admit_at(?app, ?tight, ?recorder, 301, true, time.Time{sec: 1000000012, nsec: 0},
-        1000000010000000000)) { ret 6; }
-    if (!deadline_is(?tight, 1000000012, 0))           { ret 7; }
-    if (!finish_at(?app, ?tight, 1000000010000000001)) { ret 8; }
+    if (!admit_at(?app, ?tight, ?recorder, 301,
+        opt[time.Instant].some{time.Instant{sec: 12, nsec: 0}}, test_instant(10000000000))) {
+        ret 6;
+    }
+    if (!deadline_is(?tight, 12, 0))                         { ret 7; }
+    if (!finish_at(?app, ?tight, test_instant(10000000001))) { ret 8; }
 
     # a later exchange deadline is narrowed to the handler deadline
     var loose: RequestFixture;
-    if (!admit_at(?app, ?loose, ?recorder, 302, true, time.Time{sec: 1000000020, nsec: 0},
-        1000000010000000000)) { ret 9; }
-    if (!deadline_is(?loose, 1000000015, 0)) { ret 10; }
+    if (!admit_at(?app, ?loose, ?recorder, 302,
+        opt[time.Instant].some{time.Instant{sec: 20, nsec: 0}}, test_instant(10000000000))) {
+        ret 9;
+    }
+    if (!deadline_is(?loose, 15, 0)) { ret 10; }
 
     # a timed out scope reports no deadline at all
-    if (!transition_ok(cancel.timeout(?loose.scope)) || deadline_is(?loose, 1000000015, 0)) { ret 11; }
-    if (!finish_at(?app, ?loose, 1000000010000000001))                                      { ret 12; }
+    if (!transition_ok(cancel.timeout(?loose.scope)) || deadline_is(?loose, 15, 0)) { ret 11; }
+    if (!finish_at(?app, ?loose, test_instant(10000000001)))                        { ret 12; }
 
-    # a started_ns that is not a monotonic instant cannot base a deadline
+    # an admission instant that is not a valid monotonic reading cannot base a deadline
     var negative: RequestFixture;
-    if (admit_at(?app, ?negative, ?recorder, 303, false, none, -1)
+    if (admit_at(?app, ?negative, ?recorder, 303, open_ended, time.Instant{sec: -1, nsec: 0})
         || negative.request_context.bound || active_request_count(?app) != 0
         || !operation_ok(cancel.destroy(?negative.scope))) { ret 13; }
     var overflow: RequestFixture;
-    if (admit_at(?app, ?overflow, ?recorder, 304, false, none, 9223372036854775807)
+    if (admit_at(?app, ?overflow, ?recorder, 304, open_ended,
+        time.Instant{sec: 9223372036854775807, nsec: 0})
         || overflow.request_context.bound || active_request_count(?app) != 0
         || !operation_ok(cancel.destroy(?overflow.scope))) { ret 14; }
 
-    if (drain(?app, lifecycle.NO_DEADLINE).status != lifecycle.TRANSITION_OK
+    if (drain(?app, opt[time.Instant].none{}).status != lifecycle.TRANSITION_OK
         || stop(?app).status != lifecycle.TRANSITION_OK || !release(?app)) { ret 15; }
     ret 0;
 }

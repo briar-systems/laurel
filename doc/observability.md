@@ -49,18 +49,19 @@ separate callback.
 
 ### Deadlines
 
-Every deadline laurel accepts or exposes is an absolute instant on the monotonic
-clock, never wall time. std enforces cancellation deadlines against
-`time.monotonic()`, so a deadline built from `time.now()` would never fire and a
-silent client would never time out.
+Every instant and deadline laurel accepts or exposes is a `time.Instant`, std's
+monotonic reading, never a wall-clock `time.Time`. std enforces cancellation
+deadlines on the monotonic clock, and since std 5 a `Time` does not type-check
+where an `Instant` is expected, so a deadline built from `time.now()` is a
+compile error rather than a timeout that never fires.
 
-laurel reads no clock itself. `app.Admission.started_ns` is the monotonic instant,
-in nanoseconds, at which the host admitted the request. The host samples it once
-per request, just before `bind_context`. It is also the base of the handler
-deadline: when `app.Limits.handler_deadline_ns` is not `lifecycle.NO_DEADLINE`,
-`bind_context` narrows the request deadline to `started_ns + handler_deadline_ns`.
-It never widens a deadline the exchange scope already carries. A `started_ns`
-that is negative, or too large to add the limit to, fails the bind.
+laurel reads no clock itself. `app.Admission.started` is the `Instant` at which
+the host admitted the request, sampled once per request with `time.instant()`
+just before `bind_context`. It is also the base of the handler deadline: when
+`app.Limits.handler_timeout` is set, `bind_context` narrows the request deadline
+to `started` plus that duration. It never widens a deadline the exchange scope
+already carries. An invalid `started`, or one too large to add the timeout to,
+fails the bind.
 
 The host enforces the result. After `bind_context` succeeds and before
 `app.execute`, the host reads `context.deadline`, which returns the earlier of the
@@ -70,14 +71,16 @@ it. When the timer fires, the host times out the exchange scope with
 creates no scope of its own for the handler deadline and never assumes std will
 fire it.
 
-`started_ns` is an `i64` only until the std 5 migration. There it becomes std's
-`Instant` type, so a raw integer can no longer carry the wrong clock.
+The same rule covers `app.Termination.finished`, the `lifecycle.drain` deadline,
+`testing.Request.deadline` and the realtime heartbeat clock. Wall-clock time stays
+only where a value is compared with something that outlives the process: cookie
+`Expires` and the session and csrf key-ring clocks.
 
 ### Every start has a terminal
 
 `OUTCOME_UNREPORTED` is what closes a request the host could not describe. If the
 `app.Termination` handed to `release_context` is one the recorder refuses — a
-`now_ns` below the start time, or an outcome outside the middleware execution
+`finished` instant before the start, or an outcome outside the middleware execution
 vocabulary — the framework emits a terminal event carrying `PHASE_ERROR`,
 `error.INTERNAL`, a zero status, and a zero duration, and `release_context`
 returns false so the host learns its termination was rejected. The admission slot
@@ -147,7 +150,7 @@ invocation cannot corrupt its own capture through aliasing.
 
 One `testing.invoke` performs the sequence a server would:
 
-1. create the request cancellation scope, with a deadline when one is given. `testing.Request.deadline_ns` is an absolute monotonic instant in nanoseconds, like every deadline in laurel (see [Deadlines](#deadlines))
+1. create the request cancellation scope, with a deadline when one is given. `testing.Request.deadline` is an `opt[time.Instant]`, like every deadline in laurel (see [Deadlines](#deadlines))
 2. build the request body reader over the caller's bytes
 3. initialize the request, response, and exchange for one generation
 4. make the request allocator over the caller's arena

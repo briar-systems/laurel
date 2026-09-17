@@ -115,7 +115,7 @@ pub rec RequestEvent {
     route_name_len: usize;
     status:         u16;
     error_kind:     error.Kind;
-    started_ns:     i64;
+    started:        time.Instant;
     duration_ns:    i64;
     bytes_in:       u64;
     bytes_out:      u64;
@@ -369,7 +369,7 @@ fun clear_event(recorder: *Recorder) {
     recorder.event.route_name_len = 0;
     recorder.event.status         = 0;
     recorder.event.error_kind     = 0;
-    recorder.event.started_ns     = 0;
+    recorder.event.started        = time.Instant{sec: 0, nsec: 0};
     recorder.event.duration_ns    = 0;
     recorder.event.bytes_in       = 0;
     recorder.event.bytes_out      = 0;
@@ -386,11 +386,11 @@ fun clear_event(recorder: *Recorder) {
 }
 
 pub fun begin(recorder: *Recorder, request_context: *context.Context,
-    route_name: view.View, started_ns: i64) RecordStatus {
-    if (!recorder_ready(recorder) || started_ns < 0)   { ret RECORD_INVALID; }
-    if (recorder.started)                              { ret RECORD_STATE; }
-    if (!context.active(request_context))              { ret RECORD_INVALID; }
-    if (route_name.len != 0 && !printable(route_name)) { ret RECORD_INVALID; }
+    route_name: view.View, started: time.Instant) RecordStatus {
+    if (!recorder_ready(recorder) || !valid_instant(started)) { ret RECORD_INVALID; }
+    if (recorder.started)                                     { ret RECORD_STATE; }
+    if (!context.active(request_context))                     { ret RECORD_INVALID; }
+    if (route_name.len != 0 && !printable(route_name))        { ret RECORD_INVALID; }
     val request: *message.Request = context.request(request_context);
     if (request == nil || recorder.sequence == 18446744073709551615) {
         ret RECORD_INVALID;
@@ -414,7 +414,7 @@ pub fun begin(recorder: *Recorder, request_context: *context.Context,
     }
     recorder.sequence         = recorder.sequence + 1;
     recorder.event.truncated  = truncated;
-    recorder.event.started_ns = started_ns;
+    recorder.event.started    = started;
     recorder.event.generation = request_context.generation;
     recorder.event.sequence   = recorder.sequence;
     recorder.event.valid      = true;
@@ -480,22 +480,28 @@ pub fun record_transfer(recorder: *Recorder, bytes_in: u64,
     ret RECORD_OK;
 }
 
+fun valid_instant(value: time.Instant) bool {
+    ret value.sec >= 0 && value.nsec >= 0 && value.nsec < 1000000000;
+}
+
 fun settle(recorder: *Recorder, phase: Phase, outcome: Outcome, status_code: u16,
-    now_ns: i64) bool {
-    if (now_ns < recorder.event.started_ns) { ret false; }
+    finished: time.Instant) bool {
+    if (!valid_instant(finished) || time.instant_before(finished, recorder.event.started)) {
+        ret false;
+    }
     recorder.event.phase       = phase;
     recorder.event.outcome     = outcome;
     recorder.event.status      = status_code;
-    recorder.event.duration_ns = now_ns - recorder.event.started_ns;
+    recorder.event.duration_ns = time.instant_sub(finished, recorder.event.started);
     recorder.event.valid       = true;
     recorder.terminal          = true;
     ret true;
 }
 
-pub fun finish(recorder: *Recorder, status_code: u16, now_ns: i64) RecordStatus {
+pub fun finish(recorder: *Recorder, status_code: u16, finished: time.Instant) RecordStatus {
     if (!recorder_ready(recorder))              { ret RECORD_INVALID; }
     if (!recorder.started || recorder.terminal) { ret RECORD_STATE; }
-    if (!settle(recorder, PHASE_FINISH, OUTCOME_COMPLETED, status_code, now_ns)) {
+    if (!settle(recorder, PHASE_FINISH, OUTCOME_COMPLETED, status_code, finished)) {
         ret RECORD_INVALID;
     }
     recorder.observer.finish(recorder.observer.ctx, ?recorder.event);
@@ -503,13 +509,13 @@ pub fun finish(recorder: *Recorder, status_code: u16, now_ns: i64) RecordStatus 
 }
 
 pub fun cancelled(recorder: *Recorder, reason: cancel.Reason, status_code: u16,
-    now_ns: i64) RecordStatus {
+    finished: time.Instant) RecordStatus {
     if (!recorder_ready(recorder))              { ret RECORD_INVALID; }
     if (!recorder.started || recorder.terminal) { ret RECORD_STATE; }
     var outcome: Outcome = OUTCOME_CANCELLED;
     if (sel reason.timed_out)    { outcome = OUTCOME_TIMED_OUT; }
     or (!(sel reason.cancelled)) { ret RECORD_INVALID; }
-    if (!settle(recorder, PHASE_FINISH, outcome, status_code, now_ns)) {
+    if (!settle(recorder, PHASE_FINISH, outcome, status_code, finished)) {
         ret RECORD_INVALID;
     }
     recorder.observer.finish(recorder.observer.ctx, ?recorder.event);
@@ -517,13 +523,13 @@ pub fun cancelled(recorder: *Recorder, reason: cancel.Reason, status_code: u16,
 }
 
 pub fun failed(recorder: *Recorder, app_error: error.AppError, status_code: u16,
-    now_ns: i64) RecordStatus {
+    finished: time.Instant) RecordStatus {
     if (!recorder_ready(recorder))              { ret RECORD_INVALID; }
     if (!recorder.started || recorder.terminal) { ret RECORD_STATE; }
     if (app_error.kind < error.BAD_REQUEST || app_error.kind > error.CANCELLED) {
         ret RECORD_INVALID;
     }
-    if (!settle(recorder, PHASE_ERROR, OUTCOME_FAILED, status_code, now_ns)) {
+    if (!settle(recorder, PHASE_ERROR, OUTCOME_FAILED, status_code, finished)) {
         ret RECORD_INVALID;
     }
     recorder.event.error_kind = app_error.kind;
@@ -552,18 +558,18 @@ pub fun unreported(recorder: *Recorder, detail: str) RecordStatus {
 
 # the middleware outcome selects exactly one terminal event
 pub fun observe_execution(recorder: *Recorder, outcome: middleware.Outcome,
-    reason: cancel.Reason, status_code: u16, now_ns: i64) RecordStatus {
+    reason: cancel.Reason, status_code: u16, finished: time.Instant) RecordStatus {
     if (!recorder_ready(recorder)) { ret RECORD_INVALID; }
     if (outcome.status == middleware.EXECUTION_CANCELLED) {
-        ret cancelled(recorder, reason, status_code, now_ns);
+        ret cancelled(recorder, reason, status_code, finished);
     }
     if (outcome.status == middleware.EXECUTION_ERROR_RENDERED
         || outcome.status == middleware.EXECUTION_ERROR_UNMAPPED) {
-        ret failed(recorder, outcome.app_error, status_code, now_ns);
+        ret failed(recorder, outcome.app_error, status_code, finished);
     }
     if (outcome.status == middleware.EXECUTION_RESPOND
         || outcome.status == middleware.EXECUTION_NEXT) {
-        ret finish(recorder, status_code, now_ns);
+        ret finish(recorder, status_code, finished);
     }
     # a suspended execution is not a termination. a host that reports one here
     # has skipped resume or abandon, and that is a fault, not a finish
@@ -608,7 +614,7 @@ rec Fixture {
 
 fun init_fixture(state: *Fixture, generation: u64, path: view.View,
     request_id: view.View) bool {
-    if (state == nil || !operation_ok(cancel.make_root(?state.scope, false, time.Time{sec: 0, nsec: 0}))) {
+    if (state == nil || !operation_ok(cancel.make_root(?state.scope, opt[time.Instant].none{}))) {
         ret false;
     }
     if (!fixed_ok(fixed_allocator.make(?state.allocator, ?state.allocation_state,
@@ -620,8 +626,7 @@ fun init_fixture(state: *Fixture, generation: u64, path: view.View,
     val metadata: message.Metadata = message.Metadata{
         version:     message.version_h1(1, 1), secure: true, early_data: false,
         peer:        message.unspecified_endpoint(), local: message.unspecified_endpoint(),
-        received_at: time.Time{sec: 1, nsec: 0}, has_deadline: false,
-        deadline:    time.Time{sec: 0, nsec: 0}, request_index: 1
+        received_at: time.Time{sec: 1, nsec: 0}, deadline: opt[time.Instant].none{}, request_index: 1
     };
     if (!message.init_request(?state.request, method.from_kind(method.GET),
         target.origin(path, path, view.view(nil, 0)), metadata, request_fields,
@@ -712,6 +717,10 @@ fun build_vocabulary(vocabulary: *Vocabulary, specs: *LabelSpec, values: *Term) 
     ret init_vocabulary(vocabulary, specs, 2);
 }
 
+fun test_instant(ns: i64) time.Instant {
+    ret time.Instant{sec: ns / 1000000000, nsec: ns % 1000000000};
+}
+
 test "laurel.observability: label names and values have fixed cardinality" {
     var values:     [2]Term;
     var specs:      [2]LabelSpec;
@@ -742,7 +751,7 @@ test "laurel.observability: label names and values have fixed cardinality" {
     var sink:     Sink;
     var recorder: Recorder;
     if (!init_recorder(?recorder, sink_observer(?sink), ?vocabulary, policy_default())
-        || begin(?recorder, ?state.context, view.view(nil, 0), 0)
+        || begin(?recorder, ?state.context, view.view(nil, 0), test_instant(0))
         != RECORD_OK) { ret 7; }
     if (set_label(?recorder, view.view("verb", 4), view.view("get", 3)) != RECORD_OK
         || set_label(?recorder, view.view("tenant", 6), view.view("acme", 4))
@@ -769,8 +778,8 @@ test "laurel.observability: label names and values have fixed cardinality" {
         || !same(event_label(?recorder.event, view.view("tenant", 6)),
         view.view("acme", 4))
         || event_label(?recorder.event, view.view("region", 6)).len != 0) { ret 11; }
-    if (finish(?recorder, 200, 4) != RECORD_OK || sink.last_labels != 2) { ret 12; }
-    if (!release_fixture(?state))                                        { ret 13; }
+    if (finish(?recorder, 200, test_instant(4)) != RECORD_OK || sink.last_labels != 2) { ret 12; }
+    if (!release_fixture(?state))                                                      { ret 13; }
     ret 0;
 }
 
@@ -786,37 +795,37 @@ test "laurel.observability: one start and one terminal event per request" {
     var completed: Fixture;
     if (!init_fixture(?completed, 21, view.view("/a", 2),
         view.view("request-21", 10))) { ret 2; }
-    if (begin(?recorder, ?completed.context, view.view("orders index", 12), 10)
+    if (begin(?recorder, ?completed.context, view.view("orders index", 12), test_instant(10))
         != RECORD_INVALID || sink.starts != 0) { ret 3; }
-    if (begin(?recorder, ?completed.context, view.view("orders.index", 12), 10)
+    if (begin(?recorder, ?completed.context, view.view("orders.index", 12), test_instant(10))
         != RECORD_OK || sink.starts != 1 || sink.last_phase != PHASE_START
         || sink.last_outcome != OUTCOME_PENDING || sink.last_route != 12) { ret 3; }
-    if (begin(?recorder, ?completed.context, view.view(nil, 0), 10) != RECORD_STATE
+    if (begin(?recorder, ?completed.context, view.view(nil, 0), test_instant(10)) != RECORD_STATE
         || sink.starts != 1) { ret 4; }
     if (set_route(?recorder, view.view("orders.index", 12)) != RECORD_OK
         || record_transfer(?recorder, 7, 19) != RECORD_OK) { ret 5; }
-    if (finish(?recorder, 200, 25) != RECORD_OK || sink.finishes != 1
+    if (finish(?recorder, 200, test_instant(25)) != RECORD_OK || sink.finishes != 1
         || sink.last_phase != PHASE_FINISH || sink.last_outcome != OUTCOME_COMPLETED
         || sink.last_status != 200 || sink.last_duration != 15
         || sink.last_route != 12 || recorder.event.bytes_in != 7
         || recorder.event.bytes_out != 19) { ret 6; }
-    if (finish(?recorder, 200, 30) != RECORD_STATE
+    if (finish(?recorder, 200, test_instant(30)) != RECORD_STATE
         || failed(?recorder, error.make(error.INTERNAL, 500, "internal server error",
-        "late", false), 500, 30) != RECORD_STATE
+        "late", false), 500, test_instant(30)) != RECORD_STATE
         || unreported(?recorder, "late") != RECORD_STATE
         || sink.finishes != 1 || sink.errors != 0) { ret 7; }
     if (!release(?recorder) || !release_fixture(?completed)) { ret 8; }
     var faulted: Fixture;
     if (!init_fixture(?faulted, 22, view.view("/b", 2),
         view.view("request-22", 10))) { ret 9; }
-    if (begin(?recorder, ?faulted.context, view.view(nil, 0), 0) != RECORD_OK
+    if (begin(?recorder, ?faulted.context, view.view(nil, 0), test_instant(0)) != RECORD_OK
         || sink.starts != 2) { ret 10; }
     val outcome: middleware.Outcome = middleware.Outcome{
         status:       middleware.EXECUTION_ERROR_RENDERED, action: 0, token: 0,
         app_error:    error.make(error.NOT_FOUND, 404, "not found", "absent", false),
         render_error: error.render_failure("none")
     };
-    if (observe_execution(?recorder, outcome, cancel.Reason.active{}, 404, 6) != RECORD_OK
+    if (observe_execution(?recorder, outcome, cancel.Reason.active{}, 404, test_instant(6)) != RECORD_OK
         || sink.errors != 1 || sink.last_phase != PHASE_ERROR
         || sink.last_outcome != OUTCOME_FAILED || sink.last_kind != error.NOT_FOUND
         || sink.last_status != 404 || sink.finishes != 1) { ret 11; }
@@ -824,21 +833,21 @@ test "laurel.observability: one start and one terminal event per request" {
     var cancelled_fixture: Fixture;
     if (!init_fixture(?cancelled_fixture, 23, view.view("/c", 2),
         view.view("request-23", 10))) { ret 13; }
-    if (begin(?recorder, ?cancelled_fixture.context, view.view(nil, 0), 0)
+    if (begin(?recorder, ?cancelled_fixture.context, view.view(nil, 0), test_instant(0))
         != RECORD_OK) { ret 14; }
     val stopped: middleware.Outcome = middleware.Outcome{
         status:       middleware.EXECUTION_CANCELLED, action: 0, token: 0,
         app_error:    error.make(error.CANCELLED, 408, "request cancelled", "stop", false),
         render_error: error.render_failure("none")
     };
-    if (observe_execution(?recorder, stopped, cancel.Reason.timed_out{}, 408, 3) != RECORD_OK
+    if (observe_execution(?recorder, stopped, cancel.Reason.timed_out{}, 408, test_instant(3)) != RECORD_OK
         || sink.finishes != 2 || sink.last_outcome != OUTCOME_TIMED_OUT
         || sink.last_status != 408) { ret 15; }
     if (!release(?recorder) || !release_fixture(?cancelled_fixture)) { ret 16; }
     var undescribed: Fixture;
     if (!init_fixture(?undescribed, 24, view.view("/d", 2),
         view.view("request-24", 10))) { ret 17; }
-    if (begin(?recorder, ?undescribed.context, view.view(nil, 0), 0) != RECORD_OK
+    if (begin(?recorder, ?undescribed.context, view.view(nil, 0), test_instant(0)) != RECORD_OK
         || unreported(?recorder, "undescribed") != RECORD_OK
         || sink.errors != 2 || sink.last_phase != PHASE_ERROR
         || sink.last_outcome != OUTCOME_UNREPORTED
@@ -872,7 +881,7 @@ test "laurel.observability: request fields have fixed size policies" {
     elide.max_target_bytes     = 16;
     elide.max_route_name_bytes = 8;
     if (!init_recorder(?recorder, sink_observer(?sink), ?vocabulary, elide)
-        || begin(?recorder, ?state.context, view.view(nil, 0), 0)
+        || begin(?recorder, ?state.context, view.view(nil, 0), test_instant(0))
         != RECORD_OK) { ret 3; }
     if (event_target(?recorder.event).len != 16 || !recorder.event.truncated
         || !sink.truncated
@@ -880,14 +889,14 @@ test "laurel.observability: request fields have fixed size policies" {
         || !same(event_method(?recorder.event), view.view("GET", 3))) { ret 4; }
     if (set_route(?recorder, view.view("orders.index", 12)) != RECORD_OK
         || event_route_name(?recorder.event).len != 8) { ret 5; }
-    if (finish(?recorder, 200, 1) != RECORD_OK || !release(?recorder)) { ret 6; }
+    if (finish(?recorder, 200, test_instant(1)) != RECORD_OK || !release(?recorder)) { ret 6; }
     var reject: Policy = policy_default();
     reject.max_target_bytes = 16;
     reject.truncation       = TRUNCATE_REJECT;
     var strict_sink: Sink;
     var strict:      Recorder;
     if (!init_recorder(?strict, sink_observer(?strict_sink), ?vocabulary, reject)
-        || begin(?strict, ?state.context, view.view(nil, 0), 0) != RECORD_LIMIT
+        || begin(?strict, ?state.context, view.view(nil, 0), test_instant(0)) != RECORD_LIMIT
         || strict_sink.starts != 0 || strict.started) { ret 7; }
     var invalid: Policy = policy_default();
     invalid.max_target_bytes = 0;

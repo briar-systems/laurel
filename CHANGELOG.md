@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-17
+
+### Changed
+- **Breaking.** Dependencies: std v5.3.0 (was v4.0.1), crypto v0.13.2 (was v0.12.0) and http v0.12.0 (was v0.11.0), and `mach.toml` requires mach `^5.3` (#139). A consumer must be on std 5.x as well. laurel consumes no std io completion and uses none of http's transport or h1, h2 and h3 engines, so neither std 5.3's cancelled-completion transfers nor http's borrowed per-request memory reach its own code. Rebuild from a clean `out/`, since std changed record layouts without changing signatures.
+- **Breaking.** Every instant and deadline is a monotonic `time.Instant`, and the one relative bound is a `Duration` (#139). A wall-clock `time.Time` or a raw integer no longer type-checks in any of these places. Old and new, side by side:
+
+  | before | after |
+  | --- | --- |
+  | `app.Admission.started_ns: i64` | `app.Admission.started: time.Instant` |
+  | `app.Termination.now_ns: i64` | `app.Termination.finished: time.Instant` |
+  | `app.Limits.handler_deadline_ns: i64` (`lifecycle.NO_DEADLINE` for none) | `app.Limits.handler_timeout: opt[duration.Duration]` |
+  | `app.drain(app, deadline_ns: i64)` | `app.drain(app, deadline: opt[time.Instant])` |
+  | `lifecycle.drain(controller, deadline_ns: i64)` | `lifecycle.drain(controller, deadline: opt[time.Instant])` |
+  | `lifecycle.DrainFun: fun(ptr, i64)` | `lifecycle.DrainFun: fun(ptr, opt[time.Instant])` |
+  | `lifecycle.NO_DEADLINE` | removed, use `opt[...].none{}` |
+  | `context.deadline(ctx, *time.Time)` | `context.deadline(ctx, *time.Instant)` |
+  | `context.narrow_deadline(ctx, time.Time)` | `context.narrow_deadline(ctx, time.Instant)` |
+  | `observability.begin(..., started_ns: i64)` | `observability.begin(..., started: time.Instant)` |
+  | `observability.finish`, `cancelled`, `failed`, `observe_execution` take `now_ns: i64` | they take `finished: time.Instant` |
+  | `observability.RequestEvent.started_ns: i64` | `observability.RequestEvent.started: time.Instant` (`duration_ns` is unchanged) |
+  | `testing.Request.deadline_ns: i64` (`testing.NO_DEADLINE` for none) | `testing.Request.deadline: opt[time.Instant]` |
+  | `testing.drain(harness, deadline_ns: i64)` | `testing.drain(harness, deadline: opt[time.Instant])` |
+  | `testing.NO_DEADLINE` | removed |
+  | `realtime.Policy.heartbeat_interval_ns: i64` | `realtime.Policy.heartbeat_interval: duration.Duration` |
+  | `realtime.init_stream` and `init_socket` take `start_ns: i64` | they take `start: time.Instant` |
+  | `realtime.stream_heartbeat`, `stream_observe`, `socket_heartbeat` and `socket_observe` take `now_ns: i64` | they take `now: time.Instant` |
+
+  Wall-clock time is unchanged where a value is compared with something that outlives the process: cookie `expires_unix` and the session and csrf key-ring clocks.
+- The copyright holder is now Briar Systems LLC (#137). The MIT license text is unchanged.
+
 ## [0.13.3] - 2026-09-17
 
 ### Changed
