@@ -89,7 +89,7 @@ fast. Correcting the pool brought the figure to a consistent 10,015.
 | `run.sh` | builds, starts, measures, writes the report |
 | `parse.py` | one oha JSON report to one result line |
 | `report.py` | result lines to the results markdown |
-| `laurel/` | the Laurel implementation and its hedge host |
+| `laurel/` | the Laurel implementation, hosted through `hedge.service.laurel` |
 | `go/` | the Go implementation |
 | `axum/` | the Rust implementation |
 | `results/` | committed measured results |

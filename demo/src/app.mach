@@ -22,16 +22,18 @@ use laurel.router;
 use laurel.security;
 use laurel.security.csrf;
 use laurel.session;
+use std.chrono.duration;
 use std.chrono.time;
 use crypto_rand: std.crypto.rand;
 use io_error:    std.io.error;
 use std.memory;
+use std.memory.secret;
 use std.print;
-use std.system.os.secret;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.error.err;
+use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
@@ -53,9 +55,9 @@ val     MIDDLEWARE_COUNT: usize = 2;
 val     SESSION_SLOTS:    usize = 1024;
 val     GUARD_SLOTS:      usize = 2048;
 
-# how many requests may be in flight at once. hedge admits connections up to its
-# own pool, and every admitted request reserves one laurel slot, so this bounds
-# the framework the same way the listener bounds the socket layer.
+# how many requests may be in flight at once. hedge grows its connection storage
+# with demand, so this is the one ceiling on concurrent laurel requests: past
+# it, admission refuses and the host answers without entering the framework.
 pub val MAX_ACTIVE_REQUESTS: usize = 256;
 
 pub rec Application {
@@ -204,8 +206,9 @@ fun init_sessions(demo: *Application) bool {
         ret false;
     }
     # every one of these buffers is taken from the host's per-request arena,
-    # which hedge fixes at 12 KiB, so the session's request-scoped storage is
-    # sized against that budget rather than against laurel's defaults
+    # whose bound the demo declares at registration, so the session's
+    # request-scoped storage is sized against that budget rather than against
+    # laurel's defaults
     ret session.init_binder(?demo.binder, ?demo.manager,
         session.Clock{ctx: nil, now: clock_now},
         session.RequestLimits{max_cookies: 4, max_data_bytes: 256,
@@ -221,8 +224,8 @@ pub fun init_csrf(demo: *Application, ring: *csrf.KeyRing,
     keys[0].activated_at = 0;
     keys[0].issue_until  = 4102444800;
     keys[0].verify_until = 4102444800;
-    if (secret.random_fill(?keys[0].key[0], 32) != 0) { ret false; }
-    if (!csrf.init_ring(ring, keys, 1, 1, 0))         { ret false; }
+    if (!rand_ok(secret.random_fill(?keys[0].key[0], 32))) { ret false; }
+    if (!csrf.init_ring(ring, keys, 1, 1, 0))              { ret false; }
     ret csrf.init(?demo.protector, ring,
         csrf.Entropy{ctx: (?demo.entropy)::ptr,
         context_size:  $size_of(EntropyState),
@@ -239,7 +242,7 @@ fun service_ready(ctx: ptr) lifecycle.Readiness {
     ret lifecycle.READY_NOW;
 }
 
-fun service_drain(ctx: ptr, deadline_ns: i64)
+fun service_drain(ctx: ptr, deadline: opt[time.Instant])
     res[lifecycle.CallbackStatus, view.View] {
     ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
@@ -248,39 +251,40 @@ fun service_stop(ctx: ptr) res[lifecycle.CallbackStatus, view.View] {
     ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
-# one middleware, wrapping every request: it runs before the handler, calls the
-# rest of the chain exactly once, and applies laurel's secure response headers
-# to whatever the handler produced.
-fun secure_headers_middleware(ctx: ptr, next: middleware.Next,
-    request_context: *context.Context) res[u8, error.AppError] {
+# one middleware, wrapping every request: its entry half lets the chain run,
+# and its exit half applies laurel's secure response headers to whatever the
+# handler produced. the exit half runs exactly once for every entry.
+fun secure_headers_before(ctx: ptr, request_context: *context.Context,
+    slot: *ptr) handler.Result {
+    @slot = nil;
+    ret handler.proceed();
+}
+
+fun secure_headers_after(ctx: ptr, request_context: *context.Context,
+    slot: ptr, carried: handler.Result) handler.Result {
     val policy: *security.HeadersPolicy = ctx::*security.HeadersPolicy;
-    val result: res[u8, error.AppError] =
-        middleware.call(next, request_context);
-    if ((sel result.ok) && context.active(request_context)) {
+    if ((sel carried.ok) && context.active(request_context)) {
         security.apply_headers(policy, context.request(request_context),
             context.response(request_context));
     }
-    ret result;
-}
-
-fun not_found(ctx: ptr, request_context: *context.Context)
-    res[u8, error.AppError] {
-    ret res[u8, error.AppError].err{error.make(error.NOT_FOUND, 404, "not found",
-        "no route matched the request target", false)};
+    ret carried;
 }
 
 # the handler laurel runs when dispatch matched no route
-pub fun fallback_handler() handler.Handler {
-    ret handler.Handler{ctx: nil, call: not_found};
+fun not_found(ctx: ptr, request_context: *context.Context,
+    slot: *ptr) handler.Result {
+    @slot = nil;
+    ret handler.fail(error.make(error.NOT_FOUND, 404, "not found",
+        "no route matched the request target", false));
 }
 
 fun route(method_rule: router.Method, pattern: view.View, name: str,
     parameters: *router.Parameter, parameter_len: usize,
-    call: handler.HandlerFun, ctx: ptr) router.Route {
+    call: handler.EnterFun, resume: handler.ResumeFun, ctx: ptr) router.Route {
     ret router.Route{method: method_rule, host: router.any_host(),
         path:          router.path(pattern), name: name, parameters: parameters,
         parameter_len: parameter_len,
-        handler:       handler.Handler{ctx: ctx, call: call}};
+        handler:       handler.Handler{ctx: ctx, call: call, resume: resume}};
 }
 
 # the host decides the message limits every exchange is committed under, so the
@@ -302,19 +306,19 @@ pub fun assemble(demo: *Application, limits: message.Limits, quiet: bool) bool {
     demo.routes[0] = route(
         router.exact_method(method.from_kind(method.GET)),
         handlers.text("/api/hello"), "api.hello", nil, 0,
-        handlers.hello, (?demo.state)::ptr);
+        handlers.hello, nil, (?demo.state)::ptr);
     demo.routes[1] = route(
         router.exact_method(method.from_kind(method.GET)),
         handlers.text("/api/echo/:id"), "api.echo",
-        ?demo.parameters[0], 1, handlers.echo, (?demo.state)::ptr);
+        ?demo.parameters[0], 1, handlers.echo, nil, (?demo.state)::ptr);
     demo.routes[2] = route(
         router.exact_method(method.from_kind(method.GET)),
         handlers.text("/form"), "form.show", nil, 0,
-        handlers.form_page, (?demo.state)::ptr);
+        handlers.form_page, nil, (?demo.state)::ptr);
     demo.routes[3] = route(
         router.exact_method(method.from_kind(method.POST)),
         handlers.text("/form"), "form.submit", nil, 0,
-        handlers.form_submit, (?demo.state)::ptr);
+        handlers.form_submit, handlers.form_resume, (?demo.state)::ptr);
 
     val storage: router.Storage = router.Storage{
         specifications:  ?demo.specifications[0], specification_cap: ROUTE_COUNT,
@@ -325,7 +329,7 @@ pub fun assemble(demo: *Application, limits: message.Limits, quiet: bool) bool {
         router.limits_default()).status != router.COMPILE_OK) { ret false; }
 
     demo.middlewares[0] = middleware.Middleware{ctx: (?demo.headers)::ptr,
-        call: secure_headers_middleware};
+        before: secure_headers_before, resume: nil, after: secure_headers_after};
     demo.middlewares[1] = session.binder_middleware(?demo.binder);
     demo.stack          = middleware.Stack{items: ?demo.middlewares[0],
         len: MIDDLEWARE_COUNT};
@@ -358,7 +362,7 @@ pub fun assemble(demo: *Application, limits: message.Limits, quiet: bool) bool {
                 max_request_id_bytes:    64,
                 max_active_requests:     MAX_ACTIVE_REQUESTS,
                 max_middleware_depth:    8,
-                handler_deadline_ns:     lifecycle.NO_DEADLINE,
+                handler_timeout:         opt[duration.Duration].none{},
                 max_providers:           0,
                 max_provider_key_bytes:  32,
                 max_background_services: 1
@@ -368,7 +372,7 @@ pub fun assemble(demo: *Application, limits: message.Limits, quiet: bool) bool {
         },
         router:        ?demo.matcher,
         middleware:    ?demo.stack,
-        fallback:      handler.Handler{ctx: nil, call: not_found},
+        fallback:      handler.Handler{ctx: nil, call: not_found, resume: nil},
         errors:        error.default_mapper(?demo.errors),
         providers:     ?demo.providers,
         lifecycle:     ?demo.controller,
@@ -409,7 +413,7 @@ pub fun shutdown(demo: *Application) bool {
     var polls:   usize = 0;
     for (polls < 64 && !drained) {
         val moved: lifecycle.Transition =
-            app.drain(?demo.application, lifecycle.NO_DEADLINE);
+            app.drain(?demo.application, opt[time.Instant].none{});
         drained = moved.status == lifecycle.TRANSITION_OK;
         if (moved.status != lifecycle.TRANSITION_PENDING && !drained) { ret false; }
         polls = polls + 1;
