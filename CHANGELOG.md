@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Changed
+- The tag-triggered workflow is `.github/workflows/cd.yml`, renamed from `release.yml` with no content change, matching the family layout (#147).
 - demo/ and doc/bench/laurel/ declare `mach = "^5.3"` like the root manifest (#143).
 
 ## [0.14.0] - 2026-09-17

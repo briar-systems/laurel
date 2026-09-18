@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-  # release.yml runs the full tier through this, since a tag has no base branch
+  # cd.yml runs the full tier through this, since a tag has no base branch
   workflow_call:
     inputs:
       heavy:
