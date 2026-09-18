@@ -1,5 +1,6 @@
 [project]
 id = "bench"
+mach = "^5.3"
 version = "0.1.0"
 src = "src"
 out = "out/{target.name}/{profile.name}"

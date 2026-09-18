@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- demo/ and doc/bench/laurel/ declare `mach = "^5.3"` like the root manifest (#143).
+
 ## [0.14.0] - 2026-09-17
 
 ### Changed
