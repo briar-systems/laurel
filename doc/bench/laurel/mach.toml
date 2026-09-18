@@ -46,16 +46,16 @@ need = []
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-ref = "tag/v2.1.0"
+ref = "tag/v5.4.0"
 
 [dep.laurel]
 git = "https://github.com/briar-systems/laurel"
-ref = "tag/v0.10.0"
+ref = "tag/v0.14.0"
 
 [dep.hedge]
 git = "https://github.com/briar-systems/hedge"
-ref = "tag/v0.4.1"
+ref = "tag/v0.6.0"
 
 [dep.http]
 git = "https://github.com/briar-systems/mach-http"
-ref = "tag/v0.8.2"
+ref = "tag/v0.13.2"

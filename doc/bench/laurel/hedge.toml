@@ -7,7 +7,6 @@
 name = "laurel-bench"
 
 [server.limits]
-max_connections = 512
 max_connections_per_peer = 512
 
 [[listener]]
