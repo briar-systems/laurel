@@ -165,50 +165,45 @@ the whole of what an embedder writes:
 Hedge is driven, not threaded. Every accepted connection, every parsed request,
 and every Laurel handler call happens inside `serve.poll` on one thread.
 
-### Two things this demo does not take from hedge
+### What hedge's adapter does for the application
 
-Both are worth knowing before you copy hedge's own adapter.
+`hedge.service.laurel` runs Laurel's router itself, so routes with typed and
+wildcard parameters dispatch exactly as they would under any other host. It
+enters the application at the request headers, before any body byte has been
+read, which is why `POST /form` is written as a handler that can suspend: the
+form parser polls the body, a pending read leaves the chain with its token
+(`handler.suspend`), and hedge resumes only that step once the read settles.
+Nothing that already ran runs again. An exchange that dies while a step is
+suspended is abandoned, and every middleware exit half that is owed still runs.
 
-**It runs Laurel's router itself.** `hedge.service.laurel` admits every request
-with an empty parameter set and never calls `laurel.router.dispatch`. Since
-`laurel.router.invoke` requires the bound request context to already carry the
-exact parameters dispatch produced, an application hosted through that adapter
-can only use routes with no typed parameters. `src/host.mach` is the same seam
-with the dispatch step restored, written against the same public contract.
+The adapter keeps Laurel's per-request state (the context, the execution cursor
+and the recorder) in the request arena, whose bound the application declares:
+`register_application` takes it as its last argument, and this demo asks for
+64 KiB. Hedge claims that memory in chunks as the request needs it and returns
+it when the exchange settles, so an idle connection holds none of it.
 
-**It buffers the request body before entering the framework.** A Laurel handler
-is synchronous: it runs to completion inside one call and cannot wait for bytes
-the server has not read yet, because the server only reads inside the same poll
-that is running the handler. Hedge enters a service at the *request headers*,
-before any body byte is parsed, so the first read suspends. The read belongs to
-the host until the host completes it: returning `SERVICE_PENDING` gives the
-connection a turn to collect the bytes, and the next entry resolves the token
-the host is holding. Once the whole body is buffered, Laurel is handed a reader
-over that copy. See the comments in `src/host.mach`.
-
-The body buffer is 1 KiB. That is not an arbitrary choice: Laurel's per-request
-state is 8232 bytes on this target, and the rest of the arena has to cover the
-session's request-scoped buffers, the form decoder, and the response body.
-Because 8232 bytes of framework state does not fit alongside the application's
-own needs, this host keeps that state in its own slot table, one slot per
-concurrent request, and leaves the arena to the application. The arena's size is
-the application's to declare: `register_application` takes it as its last
-argument, and this demo asks for 64 KiB.
+Connections are not pooled up front. Hedge grows its connection storage with
+what is actually connected, and `server.limits.max_connections` is an optional
+policy cap rather than a storage size, so this demo leaves it unset. The one
+ceiling the application owns is `app.Limits.max_active_requests`, past which
+Laurel refuses admission.
 
 ## Layout
 
 | path | what it is |
 |---|---|
 | `src/bin/main.mach` | the executable: configuration, registration, serve loop |
-| `src/host.mach` | the hedge service handler that dispatches and drives Laurel |
 | `src/app.mach` | the application: routes, middleware, sessions, CSRF, observer |
-| `src/handlers.mach` | the five route handlers |
+| `src/handlers.mach` | the four route handlers |
 | `hedge.toml` | listener, host, services, routes |
 | `public/static/` | the static file |
 
 ## Versions
 
-The demo pins Laurel `v0.9.2` and hedge `v0.4.0`. It pins the Laurel *tag*
-rather than building against the working tree it lives in, because hedge depends
-on Laurel too and Mach resolves dependencies flat: two different revisions of
-the same module cannot coexist in one build.
+The demo pins Laurel `v0.14.0` and hedge `v0.6.0`. It pins the Laurel *tag*
+rather than resolving the working tree it lives in, because hedge depends on
+Laurel too and Mach resolves dependencies flat: one revision of Laurel serves
+the whole build, and `hedge.service.laurel` is compiled against it. Resolved by
+path, a breaking change to Laurel would break hedge's adapter in the same pull
+request, and that request could never merge until hedge had followed a release
+that could not yet exist. The tag pin is what lets Laurel change first.

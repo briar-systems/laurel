@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-19
+
+### Changed
+- **Breaking.** Dependencies: std `^6.0` at v6.0.0 (was v5.3.0), crypto `^0.18` at v0.18.0 (was v0.13.2) and http `^0.15` at v0.15.0 (was v0.12.0), and `mach.toml` requires mach `^5.9` (#150). A consumer must be on std 6.x as well. Nothing in std 6's migration guide reaches laurel's code: it uses no `sort`, `heap`, `map` or `set`, no width-named `ct` comparison (its three `ct.eq_bytes` sites are unchanged) and no buffer account, and http 0.15's own surface is unchanged. CI asks the family workflow for `dit: required`, because crypto 0.18 links std's start code that turns PSTATE.DIT on for aarch64 programs. demo/ and doc/bench/laurel/ keep their hedge v0.6.0 pins, which hold them on std 5, until hedge moves.
+- demo/ and doc/bench/laurel/ pin hedge v0.6.0, laurel v0.14.0, mach-std v5.4.0 and mach-http v0.13.2, and follow hedge's growable connection storage (#110). `serve.make` takes no pool: the caller-provided slot and connection arrays are gone, and `server.limits.max_connections` is left unset in both `hedge.toml` because it is a policy cap now rather than a storage size. Both programs host the application through `hedge.service.laurel` instead of their own copy of the seam (`src/host.mach` is removed): the adapter dispatches through the application's router, resumes a suspended handler and enforces the handler deadline, so the reasons for the copy no longer hold. The form handlers suspend on the request body (`handler.suspend`) and resume where they left off, following laurel 0.11, and the manifests move to laurel 0.14's `Instant` and `handler_timeout` shapes.
+- The tag-triggered workflow is `.github/workflows/cd.yml`, renamed from `release.yml` with no content change, matching the family layout (#147).
+- demo/ and doc/bench/laurel/ declare `mach = "^5.3"` like the root manifest (#143).
+
 ## [0.14.0] - 2026-09-17
 
 ### Changed

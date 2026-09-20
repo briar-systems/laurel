@@ -1,7 +1,7 @@
 [project]
 id = "laurel"
-mach = "^5.3"
-version = "0.14.0"
+mach = "^5.9"
+version = "0.15.0"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
@@ -61,12 +61,12 @@ need = []
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-ref = "tag/v5.3.0"
+version = "^6.0"
 
 [dep.crypto]
 git = "https://github.com/briar-systems/mach-crypto"
-ref = "tag/v0.13.2"
+version = "^0.18"
 
 [dep.http]
 git = "https://github.com/briar-systems/mach-http"
-ref = "tag/v0.12.0"
+version = "^0.15"

@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-  # release.yml runs the full tier through this, since a tag has no base branch
+  # cd.yml runs the full tier through this, since a tag has no base branch
   workflow_call:
     inputs:
       heavy:
@@ -24,6 +24,8 @@ jobs:
     uses: briar-systems/.github/.github/workflows/mach-lib.yml@main
     with:
       heavy: ${{ inputs.heavy }}
+      # crypto 0.18 links std's start code that requires PSTATE.DIT on aarch64
+      dit: required
       # the demo and the bench server resolve laurel from a tag, so they gate
       # that they still build, once, on the primary leg
       subprojects: >-

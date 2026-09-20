@@ -10,7 +10,6 @@
 # drive hedge's serve loop until it drains.
 
 use demo.app;
-use demo.host;
 use hedge.config.loader;
 use hedge.config.schema;
 use hedge.connection;
@@ -21,6 +20,7 @@ use hedge.generation;
 use quic_runtime: hedge.protocol.quic.runtime;
 use hedge.serve;
 use hedge.service;
+use hosting:      hedge.service.laurel;
 use static_files: hedge.service.static;
 use http.core.message;
 use http.router.router;
@@ -66,10 +66,6 @@ val MAX_SERVICES:   usize = 16;
 val MAX_MIDDLEWARE: usize = 8;
 val PLAN_TEXT:      usize = 8192;
 
-# the connection pool. every accepted connection borrows one slot, so this is
-# the ceiling on concurrent sockets and it must match the configured limit.
-val POOL: usize = 256;
-
 # the name the configuration routes to. `application = "site"` in hedge.toml
 # resolves through this string, so the two must agree exactly.
 val APPLICATION_NAME: str = "site";
@@ -79,8 +75,7 @@ val APPLICATION_NAME: str = "site";
 # so none of this may sit in a stack frame the server returns through.
 rec Boot {
     demo:              app.Application;
-    adapter:           host.Adapter;
-    request_slots:     [POOL]host.RequestState;
+    adapter:           hosting.Adapter;
     applications:      service.Applications;
     application_slots: [4]service.Application;
     resolver:          service.Resolver;
@@ -95,8 +90,6 @@ rec Boot {
     text:              [PLAN_TEXT]u8;
     storage:           plan.Storage;
     plan:              plan.Plan;
-    slots:             [POOL]serve.Slot;
-    connections:       [POOL]connection.Connection;
     runtime:           serve.Runtime;
     diagnostics:       schema.Diagnostics;
     candidate:         generation.Generation;
@@ -156,15 +149,14 @@ fun construct(context: ptr, graph: *schema.Graph,
             "application", "application", "the laurel application never became ready");
         ret false;
     }
-    if (!host.make(?boot.adapter, ?boot.demo.application, ?boot.demo.matcher,
-        app.fallback_handler(), ?boot.request_slots[0], POOL)) {
+    if (!hosting.make(?boot.adapter, ?boot.demo.application)) {
         schema.add_diagnostic(diagnostics, schema.ERROR, schema.SOURCE_ERROR,
             "application", "application", "the laurel service adapter could not be bound");
         ret false;
     }
     if (!service.make_applications(?boot.applications, ?boot.application_slots[0], 4)
         || !service.register_application(?boot.applications, APPLICATION_NAME,
-        host.bound_handler(?boot.adapter), 65536)) {
+        hosting.bound_handler(?boot.adapter), 65536)) {
         schema.add_diagnostic(diagnostics, schema.ERROR, schema.SOURCE_ERROR,
             "application", "application", "the laurel application could not be registered");
         ret false;
@@ -291,8 +283,7 @@ fun main(argc: i64, argv: **u8) i64 {
     }
 
     var quic_controls: quic_runtime.ControlView;
-    if (!serve.make(?boot.runtime, ?boot.slots[0], ?boot.connections[0], POOL,
-        ?boot.plan, ?boot.candidate.graph, ?heap)) {
+    if (!serve.make(?boot.runtime, ?boot.plan, ?boot.candidate.graph, ?heap)) {
         print.eprintln("laurel-demo: the serving runtime was refused");
         ret EXIT_RUNTIME;
     }
