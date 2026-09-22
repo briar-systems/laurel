@@ -61,12 +61,12 @@ need = []
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-version = "^6.0"
+version = "^7.0"
 
 [dep.crypto]
 git = "https://github.com/briar-systems/mach-crypto"
-version = "^0.18"
+version = "^0.20"
 
 [dep.http]
 git = "https://github.com/briar-systems/mach-http"
-version = "^0.15"
+version = "^0.17"
