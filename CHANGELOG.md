@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-22
+
+### Changed
+- **Breaking.** Dependencies: std `^7.0` at v7.0.2 (was `^6.0` at v6.0.0), crypto `^0.20` at v0.20.0 (was `^0.18` at v0.18.0) and http `^0.17` at v0.17.0 (was `^0.15` at v0.15.0) (#154). A consumer must be on std 7.x as well. Nothing in std 7's migration guide reaches laurel's code: it has no `io.runtime.make` caller, uses no `data.toml`, and of `std.allocator` uses only `allocate` and `fixed`, never `page`, `testing`, `arena` or `heap`. crypto 0.19 and 0.20 change P-256, P-384, RSA and Poly1305 internals only, and http 0.16 and 0.17 add closure reporting and the std bump without changing the surface laurel uses. demo/ and doc/bench/laurel/ keep their hedge v0.6.0 pins until hedge moves.
+
 ## [0.15.0] - 2026-09-19
 
 ### Changed

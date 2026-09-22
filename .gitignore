@@ -5,7 +5,6 @@ doc/api/
 *.swp
 *.swo
 *~
-.wt/
 .mach-seed/
 .mach-txn-lock
 demo/dep/
