@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-09-23
+
+### Changed
+- Dependencies: http `^0.18` at v0.18.0 (was `^0.17` at v0.17.0), so laurel resolves alongside a project that needs http 0.18 (#158). http 0.18 adds `h2.connection.pending_work` and fixes an HTTP/2 frame dropped at the peer's end of stream, and laurel uses neither the h2 engine nor anything else that changed. std and crypto are unchanged. demo/ and doc/bench/laurel/ keep their hedge v0.6.0 pins until hedge moves.
+
 ## [0.16.0] - 2026-09-22
 
 ### Changed
