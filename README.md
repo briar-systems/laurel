@@ -24,6 +24,8 @@ The framework has no global application registry, hidden allocator, mandatory te
   never reaches a public type, authentication ownership, and redirect policy.
 - `form`, `multipart`, and `upload` keep bounded parsing, request-wide upload
   transactions, and streamed file storage separate.
+- `query` decodes a request's query string with the form decoder, and `raw`
+  reads a whole request body as its exact bytes under a caller limit.
 - `render` converts a model into a bounded response body, with explicit media
   type, charset, and escaping, and no coupling to a template engine.
 - `observability` reports one start and one terminal request event through

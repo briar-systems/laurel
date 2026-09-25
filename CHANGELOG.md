@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+- `query.decode` and `query.parse` decode a query string with the one `form.UrlEncoded` decoder, so percent escapes, `+` as a space, strict UTF-8, repeated keys and empty values behave as they do in a form body (#163). `form.init_source` names what the decoder reads: a malformed query is 400 `malformed query` and one past its limits is 400 `query is too large`, where a form body keeps 400 `malformed form` and 413 `form is too large`.
+- `form.find`, `form.find_next` and `form.typed` read a decoded form or query: the first field with a name, every later value of a repeated key in wire order, and one value through a `router.Decoder`, the same decoders that type path parameters (#163).
+- `raw.Body` reads a whole request body as its exact bytes into a caller buffer under a caller limit, suspending on the host like the form and multipart parsers (#163). A body over the limit is `raw.LIMIT` with 413, whether its declared length says so before any byte is read or an unsized body reaches the limit, a sized body that ends short of or past its length is `raw.MALFORMED` with 400, and every failure zeroes what was read.
+- `testing.Request.chunked` presents a request body with no declared length, as HTTP/1.1 chunked coding and HTTP/2 or HTTP/3 data without `content-length` reach the application (#163). `testing.request` sets it false, and a `testing.Request` literal must now name it.
+
+### Fixed
+- The in-process harness answers a body read with no allowance left the way a host does, so a request body past the configured `request_body.max_bytes` ends in the reader's limit rather than a provider failure (#163).
+
 ## [0.17.0] - 2026-09-25
 
 ### Changed
