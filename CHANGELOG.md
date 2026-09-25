@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-25
+
 ### Added
 - `query.decode` and `query.parse` decode a query string with the one `form.UrlEncoded` decoder, so percent escapes, `+` as a space, strict UTF-8, repeated keys and empty values behave as they do in a form body (#163). `form.init_source` names what the decoder reads: a malformed query is 400 `malformed query` and one past its limits is 400 `query is too large`, where a form body keeps 400 `malformed form` and 413 `form is too large`.
 - `form.find`, `form.find_next` and `form.typed` read a decoded form or query: the first field with a name, every later value of a repeated key in wire order, and one value through a `router.Decoder`, the same decoders that type path parameters (#163).
