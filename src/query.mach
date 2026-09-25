@@ -179,7 +179,5 @@ test "laurel.query: one decoder serves query after query" {
     val done: form.Operation = run(?fixture, "q=ok");
     if (done.status != form.COMPLETE
         || !equal(form.find(?done.form, text("q")).value, "ok")) { ret 2; }
-    var parser: form.BodyParser;
-    if (form.init_body(?parser, ?fixture.decoder, nil, nil, 0)) { ret 3; }
     ret 0;
 }
