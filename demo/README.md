@@ -110,12 +110,54 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST \
     -d "name=x&csrf_token=$token" http://127.0.0.1:8080/form    # 403, no session
 ```
 
-**A static file.** Served by the server, not the application, on the same
-listener.
+**A query string.** `GET /api/search` decodes the query with `query.parse`, the
+same urlencoded decoder a form body uses, into storage the handler owns. It reads
+`q` with `form.find` and types `limit` with `form.typed` and the `u64` decoder
+that types path parameters, so an absent `limit` takes the default and one that
+is not a number is refused before anything is answered.
+
+```sh
+curl -s 'http://127.0.0.1:8080/api/search?q=hello+w%C3%B6rld%22%3C&limit=3'
+# {"q":"hello wörld\"\u003c","limit":3}
+
+curl -s 'http://127.0.0.1:8080/api/search?q=x'
+# {"q":"x","limit":10}
+
+curl -s -w ' %{http_code}\n' 'http://127.0.0.1:8080/api/search?q=x&limit=abc'
+# invalid route parameter 400
+
+curl -s -w ' %{http_code}\n' 'http://127.0.0.1:8080/api/search?q=a&&b'
+# malformed query 400
+```
+
+**A raw body.** `POST /api/raw` reads the whole body with `raw.Body` as its
+exact bytes, as a webhook handler does before it checks a signature, and answers
+with them. The first read usually suspends, like the form's. The demo's limit is
+4096 bytes: a body of exactly that fits, and one byte more is refused with 413.
+
+```sh
+head -c 3000 /dev/urandom > in.bin
+curl -s -X POST --data-binary @in.bin -o out.bin http://127.0.0.1:8080/api/raw
+cmp in.bin out.bin && echo identical
+# identical
+
+head -c 4097 /dev/urandom | curl -s -w ' %{http_code}\n' -X POST --data-binary @- \
+    http://127.0.0.1:8080/api/raw
+# request body is too large 413
+```
+
+A chunked body with no declared length reads the same way.
+
+**A static file and a health check.** Both are hedge's own services, `static`
+and `fixed`, configured in `hedge.toml` and served by the workers on the same
+listener without entering the application.
 
 ```sh
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/static/index.html
 # 200
+
+curl -s http://127.0.0.1:8080/healthz
+# ok
 ```
 
 **An unmatched path.**
@@ -135,11 +177,26 @@ curl -s -D - -o /dev/null http://127.0.0.1:8080/api/hello | grep -i 'x-frame\|co
 # x-frame-options: DENY
 ```
 
-The observer prints one line per completed request and, for a failed one, the
-private detail that never reaches the client:
+The observer prints one line per completed request, naming the worker thread
+that served it, and, for a failed one, the private detail that never reaches the
+client:
 
 ```
+demo: api.hello -> 200 on worker thread 140055119134704
 demo: request failed: kind 3 status 403: the form carried no csrf_token field
+```
+
+**Several workers.** Every request is served by one of the four workers, and the
+kernel spreads new connections across them. 200 requests, each on a connection
+of its own, landed on all four:
+
+```sh
+for i in $(seq 1 200); do curl -s -o /dev/null http://127.0.0.1:8080/api/hello; done
+# in the server's log, counted by thread:
+#   60 140055110746096
+#   43 140055119134704
+#   56 140055127523312
+#   41 140055138009072
 ```
 
 ## How a Laurel application is hosted
