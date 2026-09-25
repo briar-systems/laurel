@@ -757,7 +757,7 @@ test "laurel.form: limits and physical ownership fail before publication" {
     var overlapping: UrlEncoded;
     if (init_urlencoded(?overlapping, Storage{
         fields: (?overlapping.storage)::*Field, field_capacity: 2,
-        bytes:                                                  ?bytes[0], byte_capacity: 32
+        bytes:  ?bytes[0], byte_capacity: 32
     }, limits)) { ret 2; }
     var alias_decoder: UrlEncoded;
     if (!init_urlencoded(?alias_decoder, Storage{fields: ?fields[0],
@@ -925,7 +925,7 @@ test "laurel.form: body state cannot overlap result storage" {
         max_name_bytes: 4, max_value_bytes: 4, max_temporary_bytes: 32};
     if (!init_urlencoded(?decoder, Storage{
         fields: (?parser)::*Field, field_capacity: 1,
-        bytes:                                     ?bytes[0], byte_capacity: 32
+        bytes:  ?bytes[0], byte_capacity: 32
     }, limits)) { ret 1; }
     var scope: cancel.Scope;
     if (!operation_ok(cancel.make_root(?scope, opt[time.Instant].none{}))) { ret 2; }

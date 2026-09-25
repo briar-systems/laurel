@@ -843,9 +843,9 @@ test "laurel.app: cleanup failure remains observable after primary failure" {
     failures.fail_start = true;
     failures.fail_stop  = false;
     var lifecycle_item: lifecycle.Lifecycle = lifecycle.Lifecycle{
-        ctx: (?failures)::ptr, start: test_failed_lifecycle_start,
-        ready:                        test_lifecycle_ready, drain: test_lifecycle_drain,
-        stop:                         test_failed_lifecycle_stop
+        ctx:   (?failures)::ptr, start: test_failed_lifecycle_start,
+        ready: test_lifecycle_ready, drain: test_lifecycle_drain,
+        stop:  test_failed_lifecycle_stop
     };
     var controller: lifecycle.Controller;
     if (!lifecycle.init(?controller, ?lifecycle_item, 1, 1)) { ret 2; }
