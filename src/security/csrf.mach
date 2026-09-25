@@ -1003,7 +1003,7 @@ fun init_fixture(fixture: *Fixture, binding: BindingMode,
     }
     if (!init_ring(?fixture.ring, ?fixture.keys[0], 2, 1, 1) ||
         !init(?fixture.protector, ?fixture.ring, Entropy{
-        ctx: (?fixture.entropy)::ptr,
+        ctx:           (?fixture.entropy)::ptr,
         context_size:  $size_of(TestEntropy),
         aliases_state: test_entropy_aliases,
         fill:          test_entropy_fill
@@ -1142,9 +1142,9 @@ test "laurel.security.csrf: provider mutation and invalid rings are rejected" {
         target: ?fixture.protector.policy, calls: 0
     };
     if (!init(?fixture.protector, ?fixture.ring, Entropy{
-        ctx: (?mutation)::ptr, context_size: $size_of(MutatingEntropy),
-        aliases_state:                       mutating_entropy_aliases,
-        fill:                                mutating_entropy_fill
+        ctx:           (?mutation)::ptr, context_size: $size_of(MutatingEntropy),
+        aliases_state: mutating_entropy_aliases,
+        fill:          mutating_entropy_fill
     }, Policy{binding: BIND_SESSION,
         max_age_s: 60, clock_skew_s: 5, require_unsafe: true})) { ret 2; }
     var output: [TOKEN_CAPACITY]u8;

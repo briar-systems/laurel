@@ -213,8 +213,8 @@ fun main(argc: i64, argv: **u8) i64 {
         CONFIG_ARENA_BYTES);
 
     var resolver: loader.Resolver = loader.Resolver{
-        context: nil,
-        include: (0::usize)::loader.ResolveFun,
+        context:     nil,
+        include:     (0::usize)::loader.ResolveFun,
         environment: resolve_environment,
     };
     schema.reset_diagnostics(?boot.diagnostics);
