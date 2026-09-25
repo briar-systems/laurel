@@ -5,41 +5,32 @@
 # speaks HTTP, and calls into an application, and `hedge.service.laurel` is the
 # adapter between the two. this file is the whole of what an embedder writes.
 #
-# the shape is: read a configuration, assemble the laurel application, register
-# it under the name the configuration routes to, compile the dispatch plan, and
-# drive hedge's serve loop until it drains.
+# the shape is hedge's own executable with one application registered: read and
+# seal the configuration, assemble and start the laurel application, register
+# it under the name the configuration routes to, compose the process with that
+# registry, and let the supervisor run one worker per configured thread until a
+# signal stops it.
 
 use demo.app;
+use hedge.composition;
 use hedge.config.loader;
 use hedge.config.schema;
 use hedge.connection;
-use hedge.dispatch.call;
-use dispatch_middleware: hedge.dispatch.middleware;
-use hedge.dispatch.plan;
 use hedge.generation;
-use quic_runtime: hedge.protocol.quic.runtime;
+use hedge.lifecycle;
 use hedge.serve;
 use hedge.service;
-use hosting:      hedge.service.laurel;
-use static_files: hedge.service.static;
+use hosting: hedge.service.laurel;
+use hedge.spread;
+use hedge.supervisor;
 use http.core.message;
-use http.router.router;
-use laurel.context;
-use laurel.error;
-use laurel.form;
-use laurel.handler;
-use laurel.middleware;
-use laurel.observability;
 use laurel.security.csrf;
-use laurel.session;
 use std.allocator;
 use std.allocator.fixed;
 use std.allocator.page;
-use std.chrono.time;
 use std.filesystem;
 use std.print;
 use std.process.env;
-use std.runtime;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -49,6 +40,7 @@ use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
+use std.types.string.str_len;
 
 fun page_ok(outcome: err[allocator.Error]) bool {
     ret sel outcome.ok;
@@ -57,43 +49,39 @@ fun page_ok(outcome: err[allocator.Error]) bool {
 val EXIT_OK:      i64 = 0;
 val EXIT_CONFIG:  i64 = 78;
 val EXIT_RUNTIME: i64 = 70;
+# the drain deadline passed with exchanges still running
+val EXIT_DRAIN_INCOMPLETE: i64 = 75;
 
 val CONFIG_ARENA_BYTES: usize = 262144;
-
-val MAX_ROUTES:     usize = 16;
-val MAX_SEGMENTS:   usize = 128;
-val MAX_SERVICES:   usize = 16;
-val MAX_MIDDLEWARE: usize = 8;
-val PLAN_TEXT:      usize = 8192;
 
 # the name the configuration routes to. `application = "site"` in hedge.toml
 # resolves through this string, so the two must agree exactly.
 val APPLICATION_NAME: str = "site";
 
+# the request memory each exchange with the application may hold
+val APPLICATION_MEMORY_BYTES: usize = 65536;
+
+# the environment reference hedge.toml takes its listen address from
+val ADDRESS_VARIABLE: str = "LISTEN_ADDRESS";
+val DEFAULT_ADDRESS:  str = "127.0.0.1:8080";
+
 # everything that must outlive a request lives here, in one heap allocation.
-# a Handler borrows the Adapter by raw pointer and the plan borrows the handler,
-# so none of this may sit in a stack frame the server returns through.
+# the registry borrows the adapter, every worker borrows the registry and the
+# application, and the composition and the supervisor hold themselves by
+# address, so none of this may sit in a stack frame the server returns through.
 rec Boot {
     demo:              app.Application;
     adapter:           hosting.Adapter;
     applications:      service.Applications;
-    application_slots: [4]service.Application;
-    resolver:          service.Resolver;
-    static_registry:   static_files.Registry;
-    static_sites:      [4]static_files.Site;
-    routes:            [MAX_ROUTES]router.CompiledRoute;
-    segments:          [MAX_SEGMENTS]router.Segment;
-    specs:             [MAX_ROUTES]router.Route;
-    entries:           [MAX_ROUTES]plan.Entry;
-    services:          [MAX_SERVICES]service.Descriptor;
-    middlewares:       [MAX_MIDDLEWARE]dispatch_middleware.Middleware;
-    text:              [PLAN_TEXT]u8;
-    storage:           plan.Storage;
-    plan:              plan.Plan;
-    runtime:           serve.Runtime;
+    application_slots: [1]service.Application;
+    generations:       [2]generation.Generation;
+    allocators:        [2]allocator.Allocator;
+    states:            [2]fixed.FixedState;
     diagnostics:       schema.Diagnostics;
-    candidate:         generation.Generation;
-    quiet:             bool;
+    resolver:          loader.Resolver;
+    source:            Source;
+    composed:          composition.Runtime;
+    supervising:       supervisor.Supervisor;
     assembled:         bool;
 }
 
@@ -108,10 +96,44 @@ fun capabilities() loader.Capabilities {
     };
 }
 
+fun copy_text(text: str, output: *u8, capacity: usize) i64 {
+    val length: usize = str_len(text);
+    if (length >= capacity) { ret length::i64; }
+    var i: usize = 0;
+    for (i < length) {
+        output[i] = text[i]::u8;
+        i         = i + 1;
+    }
+    ret length::i64;
+}
+
+# a platform such as Railway hands the process only a port, so an unset
+# LISTEN_ADDRESS listens on every interface at $PORT, and with neither set the
+# demo stays on loopback
+fun listen_address(output: *u8, capacity: usize) i64 {
+    var port:     [16]u8;
+    var length:   usize                         = 0;
+    val from_env: res[opt[usize], env.EnvError] = env.get("PORT", ?port[0], 15);
+    if (sel from_env.ok) {
+        if (sel from_env.ok.some) { length = from_env.ok.some; }
+    }
+    if (length == 0) { ret copy_text(DEFAULT_ADDRESS, output, capacity); }
+    port[length] = 0;
+    val prefix: i64 = copy_text("0.0.0.0:", output, capacity);
+    if (prefix::usize >= capacity) { ret prefix; }
+    val rest: i64 = copy_text((?port[0])::str, ?output[prefix::usize],
+        capacity - prefix::usize);
+    ret prefix + rest;
+}
+
+# the value's length, or -1 when the variable is unset or cannot be read
 fun resolve_environment(context: ptr, name: str, output: *u8, capacity: usize) i64 {
     val got: res[opt[usize], env.EnvError] = env.get(name, output, capacity);
-    if (sel got.err)     { ret -1; }
-    if (sel got.ok.none) { ret -1; }
+    if (sel got.err) { ret -1; }
+    if (sel got.ok.none) {
+        if (str_equals(name, ADDRESS_VARIABLE)) { ret listen_address(output, capacity); }
+        ret -1;
+    }
     ret got.ok.some::i64;
 }
 
@@ -125,43 +147,7 @@ fun report_diagnostics(diagnostics: *schema.Diagnostics) {
         print.eprintln(schema.text(?item.message));
         i = i + 1;
     }
-}
-
-# the construction hook hedge calls while sealing a configuration generation.
-#
-# this is where the laurel application becomes reachable by name. the sealed
-# graph has already been validated, so an application that cannot be assembled
-# here stops the server before a listener ever binds.
-fun construct(context: ptr, graph: *schema.Graph,
-    diagnostics: *schema.Diagnostics) bool {
-    val boot: *Boot = context::*Boot;
-    if (boot == nil) { ret false; }
-    val limits: message.Limits = connection.message_limits(graph,
-        connection.config_from(graph));
-    if (!app.assemble(?boot.demo, limits, boot.quiet)) {
-        schema.add_diagnostic(diagnostics, schema.ERROR, schema.SOURCE_ERROR,
-            "application", "application", "the laurel application could not be assembled");
-        ret false;
-    }
-    boot.assembled = true;
-    if (!app.start(?boot.demo)) {
-        schema.add_diagnostic(diagnostics, schema.ERROR, schema.SOURCE_ERROR,
-            "application", "application", "the laurel application never became ready");
-        ret false;
-    }
-    if (!hosting.make(?boot.adapter, ?boot.demo.application)) {
-        schema.add_diagnostic(diagnostics, schema.ERROR, schema.SOURCE_ERROR,
-            "application", "application", "the laurel service adapter could not be bound");
-        ret false;
-    }
-    if (!service.make_applications(?boot.applications, ?boot.application_slots[0], 4)
-        || !service.register_application(?boot.applications, APPLICATION_NAME,
-        hosting.bound_handler(?boot.adapter), 65536)) {
-        schema.add_diagnostic(diagnostics, schema.ERROR, schema.SOURCE_ERROR,
-            "application", "application", "the laurel application could not be registered");
-        ret false;
-    }
-    ret true;
+    if (diagnostics.truncated) { print.eprintln("laurel-demo: diagnostics were truncated"); }
 }
 
 fun configuration_path(argc: i64, argv: **u8) str {
@@ -169,11 +155,81 @@ fun configuration_path(argc: i64, argv: **u8) str {
     ret "hedge.toml";
 }
 
-fun announce(boot: *Boot, graph: *schema.Graph) {
-    var text: [64]u8;
-    var i:    usize = 0;
+# where a reload's candidate comes from: the configuration file, sealed into
+# whichever of the two generation slots the active generation is not using. a
+# reload re-resolves `application = "site"` against the same registry, so the
+# running application serves the new generation as it served the old one.
+rec Source {
+    heap:        *allocator.Allocator;
+    path:        str;
+    resolver:    *loader.Resolver;
+    diagnostics: *schema.Diagnostics;
+    generations: *generation.Generation;
+    allocators:  *allocator.Allocator;
+    states:      *fixed.FixedState;
+}
+
+fun seal(source: *Source, target: usize, id: u64) *generation.Generation {
+    val loaded: res[str, filesystem.FsError] = filesystem.read_string(source.heap, source.path);
+    if (sel loaded.err) {
+        print.eprint("laurel-demo: cannot read configuration ");
+        print.eprintln(source.path);
+        ret nil;
+    }
+    val candidate: *generation.Generation = ?source.generations[target];
+    fixed.reset(?source.states[target]);
+    schema.reset_diagnostics(source.diagnostics);
+    if (!generation.make_candidate(candidate, id)) { ret nil; }
+    if (!loader.build(?candidate.graph, source.diagnostics, ?source.allocators[target],
+        source.path, loaded.ok, source.resolver, capabilities())) {
+        report_diagnostics(source.diagnostics);
+        print.eprintln("laurel-demo: the configuration is not valid");
+        ret nil;
+    }
+    if (!generation.seal(candidate, source.diagnostics, nil,
+        (0::usize)::generation.ConstructFun)) {
+        report_diagnostics(source.diagnostics);
+        print.eprintln("laurel-demo: the configuration generation did not seal");
+        ret nil;
+    }
+    ret candidate;
+}
+
+fun load(context: ptr, id: u64, active: *generation.Generation) *generation.Generation {
+    val source: *Source = context::*Source;
+    var target: usize   = 0;
+    if (active == ?source.generations[0]) { target = 1; }
+    ret seal(source, target, id);
+}
+
+# the application is assembled against the message limits hedge commits every
+# response under, started until its background services are ready, bound to
+# hedge's laurel adapter, and registered under the name the configuration uses
+fun register(boot: *Boot, graph: *schema.Graph, quiet: bool) str {
+    val limits: message.Limits = connection.message_limits(graph,
+        connection.config_from(graph));
+    if (!app.assemble(?boot.demo, limits, quiet)) {
+        ret "the laurel application could not be assembled";
+    }
+    boot.assembled = true;
+    if (!app.start(?boot.demo)) { ret "the laurel application never became ready"; }
+    if (!hosting.make(?boot.adapter, ?boot.demo.application)) {
+        ret "the laurel service adapter could not be bound";
+    }
+    if (!service.make_applications(?boot.applications, ?boot.application_slots[0], 1)
+        || !service.register_application(?boot.applications, APPLICATION_NAME,
+        hosting.bound_handler(?boot.adapter), APPLICATION_MEMORY_BYTES)) {
+        ret "the laurel application could not be registered";
+    }
+    ret nil;
+}
+
+fun announce(composed: *composition.Runtime, graph: *schema.Graph) {
+    val runtime: *serve.Runtime = ?composition.worker_at(composed, 0).serving;
+    var text:    [64]u8;
+    var i:       usize          = 0;
     for (i < graph.listener_count) {
-        val length: usize = serve.bound_endpoint_text(?boot.runtime, i, ?text[0], 64);
+        val length: usize = serve.bound_endpoint_text(runtime, i, ?text[0], 64);
         if (length != 0) {
             text[length] = 0;
             print.print("laurel-demo: listening on ");
@@ -181,6 +237,7 @@ fun announce(boot: *Boot, graph: *schema.Graph) {
         }
         i = i + 1;
     }
+    print.printlnf("laurel-demo: workers {}", composed.worker_count);
     print.println("laurel-demo: ready");
 }
 
@@ -191,17 +248,8 @@ fun main(argc: i64, argv: **u8) i64 {
         print.eprintln("laurel-demo: page allocator initialization failed");
         ret EXIT_RUNTIME;
     }
-    val path:   str                          = configuration_path(argc, argv);
-    val loaded: res[str, filesystem.FsError] = filesystem.read_string(?heap, path);
-    if (sel loaded.err) {
-        print.eprint("laurel-demo: cannot read configuration ");
-        print.eprintln(path);
-        ret EXIT_CONFIG;
-    }
-    val source: str = loaded.ok;
-
     val booted: res[*Boot, allocator.Error] = allocator.zallocate[Boot](?heap, 1);
-    val arena:  res[*u8, allocator.Error]   = allocator.allocate[u8](?heap, CONFIG_ARENA_BYTES);
+    val arena:  res[*u8, allocator.Error]   = allocator.allocate[u8](?heap, CONFIG_ARENA_BYTES * 2);
     if (sel booted.err) {
         print.eprintln("laurel-demo: startup allocation failed");
         ret EXIT_RUNTIME;
@@ -210,11 +258,12 @@ fun main(argc: i64, argv: **u8) i64 {
         print.eprintln("laurel-demo: startup allocation failed");
         ret EXIT_RUNTIME;
     }
-    val boot: *Boot = booted.ok;
-    boot.quiet = argc > 2 && argv[2] != nil && str_equals(argv[2]::str, "--quiet");
+    val boot:  *Boot = booted.ok;
+    val quiet: bool  = argc > 2 && argv[2] != nil && str_equals(argv[2]::str, "--quiet");
 
     # the csrf key ring holds secret key material, so it is owned here by typed
-    # pointer and never reaches the untyped context handed to `seal`
+    # pointer and never reaches the untyped state the workers share. main's
+    # frame outlives every worker, so the ring does too.
     var csrf_keys: [1]csrf.KeyGeneration;
     var csrf_ring: csrf.KeyRing;
     if (!app.init_csrf(?boot.demo, ?csrf_ring, ?csrf_keys[0])) {
@@ -222,95 +271,85 @@ fun main(argc: i64, argv: **u8) i64 {
         ret EXIT_RUNTIME;
     }
 
-    var config_allocator: allocator.Allocator;
-    var config_state:     fixed.FixedState;
-    fixed.make(?config_allocator, ?config_state, arena.ok,
+    # two of each, alternating. a reload builds its graph in the slot the active
+    # generation is not using.
+    fixed.make(?boot.allocators[0], ?boot.states[0], arena.ok, CONFIG_ARENA_BYTES);
+    fixed.make(?boot.allocators[1], ?boot.states[1], ?arena.ok[CONFIG_ARENA_BYTES],
         CONFIG_ARENA_BYTES);
-
-    var resolver: loader.Resolver = loader.Resolver{
+    boot.resolver = loader.Resolver{
         context:     nil,
         include:     (0::usize)::loader.ResolveFun,
         environment: resolve_environment,
     };
-    schema.reset_diagnostics(?boot.diagnostics);
-    if (!generation.make_candidate(?boot.candidate, 1)) {
-        print.eprintln("laurel-demo: generation initialization failed");
+    boot.source = Source{heap: ?heap, path: configuration_path(argc, argv),
+        resolver:    ?boot.resolver, diagnostics: ?boot.diagnostics,
+        generations: ?boot.generations[0], allocators: ?boot.allocators[0],
+        states:      ?boot.states[0]};
+    val candidate: *generation.Generation = seal(?boot.source, 0, 1);
+    if (candidate == nil) { ret EXIT_CONFIG; }
+
+    val refused: str = register(boot, ?candidate.graph, quiet);
+    if (refused != nil) {
+        print.eprint("laurel-demo: ");
+        print.eprintln(refused);
+        if (boot.assembled) { app.shutdown(?boot.demo); }
         ret EXIT_RUNTIME;
     }
-    if (!loader.build(?boot.candidate.graph, ?boot.diagnostics, ?config_allocator,
-        path, source, ?resolver, capabilities())) {
+
+    # the registry is handed to composition, which resolves every `laurel`
+    # service against it at startup and again at each reload. each worker gets
+    # the same registry, so the one application serves every worker at once.
+    var options: composition.Options = composition.default_options();
+    options.applications = ?boot.applications;
+    val workers: usize                   = spread.count(?candidate.graph);
+    val started: composition.StartReport = composition.start_process(?boot.composed,
+        ?heap, ?candidate.graph, candidate.id, ?boot.diagnostics, options, workers);
+    if (started.status != composition.START_OK) {
         report_diagnostics(?boot.diagnostics);
-        print.eprintln("laurel-demo: the configuration is not valid");
-        ret EXIT_CONFIG;
-    }
-    # sealing runs `construct`, which assembles and registers the application
-    if (!generation.seal(?boot.candidate, ?boot.diagnostics, boot::ptr, construct)) {
-        report_diagnostics(?boot.diagnostics);
-        print.eprintln("laurel-demo: the application generation did not seal");
-        ret EXIT_CONFIG;
-    }
-
-    # this binary drives hedge's serve loop directly rather than going through
-    # hedge.composition, so it installs the service factories it wants itself.
-    # only the ones a route actually names have to be present.
-    boot.resolver              = service.no_resolver();
-    boot.resolver.applications = ?boot.applications;
-    if (!static_files.make_registry(?boot.static_registry, ?boot.static_sites[0], 4,
-        boot.candidate.id, static_files.default_options())) {
-        print.eprintln("laurel-demo: the static file registry was refused");
+        print.eprint("laurel-demo: startup composition failed: ");
+        print.eprintln(started.detail);
+        app.shutdown(?boot.demo);
+        if (started.status == composition.START_CONFIG) { ret EXIT_CONFIG; }
         ret EXIT_RUNTIME;
     }
-    boot.resolver.static_files = service.Factory{
-        ctx: (?boot.static_registry)::ptr, build: static_files.factory
-    };
-    if (!plan.make_storage(?boot.storage,
-        ?boot.routes[0], MAX_ROUTES,
-        ?boot.segments[0], MAX_SEGMENTS,
-        ?boot.specs[0], MAX_ROUTES,
-        ?boot.entries[0], MAX_ROUTES,
-        ?boot.services[0], MAX_SERVICES,
-        ?boot.middlewares[0], MAX_MIDDLEWARE,
-        ?boot.text[0], PLAN_TEXT)) {
-        print.eprintln("laurel-demo: dispatch storage was refused");
+    if (!supervisor.make(?boot.supervising, ?boot.composed, ?heap, true)
+        || !supervisor.attach_reloads(?boot.supervising, candidate,
+        supervisor.Loader{context: (?boot.source)::ptr, load: load})) {
+        print.eprintln("laurel-demo: the supervisor could not take the process events");
+        var unwound: composition.StopReport;
+        composition.close(?boot.composed, ?unwound);
+        app.shutdown(?boot.demo);
         ret EXIT_RUNTIME;
     }
-    val compiled: plan.Report = plan.compile(?boot.plan, boot.candidate.id,
-        ?boot.candidate.graph, boot.storage, ?boot.resolver, nil);
-    if (compiled.status != plan.PLAN_OK) {
-        print.eprint("laurel-demo: dispatch plan failed: ");
-        print.eprintln(compiled.detail);
-        ret EXIT_CONFIG;
-    }
 
-    var quic_controls: quic_runtime.ControlView;
-    if (!serve.make(?boot.runtime, ?boot.plan, ?boot.candidate.graph, ?heap)) {
-        print.eprintln("laurel-demo: the serving runtime was refused");
-        ret EXIT_RUNTIME;
+    # every worker serves, or none does. `run` returns once a signal has asked
+    # the process to stop and every worker has drained.
+    val status:  composition.StartStatus = supervisor.start(?boot.supervising);
+    val serving: bool                    = status == composition.START_OK;
+    if (serving) {
+        announce(?boot.composed, ?candidate.graph);
+        supervisor.run(?boot.supervising);
     }
-    schema.reset_diagnostics(?boot.diagnostics);
-    if (!serve.start(?quic_controls, ?boot.runtime, boot.candidate.id,
-        ?boot.candidate.graph, ?boot.diagnostics)) {
-        report_diagnostics(?boot.diagnostics);
-        print.eprintln("laurel-demo: the listener did not start");
-        ret EXIT_RUNTIME;
-    }
-    announce(boot, ?boot.candidate.graph);
+    val stopped: composition.StopReport = supervisor.stop(?boot.supervising);
 
-    # hedge is driven, not threaded: every accepted connection, every parsed
-    # request, and every laurel handler call happens inside this poll.
-    for (true) {
-        serve.poll(?quic_controls, ?boot.runtime, serve.DEFAULT_POLL_MS);
-        if (serve.drained(?boot.runtime)) { brk; }
-    }
-
+    # the embedder owns the application's lifecycle: it drains and stops only
+    # after every worker that could enter it has stopped
     var code: i64 = EXIT_OK;
-    if (!serve.stop(?quic_controls, ?boot.runtime)) {
-        print.eprintln("laurel-demo: the serving runtime did not stop cleanly");
+    if (status == composition.START_CONFIG) { code = EXIT_CONFIG; }
+    or (!serving)                           { code = EXIT_RUNTIME; }
+    or (stopped.reason == lifecycle.DEADLINE) {
+        print.eprintln("laurel-demo: the drain deadline expired with connections still active");
+        code = EXIT_DRAIN_INCOMPLETE;
+    }
+    or (!stopped.stopped || stopped.reason == lifecycle.FAILED
+        || stopped.serve_failures != 0 || stopped.cleanup_failures != 0) {
+        print.eprintln("laurel-demo: the server did not stop cleanly");
         code = EXIT_RUNTIME;
     }
-    if (boot.assembled && !app.shutdown(?boot.demo)) {
+    if (!app.shutdown(?boot.demo)) {
         print.eprintln("laurel-demo: the application did not shut down cleanly");
-        code = EXIT_RUNTIME;
+        if (code == EXIT_OK) { code = EXIT_RUNTIME; }
     }
+    if (code == EXIT_OK) { print.println("laurel-demo: stopped"); }
     ret code;
 }
