@@ -492,6 +492,11 @@ fun map_dispatch(status: http_router.DispatchStatus) Dispatch {
             route_error(error.BAD_REQUEST, 400, "bad request",
             "request target cannot be routed", false));
     }
+    if (status == http_router.DISPATCH_TARGET) {
+        ret dispatch_result(DISPATCH_BAD_REQUEST,
+            route_error(error.BAD_REQUEST, 400, "malformed query",
+            "request target query is not well formed", false));
+    }
     ret dispatch_result(DISPATCH_REJECTED,
         route_error(error.INTERNAL, 500, "route dispatch failed",
         "route matcher rejected bounded dispatch state", false));

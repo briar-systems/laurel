@@ -1,0 +1,183 @@
+# query-string decoding over the shared urlencoded decoder
+
+use http.core.message;
+use laurel.context;
+use laurel.error;
+use laurel.form;
+use laurel.router;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_len;
+use std.types.view;
+
+fun refused(detail: str) form.Operation {
+    ret form.Operation{status: form.INVALID, token: 0,
+        form:      form.Form{fields: nil, len: 0, bytes: 0},
+        app_error: error.make(error.INTERNAL, 500, "internal server error",
+        detail, false)};
+}
+
+# decode one raw query, the bytes after '?' without it, into caller storage.
+# the result is a form.Form in wire order: repeated keys keep every value and
+# an empty value is an empty view, so form.find, form.find_next and form.typed
+# read it exactly as they read a decoded form body
+pub fun decode(decoder: *form.UrlEncoded, storage: form.Storage,
+    limits: form.Limits, raw: view.View) form.Operation {
+    if (raw.len != 0 && raw.data == nil) {
+        ret refused("query view is malformed");
+    }
+    if (!form.init_source(decoder, storage, limits, form.SOURCE_QUERY)) {
+        ret refused("query decoder storage was refused");
+    }
+    val fed: form.Operation = form.feed_urlencoded(decoder, raw.data, raw.len);
+    if (fed.status != form.MORE) { ret fed; }
+    ret form.finish_urlencoded(decoder);
+}
+
+# decode the query of the request a handler is serving
+pub fun parse(request_context: *context.Context, decoder: *form.UrlEncoded,
+    storage: form.Storage, limits: form.Limits) form.Operation {
+    val request: *message.Request = context.request(request_context);
+    if (request == nil) { ret refused("request is unavailable"); }
+    ret decode(decoder, storage, limits, request.target.query);
+}
+
+fun text(value: str) view.View {
+    ret view.view(value, str_len(value));
+}
+
+fun equal(actual: view.View, expected: str) bool {
+    val len: usize = str_len(expected);
+    if (actual.len != len) { ret false; }
+    var i: usize = 0;
+    for (i < len) {
+        if (actual.data[i] != expected[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+rec Fixture {
+    fields:  [8]form.Field;
+    bytes:   [128]u8;
+    decoder: form.UrlEncoded;
+}
+
+fun storage(fixture: *Fixture) form.Storage {
+    ret form.Storage{fields: ?fixture.fields[0], field_capacity: 8,
+        bytes: ?fixture.bytes[0], byte_capacity: 128};
+}
+
+fun limits() form.Limits {
+    ret form.Limits{max_bytes: 96, max_fields: 8, max_name_bytes: 16,
+        max_value_bytes: 32, max_temporary_bytes: 128};
+}
+
+fun run(fixture: *Fixture, raw: str) form.Operation {
+    ret decode(?fixture.decoder, storage(fixture), limits(), text(raw));
+}
+
+test "laurel.query: parameters decode with repeats and empty values" {
+    var fixture: Fixture;
+    val done:    form.Operation = run(?fixture,
+        "q=&category=web+tools&tag=x&tag=y%2Fz&flag&sort=%E2%9C%93");
+    if (done.status != form.COMPLETE || done.form.len != 6) { ret 1; }
+    val q: *form.Field = form.find(?done.form, text("q"));
+    if (q == nil || q.value.len != 0) { ret 2; }
+    val category: *form.Field = form.find(?done.form, text("category"));
+    if (category == nil || !equal(category.value, "web tools")) { ret 3; }
+    val first: *form.Field = form.find(?done.form, text("tag"));
+    if (first == nil || !equal(first.value, "x")) { ret 4; }
+    val second: *form.Field = form.find_next(?done.form, first);
+    if (second == nil || !equal(second.value, "y/z")
+        || form.find_next(?done.form, second) != nil) { ret 5; }
+    val flag: *form.Field = form.find(?done.form, text("flag"));
+    if (flag == nil || flag.value.len != 0) { ret 6; }
+    val sort: *form.Field = form.find(?done.form, text("sort"));
+    if (sort == nil || sort.value.len != 3 || sort.value.data[0] != 0xe2
+        || form.find(?done.form, text("missing")) != nil
+        || form.find(?done.form, text("Tag")) != nil) { ret 7; }
+    ret 0;
+}
+
+test "laurel.query: an empty query has no parameters" {
+    var fixture: Fixture;
+    val done:    form.Operation = decode(?fixture.decoder, storage(?fixture),
+        limits(), view.view(nil, 0));
+    if (done.status != form.COMPLETE || done.form.len != 0
+        || form.find(?done.form, text("q")) != nil) { ret 1; }
+    ret 0;
+}
+
+test "laurel.query: typed access goes through the route decoders" {
+    var fixture: Fixture;
+    val done:    form.Operation = run(?fixture, "limit=25&page=x&neg=-3&on=true");
+    if (done.status != form.COMPLETE) { ret 1; }
+    val limit: res[opt[router.Value], error.AppError] = form.typed(
+        form.find(?done.form, text("limit")), router.u64_decoder(), nil);
+    if (sel limit.err)                                              { ret 2; }
+    if (!(sel limit.ok.some && limit.ok.some.unsigned_value == 25)) { ret 3; }
+    val page: res[opt[router.Value], error.AppError] = form.typed(
+        form.find(?done.form, text("page")), router.u64_decoder(), nil);
+    if (!(sel page.err && (page.err.status == 400
+        && page.err.kind == error.BAD_REQUEST))) { ret 4; }
+    val neg: res[opt[router.Value], error.AppError] = form.typed(
+        form.find(?done.form, text("neg")), router.i64_decoder(), nil);
+    if (sel neg.err)                                          { ret 5; }
+    if (!(sel neg.ok.some && neg.ok.some.signed_value == -3)) { ret 6; }
+    val on: res[opt[router.Value], error.AppError] = form.typed(
+        form.find(?done.form, text("on")), router.bool_decoder(), nil);
+    if (sel on.err)                                    { ret 7; }
+    if (!(sel on.ok.some && on.ok.some.boolean_value)) { ret 8; }
+    val absent: res[opt[router.Value], error.AppError] = form.typed(
+        form.find(?done.form, text("offset")), router.u64_decoder(), nil);
+    if (sel absent.err)        { ret 9; }
+    if (!(sel absent.ok.none)) { ret 10; }
+    ret 0;
+}
+
+fun rejected(raw: str, status: form.Status, code: u16) bool {
+    var fixture: Fixture;
+    val done:    form.Operation = run(?fixture, raw);
+    ret done.status == status && done.form.len == 0 && done.form.fields == nil
+        && done.app_error.status == code
+        && fixture.decoder.state == form.FAILED_STATE;
+}
+
+test "laurel.query: malformed and oversized queries have defined failures" {
+    if (!rejected("q=%zz", form.MALFORMED, 400)
+        || !rejected("q=%4", form.MALFORMED, 400)
+        || !rejected("q=%", form.MALFORMED, 400)
+        || !rejected("q=%ff", form.MALFORMED, 400)
+        || !rejected("q=%00", form.MALFORMED, 400)
+        || !rejected("=x", form.MALFORMED, 400)
+        || !rejected("a=1&&b=2", form.MALFORMED, 400)
+        || !rejected("a=1&", form.MALFORMED, 400)
+        || !rejected("name_is_far_too_long=1", form.LIMIT, 400)
+        || !rejected("a=1&b=2&c=3&d=4&e=5&f=6&g=7&h=8&i=9", form.LIMIT, 400)) {
+        ret 1;
+    }
+    var fixture: Fixture;
+    val done:    form.Operation = run(?fixture, "q=%zz");
+    if (!equal(error.public_text(?done.app_error), "malformed query")) {
+        ret 2;
+    }
+    val big: form.Operation = run(?fixture, "name_is_far_too_long=1");
+    if (!equal(error.public_text(?big.app_error), "query is too large")
+        || big.app_error.kind != error.BAD_REQUEST) { ret 3; }
+    ret 0;
+}
+
+test "laurel.query: one decoder serves query after query" {
+    var fixture: Fixture;
+    if (run(?fixture, "q=%zz").status != form.MALFORMED) { ret 1; }
+    val done: form.Operation = run(?fixture, "q=ok");
+    if (done.status != form.COMPLETE
+        || !equal(form.find(?done.form, text("q")).value, "ok")) { ret 2; }
+    ret 0;
+}

@@ -19,6 +19,8 @@ use laurel.middleware;
 use laurel.multipart;
 use laurel.observability;
 use laurel.provider;
+use laurel.query;
+use laurel.raw;
 use laurel.realtime;
 use laurel.render;
 use laurel.router;
@@ -78,12 +80,15 @@ pub rec Storage {
 
 # deadline is an absolute monotonic instant, and none leaves the request unbounded
 pub rec Request {
-    version:    message.Version;
-    secure:     bool;
-    method:     method.Method;
-    target:     target.Target;
-    fields:     field.Fields;
-    body:       view.View;
+    version: message.Version;
+    secure:  bool;
+    method:  method.Method;
+    target:  target.Target;
+    fields:  field.Fields;
+    body:    view.View;
+    # the body declares no length, as h1 chunked coding and h2 or h3 data
+    # without content-length reach the application
+    chunked:    bool;
     fragment:   usize;
     suspend:    bool;
     request_id: view.View;
@@ -225,8 +230,10 @@ fun body_read(ctx: ptr, output: *u8, capacity: usize,
         ret body.failed("invalid harness request body", body.REUSE_FORBIDDEN);
     }
     if (state.offset == state.content.len) { ret body.complete(body.REUSE_ALLOWED); }
+    # more body than the reader may take, which the reader reports as its limit
+    if (capacity == 0) { ret body.data(0); }
     if (state.suspend && !state.suspended) {
-        if (capacity == 0 || state.token == 18446744073709551615) {
+        if (state.token == 18446744073709551615) {
             ret body.failed("harness request body cannot suspend", body.REUSE_FORBIDDEN);
         }
         state.suspended        = true;
@@ -241,7 +248,6 @@ fun body_read(ctx: ptr, output: *u8, capacity: usize,
     var count: usize = state.content.len - state.offset;
     if (state.fragment != 0 && count > state.fragment) { count = state.fragment; }
     if (count > capacity)                              { count = capacity; }
-    if (count == 0)                                    { ret body.failed("empty harness body read", body.REUSE_FORBIDDEN); }
     var i: usize = 0;
     for (i < count) {
         output[i] = state.content.data[state.offset + i];
@@ -320,8 +326,8 @@ pub fun stop(harness: *Harness) lifecycle.Transition {
 pub fun request(version: message.Version, request_method: method.Method,
     request_target: target.Target, fields: field.Fields, request_id: view.View) Request {
     ret Request{version: version, secure: true, method: request_method,
-        target:   request_target, fields: fields, body: view.View{data: nil, len: 0},
-        fragment: 0, suspend: false, request_id: request_id, deadline: opt[time.Instant].none{}};
+        target:  request_target, fields: fields, body: view.View{data: nil, len: 0},
+        chunked: false, fragment: 0, suspend: false, request_id: request_id, deadline: opt[time.Instant].none{}};
 }
 
 fun empty_response() Response {
@@ -426,9 +432,11 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
     harness.request_body.pending_output   = nil;
     harness.request_body.pending_capacity = 0;
     harness.request_body.token            = 0;
-    harness.request_body.reader           = body.init_reader(?harness.request_body, body_read,
+    var declared: u64 = one.body.len::u64;
+    if (one.chunked) { declared = 0; }
+    harness.request_body.reader = body.init_reader(?harness.request_body, body_read,
         body_finish, body_complete, body_release, body.OWNER_APPLICATION, generation,
-        true, one.body.len::u64, harness.limits.request_body, nil, ?harness.scope);
+        !one.chunked, declared, harness.limits.request_body, nil, ?harness.scope);
     val metadata: message.Metadata = message.Metadata{version: one.version,
         secure:   one.secure, early_data: false, peer: message.unspecified_endpoint(),
         local:    message.unspecified_endpoint(), received_at: time.Time{sec: 1, nsec: 0},
@@ -656,6 +664,13 @@ rec HandlerState {
     session_saves:  usize;
     session_loads:  usize;
     header_calls:   usize;
+    query_fields:   [8]form.Field;
+    query_bytes:    [128]u8;
+    query_decoder:  form.UrlEncoded;
+    raw_body:       raw.Body;
+    raw_buffer:     [32]u8;
+    reply:          [128]u8;
+    reply_len:      usize;
 }
 
 fun internal_error(detail: str) error.AppError {
@@ -881,6 +896,110 @@ fun stream_show(ctx: ptr, request_context: *context.Context,
         ret handler.fail(internal_error("stream installation failed"));
     }
     ret handler.respond();
+}
+
+fun reply_append(state: *HandlerState, value: view.View) bool {
+    if (value.len > 128 - state.reply_len) { ret false; }
+    var i: usize = 0;
+    for (i < value.len) {
+        state.reply[state.reply_len + i] = value.data[i];
+        i                                = i + 1;
+    }
+    state.reply_len = state.reply_len + value.len;
+    ret true;
+}
+
+fun respond_reply(state: *HandlerState,
+    request_context: *context.Context) handler.Result {
+    if (state.reply_len > 64) {
+        ret handler.fail(internal_error("reply does not fit"));
+    }
+    var i: usize = 0;
+    for (i < state.reply_len) {
+        state.text[i] = state.reply[i];
+        i             = i + 1;
+    }
+    state.text_len = state.reply_len;
+    ret respond_text(state, request_context);
+}
+
+# GET /search: every value of a repeated key, empty values, and a typed one
+fun search_show(ctx: ptr, request_context: *context.Context,
+    slot: *ptr) handler.Result {
+    val state: *HandlerState = ctx::*HandlerState;
+    if (state == nil) { ret handler.fail(internal_error("state is missing")); }
+    val parsed: form.Operation = query.parse(request_context,
+        ?state.query_decoder, form.Storage{fields: ?state.query_fields[0],
+        field_capacity: 8, bytes: ?state.query_bytes[0], byte_capacity: 128},
+        form.Limits{max_bytes: 96, max_fields: 8, max_name_bytes: 16,
+        max_value_bytes: 32, max_temporary_bytes: 128});
+    if (parsed.status != form.COMPLETE) { ret handler.fail(parsed.app_error); }
+    val params: *form.Form                             = ?parsed.form;
+    val limit:  res[opt[router.Value], error.AppError] = form.typed(
+        form.find(params, view.view("limit", 5)), router.u64_decoder(),
+        request_context.alloc);
+    if (sel limit.err) { ret handler.fail(limit.err); }
+    state.reply_len = 0;
+    val q: *form.Field = form.find(params, view.view("q", 1));
+    if (q == nil) { reply_append(state, view.view("q:none", 6)); }
+    or {
+        reply_append(state, view.view("q:", 2));
+        reply_append(state, q.value);
+    }
+    reply_append(state, view.view(";tag:", 5));
+    var tag: *form.Field = form.find(params, view.view("tag", 3));
+    for (tag != nil) {
+        reply_append(state, tag.value);
+        reply_append(state, view.view(",", 1));
+        tag = form.find_next(params, tag);
+    }
+    reply_append(state, view.view(";limit:", 7));
+    if (sel limit.ok.some) {
+        var digits: [20]u8;
+        val len:    usize = write_u64(limit.ok.some.unsigned_value,
+            ?digits[0], 20);
+        reply_append(state, view.view(?digits[0], len));
+    }
+    ret respond_reply(state, request_context);
+}
+
+# POST /hooks: the exact body bytes, as a signature check would see them
+fun hook_drive(state: *HandlerState, request_context: *context.Context,
+    current: raw.Operation) handler.Result {
+    if (current.status == raw.PENDING)  { ret handler.suspend(current.token); }
+    if (current.status != raw.COMPLETE) { ret handler.fail(current.app_error); }
+    state.reply_len = 0;
+    if (!reply_append(state, current.bytes)) {
+        ret handler.fail(internal_error("hook body does not fit"));
+    }
+    ret respond_reply(state, request_context);
+}
+
+fun hook_create(ctx: ptr, request_context: *context.Context,
+    slot: *ptr) handler.Result {
+    val state:   *HandlerState    = ctx::*HandlerState;
+    val request: *message.Request = context.request(request_context);
+    if (state == nil || request == nil) {
+        ret handler.fail(internal_error("request is unavailable"));
+    }
+    @slot = ctx;
+    var fresh: raw.Body;
+    state.raw_body     = fresh;
+    state.body_entries = state.body_entries + 1;
+    if (!raw.init(?state.raw_body, request.body, ?state.raw_buffer[0], 32)) {
+        ret handler.fail(internal_error("raw body was refused"));
+    }
+    ret hook_drive(state, request_context, raw.poll(?state.raw_body));
+}
+
+fun hook_resume(ctx: ptr, request_context: *context.Context, slot: ptr,
+    settlement: handler.Settlement, token: u64) handler.Result {
+    val state: *HandlerState = slot::*HandlerState;
+    if (state == nil) { ret handler.fail(internal_error("state is missing")); }
+    state.body_resumes = state.body_resumes + 1;
+    if (settlement == handler.SETTLE_ABANDONED) { ret handler.respond(); }
+    ret hook_drive(state, request_context,
+        raw.complete(?state.raw_body, token));
 }
 
 fun conflict_handler(ctx: ptr, request_context: *context.Context,
@@ -1112,9 +1231,9 @@ fun sink_error(ctx: ptr, event: *observability.RequestEvent,
 
 rec AppFixture {
     parameters:     [1]router.Parameter;
-    routes:         [6]router.Route;
-    specifications: [6]http_router.Route;
-    compiled:       [6]http_router.CompiledRoute;
+    routes:         [8]router.Route;
+    specifications: [8]http_router.Route;
+    compiled:       [8]http_router.CompiledRoute;
     segments:       [20]http_router.Segment;
     matcher:        router.Router;
     middlewares:    [3]middleware.Middleware;
@@ -1247,12 +1366,20 @@ fun init_application(fixture: *AppFixture, limits: message.Limits) bool {
         router.exact_method(method.from_kind(method.GET)),
         router.path(view.view("/login", 6)), "session.login", nil, 0,
         session_login, nil, (?fixture.handlers)::ptr);
+    fixture.routes[6] = test_route(
+        router.exact_method(method.from_kind(method.GET)),
+        router.path(view.view("/search", 7)), "search.show", nil, 0,
+        search_show, nil, (?fixture.handlers)::ptr);
+    fixture.routes[7] = test_route(
+        router.exact_method(method.from_kind(method.POST)),
+        router.path(view.view("/hooks", 6)), "hooks.create", nil, 0,
+        hook_create, hook_resume, (?fixture.handlers)::ptr);
     val route_storage: router.Storage = router.Storage{
-        specifications:  ?fixture.specifications[0], specification_cap: 6,
-        compiled_routes: ?fixture.compiled[0], compiled_route_cap: 6,
+        specifications:  ?fixture.specifications[0], specification_cap: 8,
+        compiled_routes: ?fixture.compiled[0], compiled_route_cap: 8,
         segments:        ?fixture.segments[0], segment_cap: 20
     };
-    if (router.compile(?fixture.matcher, ?fixture.routes[0], 6, route_storage,
+    if (router.compile(?fixture.matcher, ?fixture.routes[0], 8, route_storage,
         router.limits_default()).status != router.COMPILE_OK) { ret false; }
     fixture.middlewares[0] = middleware.Middleware{ctx: (?fixture.handlers)::ptr,
         before: headers_before, resume: nil, after: headers_after};
@@ -1670,6 +1797,199 @@ test "laurel.testing: the security corpus runs against every http version" {
     if (drain(?harness, opt[time.Instant].none{}).status != lifecycle.TRANSITION_OK
         || stop(?harness).status != lifecycle.TRANSITION_OK
         || !release_application(?fixture)) { ret 8; }
+    ret 0;
+}
+
+fun query_request(version: message.Version, fields: field.Fields,
+    raw_target: str, id: view.View) Request {
+    val raw_len: usize = str_len(raw_target);
+    var mark:    usize = 0;
+    for (mark < raw_len && raw_target[mark] != '?') { mark = mark + 1; }
+    var query_view: view.View = view.view(nil, 0);
+    if (mark + 1 < raw_len) {
+        query_view = view.view(?raw_target[mark + 1], raw_len - mark - 1);
+    }
+    ret request(version, method.from_kind(method.GET),
+        target.origin(view.view(raw_target, raw_len),
+        view.view(raw_target, mark), query_view), fields, id);
+}
+
+fun hook_request(version: message.Version, fields: field.Fields,
+    payload: view.View, chunked: bool, fragment: usize, suspend: bool) Request {
+    var built: Request = post_request(fields, view.view("/hooks", 6),
+        view.view("hook-1", 6), payload, fragment, suspend);
+    built.version = version;
+    built.chunked = chunked;
+    ret built;
+}
+
+fun body_is(result: *Result, expected: str) bool {
+    ret same(response_body(result), view.view(expected, str_len(expected)));
+}
+
+test "laurel.testing: query parameters decode on every http version" {
+    val limits:  message.Limits = message.limits_default();
+    var fixture: AppFixture;
+    var storage: HarnessStorage;
+    var harness: Harness;
+    if (!init_application(?fixture, limits)) { ret 1; }
+    if (!init(?harness, ?fixture.application, ?fixture.matcher,
+        harness_storage(?storage), limits, DEFAULT_BODY_POLLS)
+        || start(?harness).status != lifecycle.TRANSITION_OK
+        || ready(?harness).status != lifecycle.TRANSITION_OK) { ret 2; }
+    var items:  [4]field.Field;
+    var fields: field.Fields;
+    if (!host_fields(?items[0], limits, ?fields)) { ret 3; }
+    var versions: [4]message.Version;
+    versions[0] = message.version_h1(1, 0);
+    versions[1] = message.version_h1(1, 1);
+    versions[2] = message.version_h2();
+    versions[3] = message.version_h3();
+    var result: Result;
+    var v:      usize = 0;
+    for (v < 4) {
+        val code: i32 = 10 * (v::i32 + 1);
+        if (invoke(?harness, query_request(versions[v], fields,
+            "/search?q=&tag=web+tools&tag=a%2Fb&limit=25",
+            view.view("query-1", 7)), ?result) != INVOKE_OK
+            || result.response.status != 200
+            || !body_is(?result, "q:;tag:web tools,a/b,;limit:25")) {
+            ret code + 1;
+        }
+        if (invoke(?harness, query_request(versions[v], fields, "/search",
+            view.view("query-2", 7)), ?result) != INVOKE_OK
+            || !body_is(?result, "q:none;tag:;limit:")) { ret code + 2; }
+        if (invoke(?harness, query_request(versions[v], fields,
+            "/search?q=%zz", view.view("query-3", 7)), ?result) != INVOKE_ERROR
+            || result.response.status != 400
+            || result.app_error.kind != error.BAD_REQUEST
+            || !body_is(?result, "malformed query")) { ret code + 3; }
+        if (invoke(?harness, query_request(versions[v], fields,
+            "/search?q=%e2%9c", view.view("query-4", 7)), ?result)
+            != INVOKE_ERROR || result.response.status != 400) {
+            ret code + 4;
+        }
+        if (invoke(?harness, query_request(versions[v], fields,
+            "/search?limit=many", view.view("query-5", 7)), ?result)
+            != INVOKE_ERROR || result.response.status != 400
+            || result.app_error.kind != error.BAD_REQUEST) { ret code + 5; }
+        if (invoke(?harness, query_request(versions[v], fields,
+            "/search?q=0123456789012345678901234567890123456789",
+            view.view("query-6", 7)), ?result) != INVOKE_ERROR
+            || result.response.status != 400
+            || result.app_error.kind != error.BAD_REQUEST
+            || !body_is(?result, "query is too large")) { ret code + 6; }
+        v = v + 1;
+    }
+    if (drain(?harness, opt[time.Instant].none{}).status != lifecycle.TRANSITION_OK
+        || stop(?harness).status != lifecycle.TRANSITION_OK
+        || !release_application(?fixture)) { ret 4; }
+    ret 0;
+}
+
+# a webhook signature covers the bytes on the wire, so the echo must match
+# them exactly whatever the framing, fragmentation or suspension
+test "laurel.testing: raw bodies are exact and bounded on every http version" {
+    val limits:  message.Limits = message.limits_default();
+    var fixture: AppFixture;
+    var storage: HarnessStorage;
+    var harness: Harness;
+    if (!init_application(?fixture, limits)) { ret 1; }
+    if (!init(?harness, ?fixture.application, ?fixture.matcher,
+        harness_storage(?storage), limits, DEFAULT_BODY_POLLS)
+        || start(?harness).status != lifecycle.TRANSITION_OK
+        || ready(?harness).status != lifecycle.TRANSITION_OK) { ret 2; }
+    var items:  [4]field.Field;
+    var fields: field.Fields;
+    if (!host_fields(?items[0], limits, ?fields)) { ret 3; }
+    var versions: [4]message.Version;
+    versions[0] = message.version_h1(1, 0);
+    versions[1] = message.version_h1(1, 1);
+    versions[2] = message.version_h2();
+    versions[3] = message.version_h3();
+    val payload: str   = "a=%41+b&sig=x y";
+    var full:    [32]u8;
+    var over:    [33]u8;
+    var i:       usize = 0;
+    for (i < 33) {
+        if (i < 32) { full[i] = 'f'; }
+        over[i] = 'o';
+        i       = i + 1;
+    }
+    var result: Result;
+    var run:    i32   = 0;
+    var v:      usize = 0;
+    for (v < 4) {
+        var framing: usize = 0;
+        for (framing < 2) {
+            # http/1.0 has no chunked coding; h2 and h3 may omit the length
+            val chunked: bool = framing == 1;
+            if (chunked && v == 0) {
+                framing = framing + 1;
+                cnt;
+            }
+            var shape: usize = 0;
+            for (shape < 3) {
+                run = run + 1;
+                var fragment: usize = 0;
+                var suspend:  bool  = false;
+                if (shape == 1) { fragment = 3; }
+                if (shape == 2) {
+                    fragment = 4;
+                    suspend  = true;
+                }
+                val code: i32 = 10 * run;
+                if (invoke(?harness, hook_request(versions[v], fields,
+                    view.view(payload, 15), chunked, fragment, suspend),
+                    ?result) != INVOKE_OK || result.response.status != 200
+                    || !body_is(?result, payload)
+                    || result.response.bytes_in != 15
+                    || (suspend && result.suspensions == 0)) { ret code + 1; }
+                if (invoke(?harness, hook_request(versions[v], fields,
+                    view.view(?full[0], 32), chunked, fragment, suspend),
+                    ?result) != INVOKE_OK
+                    || !same(response_body(?result), view.view(?full[0], 32))) {
+                    ret code + 2;
+                }
+                if (invoke(?harness, hook_request(versions[v], fields,
+                    view.view(?over[0], 33), chunked, fragment, suspend),
+                    ?result) != INVOKE_ERROR || result.response.status != 413
+                    || result.app_error.kind != error.TOO_LARGE
+                    || !body_is(?result, "request body is too large")) {
+                    ret code + 3;
+                }
+                if (invoke(?harness, hook_request(versions[v], fields,
+                    view.view(nil, 0), chunked, fragment, false), ?result)
+                    != INVOKE_OK || result.response.status != 200
+                    || response_body(?result).len != 0) { ret code + 4; }
+                shape = shape + 1;
+            }
+            framing = framing + 1;
+        }
+        v = v + 1;
+    }
+    if (run != 21 || fixture.handlers.body_entries != 84) { ret 4; }
+    # a host bound tighter than the handler's is still a limit, not a failure.
+    # a declared length past it never reaches the application, so only a body
+    # without one can meet it
+    var tight:         message.Limits = limits;
+    var tight_harness: Harness;
+    tight.request_body.max_bytes = 20;
+    if (!init(?tight_harness, ?fixture.application, ?fixture.matcher,
+        harness_storage(?storage), tight, DEFAULT_BODY_POLLS)) { ret 5; }
+    v = 1;
+    for (v < 4) {
+        if (invoke(?tight_harness, hook_request(versions[v], fields,
+            view.view(?over[0], 25), true, 4, true), ?result)
+            != INVOKE_ERROR || result.response.status != 413
+            || !body_is(?result, "request body is too large")) {
+            ret 230 + v::i32;
+        }
+        v = v + 1;
+    }
+    if (drain(?harness, opt[time.Instant].none{}).status != lifecycle.TRANSITION_OK
+        || stop(?harness).status != lifecycle.TRANSITION_OK
+        || !release_application(?fixture)) { ret 5; }
     ret 0;
 }
 

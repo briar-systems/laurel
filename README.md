@@ -24,6 +24,8 @@ The framework has no global application registry, hidden allocator, mandatory te
   never reaches a public type, authentication ownership, and redirect policy.
 - `form`, `multipart`, and `upload` keep bounded parsing, request-wide upload
   transactions, and streamed file storage separate.
+- `query` decodes a request's query string with the form decoder, and `raw`
+  reads a whole request body as its exact bytes under a caller limit.
 - `render` converts a model into a bounded response body, with explicit media
   type, charset, and escaping, and no coupling to a template engine.
 - `observability` reports one start and one terminal request event through
@@ -56,8 +58,10 @@ side by side on performance and on ergonomics, including where Laurel loses.
 
 ## Local dependencies
 
-The manifest uses pinned Git tags for `mach-std` v0.34.0, `mach-http` v0.7.5,
-and `mach-crypto` v0.8.1. Build output uses Mach's default `out/` directory.
+The manifest selects releases by version range, with the resolved release
+committed as a gitlink under `dep/`, and builds with mach 5.12 or later:
+`mach-std` `^8.0` (v8.0.0), `mach-http` `^0.20` (v0.20.0) and `mach-crypto`
+`^0.22` (v0.22.0). Build output uses Mach's default `out/` directory.
 
 ## Status
 

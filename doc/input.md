@@ -1,4 +1,4 @@
-# Forms and uploads
+# Forms, queries, bodies and uploads
 
 Laurel decodes form bodies incrementally into caller-owned storage. The form,
 multipart, upload, and HTTP body layers remain separate so each owner has one
@@ -37,6 +37,73 @@ callback once the host has done the I/O, where it calls `form.complete_body`
 with the settled token and carries on. It never spins on the read, so a body
 larger than any buffer costs no more than the parser's own storage. See
 `doc/middleware.md` for the suspension contract.
+
+## Looking up fields
+
+A decoded `form.Form` keeps every field in wire order. A repeated key keeps
+every value, and a field with no `=` or nothing after it has an empty value,
+which is different from an absent field.
+
+- `form.find(values, name)` returns the first field with that exact decoded
+  name, or nil when it is absent.
+- `form.find_next(values, field)` returns the next field with the same name,
+  so a loop from `find` visits every value of a repeated key in order.
+- `form.typed(field, decoder, allocator)` runs one field's value through a
+  `router.Decoder`, the same decoders that type path parameters. It returns
+  `ok` with `none` for an absent field, `ok` with the decoded `router.Value`,
+  or the decoder's error when it refuses the value.
+
+## Query strings
+
+`query.decode(decoder, storage, limits, raw)` decodes the bytes after `?` with
+the same `form.UrlEncoded` decoder, the same limits and the same result. There
+is one decoder: percent escapes, `+` as a space, strict UTF-8, repeated keys and
+empty values behave exactly as they do in a form body, and `form.find`,
+`form.find_next` and `form.typed` read the result. `query.parse(context, ...)`
+decodes the query of the request a handler is serving. An empty or absent
+query is a complete result with no fields.
+
+The decoder is initialized with `form.SOURCE_QUERY` through `form.init_source`,
+which only changes what a client is told. A bad percent escape, a truncated
+escape, invalid UTF-8, a null byte, an empty name, an empty field such as `&&`
+and a trailing `&` are `form.MALFORMED` with status 400 and `malformed query`.
+A query past any of the limits is `form.LIMIT` with status 400 and `query is
+too large`. It is a bad request rather than 413, since a query is part of the
+request target and not content, and the error kinds map 413 to content only. A decoder refused for its storage is `form.INVALID` with status 500.
+A failure publishes no fields, and the same decoder can decode the next query.
+
+## Raw bodies
+
+`raw.Body` reads a whole request body into one caller buffer and returns the
+exact bytes, for work such as checking a webhook signature over what was sent.
+Nothing is decoded. `raw.init(body, reader, buffer, limit)` takes a reader no
+one has read from, so the bytes start at the first byte of the body, and a
+buffer of at least `limit` bytes. The buffer, the reader and the `raw.Body`
+must not overlap.
+
+`raw.poll` reads until the body ends, fails or waits on the host. It never
+returns a partial result:
+
+- `raw.PENDING` names the token to wait on. The handler returns
+  `handler.suspend(operation.token)` and calls `raw.complete` with that token
+  when it resumes.
+- `raw.COMPLETE` carries `bytes`, a view of the whole body in the buffer.
+- `raw.LIMIT` means the body is longer than `limit`, with status 413 and
+  `request body is too large`. A declared length over the limit is refused
+  before any byte is read. A body without a declared length is read up to the
+  limit and then one byte further, so a body of exactly `limit` bytes fits and
+  one byte more does not. A host body limit reached first is the same failure.
+  The body is refused through its reader, which may itself wait on the host.
+- `raw.MALFORMED` means a body with a declared length ended short of it or ran
+  past it, with status 400 and `malformed request body`.
+- `raw.CANCELLED` means the request was cancelled or timed out, with 499.
+- `raw.FAILED` means the transport failed in any other way, including a chunked
+  body cut off mid-stream, with status 500.
+
+Every failure zeroes what was read, so the buffer never holds part of a body.
+The reader sees the same `http.core.body` contract for HTTP/1.1 with a
+`content-length` or chunked coding, and for HTTP/2 and HTTP/3 with or without
+a `content-length`, so `raw.Body` behaves the same on each.
 
 ## Multipart forms
 
