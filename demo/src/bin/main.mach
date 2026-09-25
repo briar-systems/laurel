@@ -31,6 +31,8 @@ use std.allocator.page;
 use std.filesystem;
 use std.print;
 use std.process.env;
+# the process start code, which calls main
+use std.runtime;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
