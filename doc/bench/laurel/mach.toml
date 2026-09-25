@@ -1,6 +1,6 @@
 [project]
 id = "bench"
-mach = "^5.3"
+mach = "^5.12"
 version = "0.1.0"
 src = "src"
 out = "out/{target.name}/{profile.name}"
@@ -44,18 +44,21 @@ targets = ["*"]
 link = []
 need = []
 
+# std is declared by ref so the root's selection overrides hedge's exact
+# `=8.0.0`. mach resolves one std for the whole build.
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-ref = "tag/v5.4.0"
+ref = "tag/v8.1.0"
 
+# the laurel this benchmark lives in, so it measures the working tree. the path
+# overrides the laurel release hedge itself selects.
 [dep.laurel]
-git = "https://github.com/briar-systems/laurel"
-ref = "tag/v0.14.0"
+path = "../../../"
 
 [dep.hedge]
 git = "https://github.com/briar-systems/hedge"
-ref = "tag/v0.6.0"
+ref = "commit/3c0325522eb60a1405bfb41d8dcc8cd4d4b882c3"
 
 [dep.http]
 git = "https://github.com/briar-systems/mach-http"
-ref = "tag/v0.13.2"
+ref = "tag/v0.19.0"

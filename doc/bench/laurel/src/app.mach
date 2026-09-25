@@ -22,6 +22,7 @@ use laurel.router;
 use laurel.security;
 use std.chrono.duration;
 use std.chrono.time;
+use std.sync.atomic;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -61,26 +62,27 @@ pub rec Application {
 
 # the observer is counted, never printed: a benchmark that logs per request
 # measures the logger
+# every hedge worker calls into the one application, so the counts are atomic
 pub rec Counters {
-    started:  u64;
-    finished: u64;
-    failed:   u64;
+    started:  i64;
+    finished: i64;
+    failed:   i64;
 }
 
 fun observer_start(ctx: ptr, event: *observability.RequestEvent) {
     val state: *Counters = ctx::*Counters;
-    state.started = state.started + 1;
+    atomic.fetch_add(?state.started, 1);
 }
 
 fun observer_finish(ctx: ptr, event: *observability.RequestEvent) {
     val state: *Counters = ctx::*Counters;
-    state.finished = state.finished + 1;
+    atomic.fetch_add(?state.finished, 1);
 }
 
 fun observer_error(ctx: ptr, event: *observability.RequestEvent,
     failure: error.AppError) {
     val state: *Counters = ctx::*Counters;
-    state.failed = state.failed + 1;
+    atomic.fetch_add(?state.failed, 1);
 }
 
 fun service_start(ctx: ptr) res[lifecycle.CallbackStatus, view.View] {
