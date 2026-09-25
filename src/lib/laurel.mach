@@ -12,6 +12,8 @@ fwd laurel.session;
 fwd laurel.security;
 fwd laurel.security.csrf;
 fwd laurel.form;
+fwd laurel.query;
+fwd laurel.raw;
 fwd laurel.multipart;
 fwd laurel.upload;
 fwd laurel.render;

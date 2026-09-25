@@ -3,6 +3,8 @@
 use http.core.body;
 use http.core.field;
 use laurel.error;
+use laurel.router;
+use A: std.allocator;
 use std.chrono.time;
 use std.sync.cancel;
 use std.text.utf8;
@@ -10,6 +12,7 @@ use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.option.opt;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_len;
@@ -25,6 +28,7 @@ fun transition_ok(outcome: cancel.Transition) bool {
 
 pub def Status: u8;
 pub def State:  u8;
+pub def Source: u8;
 
 pub val MORE:      Status = 1;
 pub val COMPLETE:  Status = 2;
@@ -39,6 +43,10 @@ pub val UNINITIALIZED:  State = 0;
 pub val ACTIVE:         State = 1;
 pub val COMPLETE_STATE: State = 2;
 pub val FAILED_STATE:   State = 3;
+
+# where the encoded bytes came from, which names the failure a client sees
+pub val SOURCE_BODY:  Source = 1;
+pub val SOURCE_QUERY: Source = 2;
 
 pub rec Limits {
     max_bytes:           usize;
@@ -76,6 +84,7 @@ pub rec Operation {
 pub rec UrlEncoded {
     storage:         Storage;
     limits:          Limits;
+    source:          Source;
     state:           State;
     total_bytes:     usize;
     stored_bytes:    usize;
@@ -228,6 +237,25 @@ fun failed(decoder: *UrlEncoded, status: Status, kind: error.Kind,
         app_error(kind, status_code, public_text, detail));
 }
 
+fun malformed(decoder: *UrlEncoded, detail: str) Operation {
+    if (decoder.source == SOURCE_QUERY) {
+        ret failed(decoder, MALFORMED, error.BAD_REQUEST, 400,
+            "malformed query", detail);
+    }
+    ret failed(decoder, MALFORMED, error.BAD_REQUEST, 400, "malformed form",
+        detail);
+}
+
+# a query past its bounds is not content, so it is refused as a bad request
+fun too_large(decoder: *UrlEncoded, detail: str) Operation {
+    if (decoder.source == SOURCE_QUERY) {
+        ret failed(decoder, LIMIT, error.BAD_REQUEST, 400,
+            "query is too large", detail);
+    }
+    ret failed(decoder, LIMIT, error.TOO_LARGE, 413, "form is too large",
+        detail);
+}
+
 pub fun default_limits() Limits {
     ret Limits{max_bytes: 1048576, max_fields: 256,
         max_name_bytes:      256, max_value_bytes: 65536,
@@ -236,13 +264,21 @@ pub fun default_limits() Limits {
 
 pub fun init_urlencoded(decoder: *UrlEncoded, storage: Storage,
     limits: Limits) bool {
+    ret init_source(decoder, storage, limits, SOURCE_BODY);
+}
+
+# the one urlencoded decoder, for a form body or a query string
+pub fun init_source(decoder: *UrlEncoded, storage: Storage, limits: Limits,
+    source: Source) bool {
     if (!limits_valid(limits) || !storage_valid(decoder, storage, limits) ||
+        (source != SOURCE_BODY && source != SOURCE_QUERY) ||
         decoder.state == ACTIVE) { ret false; }
     clear_fields(storage, storage.field_capacity);
     clear_bytes(storage, storage.byte_capacity);
     clear(decoder::*u8, $size_of(UrlEncoded));
     decoder.storage         = storage;
     decoder.limits          = limits;
+    decoder.source          = source;
     decoder.state           = ACTIVE;
     decoder.total_bytes     = 0;
     decoder.stored_bytes    = 0;
@@ -289,6 +325,7 @@ fun decoder_valid(decoder: *UrlEncoded) bool {
         !range_valid(decoder::*u8, $size_of(UrlEncoded)) ||
         !limits_valid(decoder.limits) ||
         !storage_valid(decoder, decoder.storage, decoder.limits) ||
+        (decoder.source != SOURCE_BODY && decoder.source != SOURCE_QUERY) ||
         decoder.state < ACTIVE || decoder.state > FAILED_STATE ||
         decoder.total_bytes > decoder.limits.max_bytes ||
         decoder.stored_bytes > decoder.limits.max_temporary_bytes ||
@@ -401,8 +438,7 @@ pub fun feed_urlencoded(decoder: *UrlEncoded, input: *u8,
             "internal server error", "invalid form decoder ownership");
     }
     if (len > decoder.limits.max_bytes - decoder.total_bytes) {
-        ret failed(decoder, LIMIT, error.TOO_LARGE, 413,
-            "form is too large", "urlencoded body exceeded total limit");
+        ret too_large(decoder, "urlencoded input exceeded total limit");
     }
     decoder.total_bytes = decoder.total_bytes + len;
     var i: usize = 0;
@@ -415,8 +451,7 @@ pub fun feed_urlencoded(decoder: *UrlEncoded, input: *u8,
         if (decoder.percent_phase == 1) {
             var nibble: u8 = 0;
             if (!hex(current, ?nibble)) {
-                ret failed(decoder, MALFORMED, error.BAD_REQUEST, 400,
-                    "malformed form", "invalid percent escape");
+                ret malformed(decoder, "invalid percent escape");
             }
             decoder.percent_high  = nibble << 4;
             decoder.percent_phase = 2;
@@ -425,8 +460,7 @@ pub fun feed_urlencoded(decoder: *UrlEncoded, input: *u8,
         or (decoder.percent_phase == 2) {
             var nibble: u8 = 0;
             if (!hex(current, ?nibble)) {
-                ret failed(decoder, MALFORMED, error.BAD_REQUEST, 400,
-                    "malformed form", "invalid percent escape");
+                ret malformed(decoder, "invalid percent escape");
             }
             decoded               = decoder.percent_high | nibble;
             decoder.percent_phase = 0;
@@ -440,19 +474,16 @@ pub fun feed_urlencoded(decoder: *UrlEncoded, input: *u8,
             val status: Status = finish_field(decoder);
             if (status != MORE) {
                 if (status == LIMIT) {
-                    ret failed(decoder, LIMIT, error.TOO_LARGE, 413,
-                        "form is too large", "form field limit reached");
+                    ret too_large(decoder, "form field limit reached");
                 }
-                ret failed(decoder, MALFORMED, error.BAD_REQUEST, 400,
-                    "malformed form", "empty form field");
+                ret malformed(decoder, "empty form field");
             }
             decoder.after_separator = true;
             append                  = false;
         }
         or (current == '=' && !decoder.in_value) {
             if (decoder.name_len == 0) {
-                ret failed(decoder, MALFORMED, error.BAD_REQUEST, 400,
-                    "malformed form", "empty form field name");
+                ret malformed(decoder, "empty form field name");
             }
             decoder.in_value = true;
             append           = false;
@@ -463,12 +494,10 @@ pub fun feed_urlencoded(decoder: *UrlEncoded, input: *u8,
         if (append) {
             val status: Status = append_byte(decoder, decoded);
             if (status == LIMIT) {
-                ret failed(decoder, LIMIT, error.TOO_LARGE, 413,
-                    "form is too large", "form field storage limit reached");
+                ret too_large(decoder, "form field storage limit reached");
             }
             if (status != MORE) {
-                ret failed(decoder, MALFORMED, error.BAD_REQUEST, 400,
-                    "malformed form", "form contains a null byte");
+                ret malformed(decoder, "form contains a null byte");
             }
         }
         i = i + 1;
@@ -481,18 +510,15 @@ pub fun finish_urlencoded(decoder: *UrlEncoded) Operation {
         ret invalid_operation("invalid form decoder state");
     }
     if (decoder.percent_phase != 0 || decoder.after_separator) {
-        ret failed(decoder, MALFORMED, error.BAD_REQUEST, 400,
-            "malformed form", "truncated urlencoded field");
+        ret malformed(decoder, "truncated urlencoded field");
     }
     if (decoder.field_active) {
         val status: Status = finish_field(decoder);
         if (status == LIMIT) {
-            ret failed(decoder, LIMIT, error.TOO_LARGE, 413,
-                "form is too large", "form field limit reached");
+            ret too_large(decoder, "form field limit reached");
         }
         if (status != MORE) {
-            ret failed(decoder, MALFORMED, error.BAD_REQUEST, 400,
-                "malformed form", "empty form field");
+            ret malformed(decoder, "empty form field");
         }
     }
     decoder.state = COMPLETE_STATE;
@@ -504,6 +530,69 @@ pub fun result(decoder: *UrlEncoded) Operation {
         ret invalid_operation("form result is not complete");
     }
     ret operation(decoder, COMPLETE, error.no_error());
+}
+
+fun same_name(item: *Field, name: view.View) bool {
+    if (item.name.len != name.len) { ret false; }
+    var i: usize = 0;
+    for (i < name.len) {
+        if (item.name.data[i] != name.data[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun search(values: *Form, name: view.View, start: usize) *Field {
+    if (values == nil || name.len == 0 || name.data == nil ||
+        (values.len != 0 && values.fields == nil)) { ret nil; }
+    var i: usize = start;
+    for (i < values.len) {
+        if (same_name(?values.fields[i], name)) { ret ?values.fields[i]; }
+        i = i + 1;
+    }
+    ret nil;
+}
+
+# the first field with this exact decoded name, in wire order, or nil when absent
+pub fun find(values: *Form, name: view.View) *Field {
+    ret search(values, name, 0);
+}
+
+# the next field sharing the name of after, which walks every value of a repeated key
+pub fun find_next(values: *Form, after: *Field) *Field {
+    if (values == nil || after == nil || values.len == 0 ||
+        values.fields == nil ||
+        after::usize < values.fields::usize) { ret nil; }
+    val offset: usize = after::usize - values.fields::usize;
+    if (offset % $size_of(Field) != 0) { ret nil; }
+    val index: usize = offset / $size_of(Field);
+    if (index >= values.len) { ret nil; }
+    ret search(values, after.name, index + 1);
+}
+
+# one field's value through a route parameter decoder: none when the field is
+# absent, the decoder's error when it refuses the value
+pub fun typed(item: *Field, decoder: router.Decoder,
+    allocator: *A.Allocator) res[opt[router.Value], error.AppError] {
+    if (item == nil) {
+        ret res[opt[router.Value], error.AppError].ok{
+            opt[router.Value].none{}
+        };
+    }
+    if (decoder.call == nil) {
+        ret res[opt[router.Value], error.AppError].err{app_error(
+            error.INTERNAL, 500, "internal server error",
+            "parameter decoder is missing")};
+    }
+    var value:   router.Value;
+    val decoded: res[u8, error.AppError] = decoder.call(decoder.ctx, allocator,
+        item.value, ?value);
+    if (sel decoded.err) {
+        ret res[opt[router.Value], error.AppError].err{decoded.err};
+    }
+    ret res[opt[router.Value], error.AppError].ok{
+        opt[router.Value].some{value}
+    };
 }
 
 fun parser_components_valid(owner: *u8, decoder: *UrlEncoded,
@@ -558,6 +647,7 @@ pub fun init_body(parser: *BodyParser, decoder: *UrlEncoded,
         parser.active ||
         !parser_components_valid(parser::*u8, decoder, reader, read_buffer,
         read_capacity) || decoder.state != ACTIVE ||
+        decoder.source != SOURCE_BODY ||
         (reader.has_length &&
         reader.declared_length > decoder.limits.max_bytes::u64)) {
         ret false;

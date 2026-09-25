@@ -1,0 +1,613 @@
+# bounded exact reads of a whole request body
+
+use http.core.body;
+use http.core.field;
+use laurel.error;
+use std.chrono.time;
+use std.memory;
+use std.sync.cancel;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.option.opt;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.view;
+
+pub def Status: u8;
+
+pub val PENDING:   Status = 1;
+pub val COMPLETE:  Status = 2;
+pub val LIMIT:     Status = 3;
+pub val MALFORMED: Status = 4;
+pub val CANCELLED: Status = 5;
+pub val FAILED:    Status = 6;
+pub val INVALID:   Status = 7;
+
+# bytes is the whole body only when status is COMPLETE, and empty otherwise
+pub rec Operation {
+    status:    Status;
+    token:     u64;
+    bytes:     view.View;
+    app_error: error.AppError;
+}
+
+# one body read into caller storage. buffer holds limit bytes, and the body
+# fits only when it is at most limit bytes long
+pub rec Body {
+    reader:         *body.Reader;
+    buffer:         *u8;
+    limit:          usize;
+    len:            usize;
+    probe:          [1]u8;
+    probing:        bool;
+    pending_token:  u64;
+    pending_settle: bool;
+    failure:        Status;
+    started:        bool;
+    active:         bool;
+}
+
+fun disjoint(first: *u8, first_len: usize, second: *u8,
+    second_len: usize) bool {
+    ret !memory.ranges_overlap(first, first_len, second, second_len);
+}
+
+fun no_bytes() view.View {
+    ret view.view(nil, 0);
+}
+
+fun result(status: Status, app_error: error.AppError) Operation {
+    ret Operation{status: status, token: 0, bytes: no_bytes(),
+        app_error: app_error};
+}
+
+fun pending(token: u64) Operation {
+    ret Operation{status: PENDING, token: token, bytes: no_bytes(),
+        app_error: error.no_error()};
+}
+
+fun invalid(detail: str) Operation {
+    ret result(INVALID, error.make(error.INTERNAL, 500,
+        "internal server error", detail, false));
+}
+
+fun failure(status: Status, detail: str) Operation {
+    if (status == LIMIT) {
+        ret result(LIMIT, error.make(error.TOO_LARGE, 413,
+            "request body is too large", detail, false));
+    }
+    if (status == MALFORMED) {
+        ret result(MALFORMED, error.make(error.BAD_REQUEST, 400,
+            "malformed request body", detail, false));
+    }
+    if (status == CANCELLED) {
+        ret result(CANCELLED, error.make(error.CANCELLED, 499,
+            "request cancelled", detail, false));
+    }
+    if (status == FAILED) {
+        ret result(FAILED, error.make(error.INTERNAL, 500,
+            "internal server error", detail, false));
+    }
+    ret invalid(detail);
+}
+
+# a failed read never leaves part of the body behind in caller storage
+fun discard(raw: *Body) {
+    if (raw.buffer != nil) { memory.raw_zero(raw.buffer::ptr, raw.len); }
+    raw.len     = 0;
+    raw.probing = false;
+    raw.active  = false;
+}
+
+fun fail(raw: *Body, status: Status, detail: str) Operation {
+    discard(raw);
+    ret failure(status, detail);
+}
+
+fun reader_ready(reader: *body.Reader) bool {
+    ret reader != nil && memory.range_valid(reader::*u8, $size_of(body.Reader))
+        && body.validate_reader(reader, reader.limits, reader.generation)
+        && !body.reader_terminal_state(reader) && reader.state == body.OPEN
+        && reader.pending_kind == body.OP_NONE && reader.transferred == 0
+        && reader.chunks == 0;
+}
+
+# reader must be untouched, so the bytes returned are the body from its first
+# byte. buffer, the reader and raw must not overlap
+pub fun init(raw: *Body, reader: *body.Reader, buffer: *u8,
+    limit: usize) bool {
+    if (raw == nil || !memory.range_valid(raw::*u8, $size_of(Body))
+        || raw.active || !reader_ready(reader)
+        || (limit != 0 && buffer == nil)
+        || !memory.range_valid(buffer, limit)
+        || !disjoint(raw::*u8, $size_of(Body), reader::*u8,
+        $size_of(body.Reader))
+        || !disjoint(buffer, limit, raw::*u8, $size_of(Body))
+        || !disjoint(buffer, limit, reader::*u8, $size_of(body.Reader))) {
+        ret false;
+    }
+    @raw = Body{reader: reader, buffer: buffer, limit: limit, len: 0,
+        probe:          [1]u8{0}, probing: false, pending_token: 0,
+        pending_settle: false, failure: 0, started: false, active: true};
+    ret true;
+}
+
+# the body is refused through the reader, which may itself wait on the host
+fun refuse(raw: *Body, status: Status) Operation {
+    raw.failure = status;
+    val progress: body.Progress = body.reject(raw.reader);
+    if (progress.status == body.PENDING) {
+        raw.pending_token  = progress.token;
+        raw.pending_settle = true;
+        ret pending(progress.token);
+    }
+    ret refused(raw);
+}
+
+fun refused(raw: *Body) Operation {
+    raw.pending_token  = 0;
+    raw.pending_settle = false;
+    if (!body.reader_terminal_state(raw.reader)) {
+        ret fail(raw, INVALID, "request body refusal did not settle");
+    }
+    val settled: body.Progress = body.reader_result(raw.reader);
+    if (settled.status == body.CANCELLED || settled.status == body.TIMED_OUT) {
+        ret fail(raw, CANCELLED, "request body was cancelled");
+    }
+    ret fail(raw, raw.failure, "request body exceeded the raw body limit");
+}
+
+fun terminal(raw: *Body, progress: body.Progress) Operation {
+    if (progress.status == body.COMPLETE) {
+        raw.active  = false;
+        raw.probing = false;
+        var bytes: view.View = no_bytes();
+        if (raw.len != 0) { bytes = view.view(raw.buffer, raw.len); }
+        ret Operation{status: COMPLETE, token: 0, bytes: bytes,
+            app_error: error.no_error()};
+    }
+    if (progress.status == body.CANCELLED || progress.status == body.TIMED_OUT) {
+        ret fail(raw, CANCELLED, "request body was cancelled");
+    }
+    if (progress.status == body.LIMIT_REACHED) {
+        ret fail(raw, LIMIT, "request body limit was reached");
+    }
+    # a sized body that ends short of or past its declared length was framed
+    # wrong by the client; any other failure belongs to the transport
+    if (progress.status == body.ERROR && raw.reader.has_length
+        && raw.reader.transferred != raw.reader.declared_length) {
+        ret fail(raw, MALFORMED, "request body did not match its declared length");
+    }
+    if (progress.status == body.ERROR || progress.status == body.REJECTED) {
+        ret fail(raw, FAILED, "request body provider failed");
+    }
+    ret fail(raw, INVALID, "request body returned invalid progress");
+}
+
+# reads until the body ends, fails, or waits on the host
+fun drive(raw: *Body, first: body.Progress) Operation {
+    var progress: body.Progress = first;
+    for {
+        if (progress.status == body.PENDING) {
+            raw.pending_token  = progress.token;
+            raw.pending_settle = false;
+            ret pending(progress.token);
+        }
+        if (progress.status != body.DATA) { ret terminal(raw, progress); }
+        if (raw.probing) {
+            if (progress.count != 0) { ret refuse(raw, LIMIT); }
+        }
+        or { raw.len = raw.len + progress.count; }
+        if (raw.len > raw.limit) {
+            ret fail(raw, INVALID, "request body overran its buffer");
+        }
+        # a full buffer reads one more byte, which only the end of the body
+        # may answer
+        if (raw.len == raw.limit) {
+            raw.probing = true;
+            progress    = body.read(raw.reader, ?raw.probe[0], 1);
+        }
+        or {
+            progress = body.read(raw.reader, ?raw.buffer[raw.len],
+                raw.limit - raw.len);
+        }
+    }
+}
+
+# the first read of the body. a Body reads one body once, so a second poll
+# is refused and a PENDING operation continues only through complete
+pub fun poll(raw: *Body) Operation {
+    if (raw == nil || !raw.active || raw.pending_token != 0 || raw.started) {
+        ret invalid("raw body is not ready to poll");
+    }
+    raw.started = true;
+    if (raw.reader.has_length
+        && raw.reader.declared_length > raw.limit::u64) {
+        ret refuse(raw, LIMIT);
+    }
+    ret drive(raw, body.data(0));
+}
+
+# continue after the host settles the token a PENDING operation named
+pub fun complete(raw: *Body, token: u64) Operation {
+    if (raw == nil || !raw.active || token == 0
+        || token != raw.pending_token) {
+        ret invalid("raw body completion token is invalid");
+    }
+    val progress: body.Progress = body.complete_reader(raw.reader, token);
+    if (progress.status == body.PENDING) {
+        raw.pending_token = progress.token;
+        ret pending(progress.token);
+    }
+    raw.pending_token = 0;
+    if (raw.pending_settle) { ret refused(raw); }
+    ret drive(raw, progress);
+}
+
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}
+
+fun transition_ok(outcome: cancel.Transition) bool {
+    ret (sel outcome.ok) && outcome.ok;
+}
+
+rec TestBody {
+    input:            view.View;
+    offset:           usize;
+    fragment:         usize;
+    pend_reads:       bool;
+    pend_finish:      bool;
+    fail_at:          usize;
+    suspended:        bool;
+    pending_output:   *u8;
+    pending_capacity: usize;
+    pending_mode:     body.Mode;
+    finish_calls:     usize;
+    release_calls:    usize;
+}
+
+fun test_state(input: str, len: usize) TestBody {
+    var state: TestBody;
+    state.input = view.view(input, len);
+    ret state;
+}
+
+fun test_emit(state: *TestBody, output: *u8, capacity: usize) body.Progress {
+    if (state.fail_at != 0 && state.offset >= state.fail_at) {
+        ret body.failed("test transport reset", body.REUSE_FORBIDDEN);
+    }
+    if (state.offset == state.input.len) {
+        ret body.complete(body.REUSE_ALLOWED);
+    }
+    # more body than the reader may take answers as a real host does
+    if (capacity == 0) { ret body.data(0); }
+    if (output == nil) {
+        ret body.failed("test body output is empty", body.REUSE_FORBIDDEN);
+    }
+    var count: usize = state.input.len - state.offset;
+    if (count > capacity) { count = capacity; }
+    if (state.fragment != 0 && count > state.fragment) {
+        count = state.fragment;
+    }
+    var i: usize = 0;
+    for (i < count) {
+        output[i] = state.input.data[state.offset + i];
+        i         = i + 1;
+    }
+    state.offset = state.offset + count;
+    ret body.data(count);
+}
+
+# every other read waits on the host when pend_reads is set
+fun test_read(ctx: ptr, output: *u8, capacity: usize,
+    trailers: *field.Fields) body.Progress {
+    val state: *TestBody = ctx::*TestBody;
+    if (state.pend_reads && !state.suspended) {
+        state.suspended        = true;
+        state.pending_output   = output;
+        state.pending_capacity = capacity;
+        ret body.pending(41);
+    }
+    state.suspended = false;
+    ret test_emit(state, output, capacity);
+}
+
+fun finished(mode: body.Mode) body.Progress {
+    if (mode == body.REJECT)  { ret body.rejected(body.REUSE_FORBIDDEN); }
+    if (mode == body.TIMEOUT) { ret body.timed_out(body.REUSE_FORBIDDEN); }
+    if (mode == body.CANCEL)  { ret body.cancelled(body.REUSE_FORBIDDEN); }
+    ret body.complete(body.REUSE_ALLOWED);
+}
+
+fun test_finish(ctx: ptr, mode: body.Mode,
+    trailers: *field.Fields) body.Progress {
+    val state: *TestBody = ctx::*TestBody;
+    state.finish_calls = state.finish_calls + 1;
+    if (state.pend_finish) {
+        state.pend_finish  = false;
+        state.pending_mode = mode;
+        ret body.pending(42);
+    }
+    ret finished(mode);
+}
+
+fun test_complete(ctx: ptr, token: u64,
+    trailers: *field.Fields) body.Progress {
+    val state: *TestBody = ctx::*TestBody;
+    if (token == 41) {
+        ret test_emit(state, state.pending_output, state.pending_capacity);
+    }
+    if (token == 42) { ret finished(state.pending_mode); }
+    ret body.failed("invalid test body completion", body.REUSE_FORBIDDEN);
+}
+
+fun test_release(ctx: ptr) {
+    val state: *TestBody = ctx::*TestBody;
+    state.release_calls = state.release_calls + 1;
+}
+
+fun test_reader(state: *TestBody, scope: *cancel.Scope,
+    trailers: *field.Fields, sized: bool, declared: u64,
+    max_bytes: u64) body.Reader {
+    ret body.init_reader(state::ptr, test_read, test_finish, test_complete,
+        test_release, body.OWNER_APPLICATION, 7, sized, declared,
+        body.limits(max_bytes, 64, 64), trailers, scope);
+}
+
+fun same(actual: view.View, expected: str, len: usize) bool {
+    if (actual.len != len) { ret false; }
+    var i: usize = 0;
+    for (i < len) {
+        if (actual.data[i] != expected[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+# drives one read to its end the way a host resumes a suspended handler
+fun run(raw: *Body, turns: *usize) Operation {
+    var current: Operation = poll(raw);
+    @turns = 0;
+    for (current.status == PENDING && @turns < 64) {
+        @turns  = @turns + 1;
+        current = complete(raw, current.token);
+    }
+    ret current;
+}
+
+fun zeroed(buffer: *u8, len: usize) bool {
+    var i: usize = 0;
+    for (i < len) {
+        if (buffer[i] != 0) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+rec Fixture {
+    scope:    cancel.Scope;
+    trailers: field.Fields;
+    reader:   body.Reader;
+    raw:      Body;
+    buffer:   [32]u8;
+}
+
+fun open(fixture: *Fixture, state: *TestBody, sized: bool, declared: u64,
+    max_bytes: u64, limit: usize) bool {
+    if (!operation_ok(cancel.make_root(?fixture.scope,
+        opt[time.Instant].none{}))) { ret false; }
+    fixture.trailers = field.init(nil, 0, field.limits(0, 0, 0, 0));
+    fixture.reader   = test_reader(state, ?fixture.scope, ?fixture.trailers,
+        sized, declared, max_bytes);
+    ret init(?fixture.raw, ?fixture.reader, ?fixture.buffer[0], limit);
+}
+
+fun close(fixture: *Fixture) bool {
+    ret operation_ok(cancel.destroy(?fixture.scope));
+}
+
+# a signature is computed over these bytes, so nothing in them is decoded
+val PAYLOAD:     str   = "a=%41+b&sig=x y";
+val PAYLOAD_LEN: usize = 15;
+
+test "laurel.raw: exact bytes survive fragmentation and suspension" {
+    var fragment: usize = 1;
+    for (fragment <= 4) {
+        var framing: usize = 0;
+        for (framing < 2) {
+            var pend: usize = 0;
+            for (pend < 2) {
+                var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
+                var fixture: Fixture;
+                state.fragment   = fragment;
+                state.pend_reads = pend == 1;
+                if (!open(?fixture, ?state, framing == 1, PAYLOAD_LEN::u64,
+                    1024, 32)) { ret 1; }
+                var turns: usize     = 0;
+                val done:  Operation = run(?fixture.raw, ?turns);
+                if (done.status != COMPLETE || done.token != 0
+                    || !same(done.bytes, PAYLOAD, PAYLOAD_LEN)
+                    || done.bytes.data != ?fixture.buffer[0]
+                    || (pend == 1) != (turns != 0)
+                    || state.release_calls != 1 || state.finish_calls != 0
+                    || body.reader_result(?fixture.reader).status
+                    != body.COMPLETE || !close(?fixture)) {
+                    ret 2;
+                }
+                pend = pend + 1;
+            }
+            framing = framing + 1;
+        }
+        fragment = fragment + 1;
+    }
+    ret 0;
+}
+
+test "laurel.raw: a body exactly at the limit fits in either framing" {
+    var framing: usize = 0;
+    for (framing < 2) {
+        var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
+        var fixture: Fixture;
+        state.fragment = 4;
+        if (!open(?fixture, ?state, framing == 1, PAYLOAD_LEN::u64, 1024,
+            PAYLOAD_LEN)) { ret 1; }
+        var turns: usize     = 0;
+        val done:  Operation = run(?fixture.raw, ?turns);
+        if (done.status != COMPLETE || !same(done.bytes, PAYLOAD, PAYLOAD_LEN)
+            || !close(?fixture)) { ret 2; }
+        framing = framing + 1;
+    }
+    ret 0;
+}
+
+test "laurel.raw: an unsized body one byte over the limit is refused" {
+    var pend: usize = 0;
+    for (pend < 2) {
+        var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
+        var fixture: Fixture;
+        state.fragment    = 3;
+        state.pend_reads  = pend == 1;
+        state.pend_finish = pend == 1;
+        if (!open(?fixture, ?state, false, 0, 1024, PAYLOAD_LEN - 1)) {
+            ret 1;
+        }
+        var turns: usize     = 0;
+        val done:  Operation = run(?fixture.raw, ?turns);
+        if (done.status != LIMIT || done.bytes.len != 0
+            || done.bytes.data != nil
+            || done.app_error.kind != error.TOO_LARGE
+            || done.app_error.status != 413
+            || !zeroed(?fixture.buffer[0], 32)
+            || state.finish_calls != 1 || state.release_calls != 1
+            || body.reader_result(?fixture.reader).status != body.REJECTED
+            || fixture.raw.active || !close(?fixture)) { ret 2 + pend::i32; }
+        pend = pend + 1;
+    }
+    ret 0;
+}
+
+test "laurel.raw: a declared length over the limit is refused unread" {
+    var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
+    var fixture: Fixture;
+    if (!open(?fixture, ?state, true, PAYLOAD_LEN::u64, 1024, 8)) { ret 1; }
+    val done: Operation = poll(?fixture.raw);
+    if (done.status != LIMIT || state.offset != 0 || state.finish_calls != 1
+        || done.app_error.status != 413 || !close(?fixture)) { ret 2; }
+    ret 0;
+}
+
+test "laurel.raw: the host body limit is a limit too" {
+    var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
+    var fixture: Fixture;
+    if (!open(?fixture, ?state, false, 0, 6, 32)) { ret 1; }
+    var turns: usize     = 0;
+    val done:  Operation = run(?fixture.raw, ?turns);
+    if (done.status != LIMIT || done.app_error.status != 413
+        || !zeroed(?fixture.buffer[0], 32) || !close(?fixture)) { ret 2; }
+    ret 0;
+}
+
+test "laurel.raw: a sized body that ends early is malformed" {
+    var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
+    var fixture: Fixture;
+    state.fragment = 4;
+    if (!open(?fixture, ?state, true, 20, 1024, 32)) { ret 1; }
+    var turns: usize     = 0;
+    val done:  Operation = run(?fixture.raw, ?turns);
+    if (done.status != MALFORMED || done.bytes.len != 0
+        || done.app_error.kind != error.BAD_REQUEST
+        || done.app_error.status != 400
+        || !zeroed(?fixture.buffer[0], 32) || state.release_calls != 1
+        || !close(?fixture)) { ret 2; }
+    ret 0;
+}
+
+test "laurel.raw: a transport failure mid-body fails without bytes" {
+    var framing: usize = 0;
+    for (framing < 2) {
+        var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
+        var fixture: Fixture;
+        state.fragment = 4;
+        state.fail_at  = 8;
+        if (!open(?fixture, ?state, framing == 1, PAYLOAD_LEN::u64, 1024,
+            32)) { ret 1; }
+        var turns: usize     = 0;
+        val done:  Operation = run(?fixture.raw, ?turns);
+        # a sized body cut short by the transport is still short of its length
+        var expected: Status = FAILED;
+        if (framing == 1) { expected = MALFORMED; }
+        if (done.status != expected || done.bytes.len != 0
+            || !zeroed(?fixture.buffer[0], 32) || !close(?fixture)) {
+            ret 2 + framing::i32;
+        }
+        framing = framing + 1;
+    }
+    ret 0;
+}
+
+test "laurel.raw: a cancelled request reads nothing" {
+    var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
+    var fixture: Fixture;
+    if (!open(?fixture, ?state, false, 0, 1024, 32)
+        || !transition_ok(cancel.cancel(?fixture.scope))) { ret 1; }
+    val done: Operation = poll(?fixture.raw);
+    if (done.status != CANCELLED || done.app_error.kind != error.CANCELLED
+        || state.offset != 0 || state.release_calls != 1
+        || !close(?fixture)) { ret 2; }
+    ret 0;
+}
+
+test "laurel.raw: an empty body completes with no storage" {
+    var framing: usize = 0;
+    for (framing < 2) {
+        var state:   TestBody = test_state("", 0);
+        var fixture: Fixture;
+        if (!operation_ok(cancel.make_root(?fixture.scope,
+            opt[time.Instant].none{}))) { ret 1; }
+        fixture.trailers = field.init(nil, 0, field.limits(0, 0, 0, 0));
+        fixture.reader   = test_reader(?state, ?fixture.scope,
+            ?fixture.trailers, framing == 1, 0, 1024);
+        if (!init(?fixture.raw, ?fixture.reader, nil, 0)) { ret 2; }
+        val done: Operation = poll(?fixture.raw);
+        if (done.status != COMPLETE || done.bytes.len != 0
+            || done.bytes.data != nil || !close(?fixture)) { ret 3; }
+        framing = framing + 1;
+    }
+    ret 0;
+}
+
+test "laurel.raw: misuse is refused without touching the body" {
+    var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
+    var fixture: Fixture;
+    state.pend_reads = true;
+    if (!open(?fixture, ?state, false, 0, 1024, 32))                 { ret 1; }
+    if (init(?fixture.raw, ?fixture.reader, ?fixture.buffer[0], 32)) { ret 2; }
+    val waiting: Operation = poll(?fixture.raw);
+    if (waiting.status != PENDING || waiting.token == 0
+        || poll(?fixture.raw).status != INVALID
+        || complete(?fixture.raw, waiting.token + 1).status != INVALID) {
+        ret 3;
+    }
+    var other: Body;
+    if (init(?other, ?fixture.reader, ?fixture.buffer[0], 32)) { ret 4; }
+    var turns:   usize     = 0;
+    var current: Operation = complete(?fixture.raw, waiting.token);
+    for (current.status == PENDING && turns < 64) {
+        turns   = turns + 1;
+        current = complete(?fixture.raw, current.token);
+    }
+    if (current.status != COMPLETE || poll(?fixture.raw).status != INVALID
+        || !close(?fixture)) { ret 5; }
+    var fresh_state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
+    var fresh_fixture: Fixture;
+    var fresh:         Body;
+    if (!open(?fresh_fixture, ?fresh_state, false, 0, 1024, 0)
+        || init(?fresh, ?fresh_fixture.reader,
+        (?fresh_fixture.reader)::*u8, 8)
+        || init(?fresh, ?fresh_fixture.reader, (?fresh)::*u8, 8)
+        || init(?fresh, ?fresh_fixture.reader, nil, 8)
+        || !close(?fresh_fixture)) { ret 6; }
+    ret 0;
+}
