@@ -14,15 +14,20 @@ use laurel.cookie;
 use laurel.error;
 use laurel.form;
 use laurel.handler;
+use laurel.query;
+use laurel.raw;
 use laurel.render;
+use laurel.router;
 use laurel.security.csrf;
 use laurel.session;
 use A: std.allocator;
 use std.chrono.time;
+use std.sync.atomic;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.char.char;
+use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
@@ -38,11 +43,28 @@ pub val SESSION_LIFETIME_S: i64   = 3600;
 val     FORM_FIELDS:        usize = 4;
 val     FORM_BYTES:         usize = 512;
 val     FORM_READ_BYTES:    usize = 256;
+val     QUERY_FIELDS:       usize = 4;
+val     QUERY_BYTES:        usize = 256;
+val     SEARCH_LIMIT:       u64   = 10;
+pub val RAW_LIMIT:          usize = 4096;
 
-# every handler reaches its shared, application-lifetime state through this
+# the media type a response carries
+pub def Media: u8;
+
+val MEDIA_JSON:  Media = 1;
+val MEDIA_HTML:  Media = 2;
+val MEDIA_OCTET: Media = 3;
+
+# every handler reaches its shared, application-lifetime state through this.
+# one application serves every hedge worker, so handlers run on several threads
+# at once and everything here that changes is changed atomically
 pub rec State {
     protector: *csrf.Protector;
-    requests:  u64;
+    requests:  i64;
+}
+
+fun count(state: *State) {
+    atomic.fetch_add(?state.requests, 1);
 }
 
 # per-request response storage, taken from the request arena
@@ -113,23 +135,11 @@ fun parse_visits(data: view.View) u64 {
     ret value;
 }
 
-# there is no form.find: the decoded fields are a bounded array in wire order
+# an absent field reads as empty, which the form route treats as missing
 fun field_value(decoded: *form.Form, name: view.View) view.View {
-    var i: usize = 0;
-    for (i < decoded.len) {
-        val item: *form.Field = ?decoded.fields[i];
-        if (item.name.len == name.len) {
-            var same: bool  = true;
-            var j:    usize = 0;
-            for (j < name.len) {
-                if (item.name.data[j] != name.data[j]) { same = false; }
-                j = j + 1;
-            }
-            if (same) { ret item.value; }
-        }
-        i = i + 1;
-    }
-    ret view.view(nil, 0);
+    val found: *form.Field = form.find(decoded, name);
+    if (found == nil) { ret view.view(nil, 0); }
+    ret found.value;
 }
 
 fun copy_in(output: *u8, capacity: usize, offset: usize, source: view.View) usize {
@@ -146,7 +156,7 @@ fun copy_in(output: *u8, capacity: usize, offset: usize, source: view.View) usiz
 # and the bytes both come from the request arena, so both outlive the handler
 # and are released with the exchange rather than by this code.
 fun respond_bytes(request_context: *context.Context, state: *State,
-    code: status.Status, json: bool, content: view.View)
+    code: status.Status, kind: Media, content: view.View)
     handler.Result {
     val arena: *A.Allocator = request_context.alloc;
     if (arena == nil) {
@@ -158,8 +168,12 @@ fun respond_bytes(request_context: *context.Context, state: *State,
     }
     val holder: *Body = allocated.ok;
     var typed:  bool  = false;
-    if (json) { typed = render.application_json(?holder.media); }
-    or        { typed = render.text_html(?holder.media); }
+    if (kind == MEDIA_JSON) { typed = render.application_json(?holder.media); }
+    or (kind == MEDIA_HTML) { typed = render.text_html(?holder.media); }
+    or {
+        typed = render.init_media(?holder.media, text("application/octet-stream"),
+            view.view(nil, 0));
+    }
     val response: *message.Response = context.response(request_context);
     # the body must satisfy the limits the host will commit the response under,
     # which the borrowed exchange carries. an application that substitutes its
@@ -187,8 +201,8 @@ pub fun hello(ctx: ptr, request_context: *context.Context,
     if (state == nil) {
         ret handler.fail(internal("handler state is missing"));
     }
-    state.requests = state.requests + 1;
-    ret respond_bytes(request_context, state, status.OK, true,
+    count(state);
+    ret respond_bytes(request_context, state, status.OK, MEDIA_JSON,
         text("{\"message\":\"hello from laurel\"}"));
 }
 
@@ -205,7 +219,7 @@ pub fun echo(ctx: ptr, request_context: *context.Context,
     if (state == nil || found == nil || found.kind != context.PARAM_U64) {
         ret handler.fail(internal("route parameter is missing"));
     }
-    state.requests = state.requests + 1;
+    count(state);
     val arena: *A.Allocator = request_context.alloc;
     if (arena == nil) {
         ret handler.fail(internal("request arena is unavailable"));
@@ -228,7 +242,7 @@ pub fun echo(ctx: ptr, request_context: *context.Context,
     if (length == 0) {
         ret handler.fail(internal("body did not fit"));
     }
-    ret respond_bytes(request_context, state, status.OK, true,
+    ret respond_bytes(request_context, state, status.OK, MEDIA_JSON,
         view.view(out::*char, length));
 }
 
@@ -244,7 +258,7 @@ pub fun form_page(ctx: ptr, request_context: *context.Context,
     if (state == nil || state.protector == nil) {
         ret handler.fail(internal("handler state is missing"));
     }
-    state.requests = state.requests + 1;
+    count(state);
     val now:             i64                     = unix_seconds();
     val request_session: *session.RequestSession =
         session.from_context(request_context);
@@ -313,7 +327,7 @@ pub fun form_page(ctx: ptr, request_context: *context.Context,
     if (length == 0) {
         ret handler.fail(internal("the page did not fit"));
     }
-    ret respond_bytes(request_context, state, status.OK, false,
+    ret respond_bytes(request_context, state, status.OK, MEDIA_HTML,
         view.view(out::*char, length));
 }
 
@@ -395,7 +409,7 @@ fun drive_form(state: *State, request_context: *context.Context,
     if (length == 0) {
         ret handler.fail(internal("the page did not fit"));
     }
-    ret respond_bytes(request_context, state, status.OK, false,
+    ret respond_bytes(request_context, state, status.OK, MEDIA_HTML,
         view.view(out::*char, length));
 }
 
@@ -406,7 +420,7 @@ pub fun form_submit(ctx: ptr, request_context: *context.Context,
     if (state == nil || state.protector == nil) {
         ret handler.fail(internal("handler state is missing"));
     }
-    state.requests = state.requests + 1;
+    count(state);
     val request: *message.Request = context.request(request_context);
     val arena:   *A.Allocator     = request_context.alloc;
     if (request == nil || request.body == nil || arena == nil) {
@@ -447,4 +461,123 @@ pub fun form_resume(ctx: ptr, request_context: *context.Context, slot: ptr,
     if (settlement == handler.SETTLE_ABANDONED) { ret handler.respond(); }
     ret drive_form(state, request_context, work,
         form.complete_body(?work.parser, token));
+}
+
+# GET /api/search?q=...&limit=N
+#
+# the query is decoded by the same urlencoded decoder a form body uses, into
+# storage this handler owns. `limit` goes through the u64 decoder that types
+# path parameters, so a value that is not a number is refused with 400 before
+# anything is answered, and an absent one takes the default.
+pub fun search(ctx: ptr, request_context: *context.Context,
+    work: *ptr) handler.Result {
+    @work = nil;
+    val state: *State = ctx::*State;
+    if (state == nil) {
+        ret handler.fail(internal("handler state is missing"));
+    }
+    count(state);
+    val arena: *A.Allocator = request_context.alloc;
+    if (arena == nil) {
+        ret handler.fail(internal("request arena is unavailable"));
+    }
+    var fields:  [QUERY_FIELDS]form.Field;
+    var bytes:   [QUERY_BYTES]u8;
+    var decoder: form.UrlEncoded;
+    val decoded: form.Operation = query.parse(request_context, ?decoder,
+        form.Storage{fields: ?fields[0], field_capacity: QUERY_FIELDS,
+        bytes: ?bytes[0], byte_capacity: QUERY_BYTES},
+        form.Limits{max_bytes: QUERY_BYTES, max_fields: QUERY_FIELDS,
+        max_name_bytes:      32, max_value_bytes: 128,
+        max_temporary_bytes: QUERY_BYTES});
+    if (decoded.status != form.COMPLETE) { ret handler.fail(decoded.app_error); }
+    var values: form.Form = decoded.form;
+
+    var limit: u64                                    = SEARCH_LIMIT;
+    val typed: res[opt[router.Value], error.AppError] = form.typed(
+        form.find(?values, text("limit")), router.u64_decoder(), arena);
+    if (sel typed.err)     { ret handler.fail(typed.err); }
+    if (sel typed.ok.some) { limit = typed.ok.some.unsigned_value; }
+
+    val room: usize             = 512;
+    val page: res[*u8, A.Error] = A.allocate[u8](arena, room);
+    if (sel page.err) {
+        ret handler.fail(internal("body storage was refused"));
+    }
+    val out:     *u8   = page.ok;
+    var length:  usize = copy_in(out, room, 0, text("{\"q\":\""));
+    var escaped: usize = 0;
+    if (length == 0 || render.escape_json(field_value(?values, text("q")),
+        ?out[length], room - length, ?escaped) != render.ESCAPE_OK) {
+        ret handler.fail(internal("the query did not fit"));
+    }
+    length = copy_in(out, room, length + escaped, text("\",\"limit\":"));
+    if (length == 0) {
+        ret handler.fail(internal("body did not fit"));
+    }
+    val digits: usize = write_u64(limit, ?out[length], room - length);
+    if (digits == 0) {
+        ret handler.fail(internal("body did not fit"));
+    }
+    length = copy_in(out, room, length + digits, text("}"));
+    if (length == 0) {
+        ret handler.fail(internal("body did not fit"));
+    }
+    ret respond_bytes(request_context, state, status.OK, MEDIA_JSON,
+        view.view(out::*char, length));
+}
+
+# POST /api/raw
+#
+# reads the whole body as its exact bytes, as a webhook handler does before it
+# checks a signature over what was sent, and answers with those bytes. like the
+# form, the first read usually suspends, so the buffer and the reader state
+# live in the request arena across the suspension.
+rec RawWork {
+    buffer: [RAW_LIMIT]u8;
+    body:   raw.Body;
+}
+
+fun drive_raw(state: *State, request_context: *context.Context,
+    current: raw.Operation) handler.Result {
+    if (current.status == raw.PENDING)  { ret handler.suspend(current.token); }
+    if (current.status != raw.COMPLETE) { ret handler.fail(current.app_error); }
+    ret respond_bytes(request_context, state, status.OK, MEDIA_OCTET,
+        current.bytes);
+}
+
+pub fun raw_submit(ctx: ptr, request_context: *context.Context,
+    slot: *ptr) handler.Result {
+    @slot = nil;
+    val state: *State = ctx::*State;
+    if (state == nil) {
+        ret handler.fail(internal("handler state is missing"));
+    }
+    count(state);
+    val request: *message.Request = context.request(request_context);
+    val arena:   *A.Allocator     = request_context.alloc;
+    if (request == nil || request.body == nil || arena == nil) {
+        ret handler.fail(internal("the request is unavailable"));
+    }
+    val allocated: res[*RawWork, A.Error] = A.zallocate[RawWork](arena, 1);
+    if (sel allocated.err) {
+        ret handler.fail(internal("body storage was refused"));
+    }
+    val work: *RawWork = allocated.ok;
+    @slot = work::ptr;
+    if (!raw.init(?work.body, request.body, ?work.buffer[0], RAW_LIMIT)) {
+        ret handler.fail(internal("the body reader was refused"));
+    }
+    ret drive_raw(state, request_context, raw.poll(?work.body));
+}
+
+pub fun raw_resume(ctx: ptr, request_context: *context.Context, slot: ptr,
+    settlement: handler.Settlement, token: u64) handler.Result {
+    val state: *State   = ctx::*State;
+    val work:  *RawWork = slot::*RawWork;
+    if (state == nil || work == nil) {
+        ret handler.fail(internal("body state did not survive"));
+    }
+    if (settlement == handler.SETTLE_ABANDONED) { ret handler.respond(); }
+    ret drive_raw(state, request_context, raw.complete(?work.body, token));
 }
