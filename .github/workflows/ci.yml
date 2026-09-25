@@ -28,11 +28,13 @@ jobs:
       mach-version: v5.12.0
       # crypto 0.18 links std's start code that requires PSTATE.DIT on aarch64
       dit: required
-      # the demo and the bench server resolve laurel from a tag, so they gate
-      # that they still build, once, on the primary leg
+      # the demo and the bench server build this working tree through a path
+      # dependency, once, on the primary leg. hedge selects its own dependencies
+      # by exact version and a subproject commits no gitlinks, so they resolve
+      # with update rather than pull
       subprojects: >-
-        [{"path": "demo", "build": true, "test": false, "legs": ["x86_64-linux"]},
-         {"path": "doc/bench/laurel", "build": true, "test": false, "legs": ["x86_64-linux"]}]
+        [{"path": "demo", "deps": "update", "build": true, "test": false, "legs": ["x86_64-linux"]},
+         {"path": "doc/bench/laurel", "deps": "update", "build": true, "test": false, "legs": ["x86_64-linux"]}]
 
   gate:
     if: always()
