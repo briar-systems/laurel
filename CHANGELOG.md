@@ -12,6 +12,7 @@
 - **Breaking.** Dependencies: http `^0.20` at v0.20.0 (was `^0.19` at v0.19.0). Resolution is flat, so a consumer must move to http 0.20 with it. http 0.20's router refuses a target whose query is not well formed, such as `?q=%zz`, with `DISPATCH_TARGET` before any route runs, and `router.dispatch` answers it as 400 `malformed query` with `error.BAD_REQUEST`, the answer the query decoder gives. Without that mapping it would have been 500 `route dispatch failed`. http 0.20's other changes are in the h1 server engine and `core.target`, which the host drives. demo/ and doc/bench/laurel/ keep their hedge v0.6.0 pins until hedge moves (#171).
 
 ### Fixed
+- The README's dependency section names the current ranges and releases. It still named std v0.34.0, http v0.7.5 and crypto v0.8.1 (#171).
 - The in-process harness answers a body read with no allowance left the way a host does, so a request body past the configured `request_body.max_bytes` ends in the reader's limit rather than a provider failure (#163).
 
 ## [0.17.0] - 2026-09-25
