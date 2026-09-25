@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Breaking.** Dependencies: std `^8.0` at v8.0.0 (was `^7.0` at v7.0.2), crypto `^0.22` at v0.22.0 (was `^0.20` at v0.20.0) and http `^0.19` at v0.19.0 (was `^0.18` at v0.18.0), and `mach.toml` requires mach `^5.12` (was `^5.9`), which std 8 requires (#164). Resolution is flat, so a consumer must move to std 8.x and mach 5.12 with it. std 8 adds the typed secret view and grows `buffers.SecretSource`, which laurel does not use. crypto 0.21 adds keyed AES-GCM contexts and keeps `aes_gcm.seal` and `open`, the only AES-GCM calls laurel makes, and http 0.19 changes only the h2 engine, which laurel does not use. Rebuild from a clean `out/`, as std's release notes say. CI seeds mach v5.12.0, ahead of the family pin. Under mach 5.12 `mach test .` covers only the library's closure, and the library reaches every module that holds a test, so the same 115 tests run. demo/ and doc/bench/laurel/ keep their hedge v0.6.0 pins until hedge moves.
+
 ## [0.16.1] - 2026-09-23
 
 ### Changed
