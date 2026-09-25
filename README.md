@@ -45,9 +45,11 @@ The framework has no global application registry, hidden allocator, mandatory te
 ## Demo
 
 [`demo/`](demo/) is a small but complete application: a JSON route, a typed path
-parameter, a CSRF-protected form, a session cookie, a static file, middleware,
-and an observer. It builds and serves in about a minute, and its README explains
-how a Laurel application is hosted, since Laurel owns no listener of its own.
+parameter, a decoded query string, a raw request body, a CSRF-protected form, a
+session cookie, middleware, and an observer, hosted by hedge across several
+workers beside a static file and a health check. Its README explains how a
+Laurel application is hosted, since Laurel owns no listener of its own, and
+states what one application shared by every worker must guarantee.
 
 ## Benchmarks
 
@@ -58,8 +60,10 @@ side by side on performance and on ergonomics, including where Laurel loses.
 
 ## Local dependencies
 
-The manifest uses pinned Git tags for `mach-std` v0.34.0, `mach-http` v0.7.5,
-and `mach-crypto` v0.8.1. Build output uses Mach's default `out/` directory.
+The manifest selects `mach-std` `^8.0`, `mach-http` `^0.19` and `mach-crypto`
+`^0.22` by version range, and the committed gitlinks under `dep/` pin mach-std
+v8.0.0, mach-http v0.19.0 and mach-crypto v0.22.0. Build output uses Mach's
+default `out/` directory.
 
 ## Status
 

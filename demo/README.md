@@ -1,27 +1,45 @@
 # Laurel demo
 
-A small but real Laurel application, served over HTTP on a local port. It has a
-JSON route, a route with a typed path parameter, an HTML form protected by a
-CSRF token, a session cookie, a static file, one middleware, and an observer.
-Every one of those uses the framework's real API. Nothing here is a mock.
+A small but real Laurel application, hosted by hedge the way hedge's own
+executable runs: a supervisor and several workers, each serving on a thread of
+its own, all entering the one application. It has a JSON route, a route with a
+typed path parameter, a route that decodes the query string, a route that reads
+the raw request body, an HTML form protected by a CSRF token, a session cookie,
+one middleware, and an observer. Beside the application, hedge serves a static
+file and a health check from its own configuration. Every one of those uses the
+real API of laurel and hedge. Nothing here is a mock.
 
 ## Run it
 
-The demo is its own Mach project with its own pinned dependencies, so it does
-not inherit the repository's `dep/`.
+The demo is its own Mach project with its own dependencies, so it does not
+inherit the repository's `dep/`. It needs mach 5.12.
 
 ```sh
 cd demo
-mach dep pull .
+mach dep update . --all
 mach build . --profile release
 mach run . --profile release -- hedge.toml
 ```
 
-`mach run` forwards everything after `--` to the program, which is how the demo
-receives its configuration path. The first build takes a few minutes and a few
-gigabytes of memory; after that only the third command is needed. The server
-prints the bound address and then `laurel-demo: ready`, and serves on
-`127.0.0.1:8080`.
+`mach dep update` rather than `mach dep pull`, because hedge selects its own
+dependencies by exact version and the demo commits no gitlinks for them, so they
+are resolved rather than realized. `mach run` forwards everything after `--` to
+the program, which is how the demo receives its configuration path, and a
+second argument `--quiet` stops the per-request log. The first build takes a few
+minutes and a few gigabytes of memory; after that only the third command is
+needed.
+
+The listen address comes from the environment, through
+`address = "${ENV:LISTEN_ADDRESS}"` in `hedge.toml`. The demo's resolver reads
+`LISTEN_ADDRESS` when it is set. A platform such as Railway sets only `PORT`, so
+without `LISTEN_ADDRESS` the demo listens on `0.0.0.0:$PORT`, and with neither it
+listens on `127.0.0.1:8080`. The host block answers every name
+(`server_name = "*"`), since a deployment's public name is not known here, so
+the demo runs unchanged behind a platform's router.
+
+The server prints the bound address, the worker count, and then
+`laurel-demo: ready`. It stops on SIGINT or SIGTERM, drains, stops the
+application, and prints `laurel-demo: stopped`.
 
 ## What each route proves
 
@@ -147,23 +165,80 @@ application = "site"
 ```
 
 `application = "site"` is a name, not a path. The executable registers the
-assembled application under that name with `hedge.service.register_application`,
-and the dispatch plan resolves the name to a handler when it compiles.
+assembled application under that name in a `hedge.service.Applications` registry
+it owns, and hedge resolves the name against that registry when it builds each
+worker's services.
 
 **The embedder writes a `main`.** Hedge's own binary serves files and proxies but
 registers no applications, because a Laurel application is Mach code that has to
 be compiled in. So an application is deployed by building a binary that links
-hedge and your application together. `src/bin/main.mach` is that binary and is
-the whole of what an embedder writes:
+hedge and your application together. `src/bin/main.mach` is that binary. It is
+hedge's own `src/bin/main.mach` with one application registered, and it is the
+whole of what an embedder writes:
 
-1. read the configuration and validate it into a `schema.Graph`
-2. seal a configuration generation, and inside that hook assemble the Laurel
-   application, start it, and register it under its configured name
-3. compile the dispatch plan against a resolver holding that registration
-4. `serve.make`, `serve.start`, then drive `serve.poll` until it drains
+1. read the configuration, validate it into a `schema.Graph`, and seal it into a
+   configuration generation
+2. assemble the Laurel application against the message limits hedge will commit
+   its responses under, start it, bind it with `hedge.service.laurel.make`, and
+   register `bound_handler` under its configured name
+3. pass the registry as `composition.Options.applications` to
+   `composition.start_process`, with the worker count `hedge.spread.count` reads
+   from `server.workers`
+4. `supervisor.make`, `supervisor.attach_reloads` with a loader that seals the
+   next generation, `supervisor.start`, then `supervisor.run` until a signal
+   stops the process and `supervisor.stop`
+5. drain and stop the application, after every worker that could enter it has
+   stopped
 
-Hedge is driven, not threaded. Every accepted connection, every parsed request,
-and every Laurel handler call happens inside `serve.poll` on one thread.
+The supervisor thread takes the signals, reloads the configuration on SIGHUP and
+drives certificate renewal. Each worker serves on a thread of its own, with its
+own listeners, io runtime, timers and buffer pool. On Linux every worker binds
+its own socket with `SO_REUSEPORT` and the kernel spreads connections across
+them. The static files and `/healthz` are hedge's own `static` and `fixed`
+services, configured in `hedge.toml` and served by the workers without entering
+the application. A reload rebuilds hedge's services from the new configuration
+and resolves `application = "site"` against the same registry again, so the
+running application serves the new generation unchanged.
+
+## The threading contract
+
+Every worker is handed the same registry, so **one application instance serves
+every worker at once**. Its handlers, middleware and callbacks run on several
+threads concurrently. This is what that means for each part of it.
+
+**Per-request state belongs to one worker.** `hedge.service.laurel` keeps the
+request's context, recorder, execution cursor and outcome in the request arena
+of the worker serving it, and dispatch writes its route captures there too. A
+request is entered, suspended and resumed only by the worker that admitted it.
+Nothing per request is shared, and a handler's `slot` and the memory it takes
+from `request_context.alloc` are private to its request.
+
+**What Laurel shares is safe to share.** Everything the `app.App` holds is either
+fixed at assembly or synchronized:
+
+- admission (`max_active_requests`) is one atomic counter
+- the router, the middleware stack, the error mapper, providers, the security
+  headers and origin policies, the vocabulary and the CSRF protector are
+  written only when they are initialized or released, and are read-only while
+  requests run. Dispatch writes only its own locals and the request's captures.
+- the session manager's state is atomic, and the in-memory session store, the
+  nonce and replay guards, the session and CSRF key rings, and the CSRF ring
+  registry each take their own mutex
+
+**The lifecycle is not synchronized.** `app.start`, `app.poll_ready`,
+`app.drain`, `app.stop` and `app.release` belong to one thread, the embedder's.
+Start the application before `composition.start_process` and drain it only
+after `supervisor.stop` has returned, as `main` does here, and never call them
+from a handler.
+
+**The application's own state is the application's to synchronize.** Laurel
+calls whatever the application hands it (handlers, middleware, the observer,
+entropy sources, a session store or codec, an authenticator, a renderer,
+providers) from every worker at once, with the same `ctx` pointer and the same
+`app_state`. Anything those reach and change must be atomic or locked. The
+demo's request and observer counts are `std.sync.atomic` counters for exactly
+this reason, and a store or cache of your own needs a lock of its own. A value
+written only before `composition.start_process` and never after needs nothing.
 
 ### What hedge's adapter does for the application
 
@@ -192,18 +267,23 @@ Laurel refuses admission.
 
 | path | what it is |
 |---|---|
-| `src/bin/main.mach` | the executable: configuration, registration, serve loop |
+| `src/bin/main.mach` | the executable: configuration, registration, composition, supervisor |
 | `src/app.mach` | the application: routes, middleware, sessions, CSRF, observer |
-| `src/handlers.mach` | the four route handlers |
-| `hedge.toml` | listener, host, services, routes |
+| `src/handlers.mach` | the six route handlers |
+| `hedge.toml` | workers, listener, host, services, routes |
 | `public/static/` | the static file |
 
 ## Versions
 
-The demo pins Laurel `v0.14.0` and hedge `v0.6.0`. It pins the Laurel *tag*
-rather than resolving the working tree it lives in, because hedge depends on
-Laurel too and Mach resolves dependencies flat: one revision of Laurel serves
-the whole build, and `hedge.service.laurel` is compiled against it. Resolved by
-path, a breaking change to Laurel would break hedge's adapter in the same pull
-request, and that request could never merge until hedge had followed a release
-that could not yet exist. The tag pin is what lets Laurel change first.
+The demo builds against Laurel's working tree through `path = "../"`, so it
+shows whether the Laurel in this checkout still hosts under hedge. Hedge depends
+on Laurel too, and Mach resolves dependencies flat, so the path overrides the
+Laurel release hedge selects and `hedge.service.laurel` is compiled against this
+tree. A Laurel change that breaks the adapter fails this build until hedge
+follows it.
+
+Hedge is pinned to commit `3c03255` on its dev branch, the 0.11.0 line that adds
+the supervisor and multiple workers, until hedge v0.11.0 is released. std is
+declared as `tag/v8.1.0`, which overrides hedge's exact `=8.0.0`. mach-http
+v0.19.0 is the release hedge and Laurel both select. Hedge brings mach-crypto
+v0.22.0, mach-tls v0.12.0, mach-quic v0.20.0 and mach-acme v0.8.0 with it.

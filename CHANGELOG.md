@@ -8,6 +8,9 @@
 - `raw.Body` reads a whole request body as its exact bytes into a caller buffer under a caller limit, suspending on the host like the form and multipart parsers (#163). A body over the limit is `raw.LIMIT` with 413, whether its declared length says so before any byte is read or an unsized body reaches the limit, a sized body that ends short of or past its length is `raw.MALFORMED` with 400, and every failure zeroes what was read.
 - `testing.Request.chunked` presents a request body with no declared length, as HTTP/1.1 chunked coding and HTTP/2 or HTTP/3 data without `content-length` reach the application (#163). `testing.request` sets it false, and a `testing.Request` literal must now name it.
 
+### Changed
+- `demo/` and `doc/bench/laurel/` host laurel the way hedge's own executable runs: the application is registered through `composition.Options.applications`, and a supervisor runs the configured workers, each on its own thread, all entering the one application (#162). Both build this working tree through a path dependency, on hedge at a pinned commit of its 0.11.0 line and std v8.1.0, and CI resolves them with `mach dep update`. The demo serves static files and `/healthz` from hedge's configuration beside the application, runs four workers, takes its listen address from `LISTEN_ADDRESS` or `PORT`, and adds `GET /api/search`, which decodes the query string, and `POST /api/raw`, which reads the raw body. The benchmark server runs one worker, so its like-for-like table still compares one thread with one thread. The demo README states the threading contract: what one application shares across workers, what laurel guarantees about it, and what the application's own state must guarantee.
+
 ### Fixed
 - The in-process harness answers a body read with no allowance left the way a host does, so a request body past the configured `request_body.max_bytes` ends in the reader's limit rather than a provider failure (#163).
 
