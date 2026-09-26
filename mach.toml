@@ -69,5 +69,4 @@ version = "^0.24"
 
 [dep.http]
 git = "https://github.com/briar-systems/mach-http"
-# temporary: the mach 6 migration (briar-systems/mach-http#184) until its release
-ref = "branch/chore/183"
+version = "^0.21"

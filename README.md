@@ -62,9 +62,8 @@ side by side on performance and on ergonomics, including where Laurel loses.
 
 The manifest selects releases by version range, with the resolved release
 committed as a gitlink under `dep/`, and builds with mach 6: `mach-std` `^9.0`
-(v9.0.0) and `mach-crypto` `^0.24` (v0.24.0). `mach-http` follows its mach 6
-migration branch until that release exists. Build output uses Mach's default
-`out/` directory.
+(v9.0.0), `mach-http` `^0.21` (v0.21.0) and `mach-crypto` `^0.24` (v0.24.0).
+Build output uses Mach's default `out/` directory.
 
 ## Status
 
