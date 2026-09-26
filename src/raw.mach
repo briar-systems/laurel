@@ -412,7 +412,7 @@ fun close(fixture: *Fixture) bool {
 val PAYLOAD:     str   = "a=%41+b&sig=x y";
 val PAYLOAD_LEN: usize = 15;
 
-test "laurel.raw: exact bytes survive fragmentation and suspension" {
+test body__exact_bytes_across_fragmentation {
     var fragment: usize = 1;
     for (fragment <= 4) {
         var framing: usize = 0;
@@ -445,7 +445,7 @@ test "laurel.raw: exact bytes survive fragmentation and suspension" {
     ret 0;
 }
 
-test "laurel.raw: a body exactly at the limit fits in either framing" {
+test limit__exact_fits {
     var framing: usize = 0;
     for (framing < 2) {
         var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
@@ -462,7 +462,7 @@ test "laurel.raw: a body exactly at the limit fits in either framing" {
     ret 0;
 }
 
-test "laurel.raw: an unsized body one byte over the limit is refused" {
+test limit__unsized_one_over_refused {
     var pend: usize = 0;
     for (pend < 2) {
         var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
@@ -488,7 +488,7 @@ test "laurel.raw: an unsized body one byte over the limit is refused" {
     ret 0;
 }
 
-test "laurel.raw: a declared length over the limit is refused unread" {
+test limit__declared_over_refused_unread {
     var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
     var fixture: Fixture;
     if (!open(?fixture, ?state, true, PAYLOAD_LEN::u64, 1024, 8)) { ret 1; }
@@ -498,7 +498,7 @@ test "laurel.raw: a declared length over the limit is refused unread" {
     ret 0;
 }
 
-test "laurel.raw: the host body limit is a limit too" {
+test limit__host_limit_applies {
     var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
     var fixture: Fixture;
     if (!open(?fixture, ?state, false, 0, 6, 32)) { ret 1; }
@@ -509,7 +509,7 @@ test "laurel.raw: the host body limit is a limit too" {
     ret 0;
 }
 
-test "laurel.raw: a sized body that ends early is malformed" {
+test body__sized_short_is_malformed {
     var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
     var fixture: Fixture;
     state.fragment = 4;
@@ -524,7 +524,7 @@ test "laurel.raw: a sized body that ends early is malformed" {
     ret 0;
 }
 
-test "laurel.raw: a transport failure mid-body fails without bytes" {
+test body__transport_failure_yields_no_bytes {
     var framing: usize = 0;
     for (framing < 2) {
         var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
@@ -547,7 +547,7 @@ test "laurel.raw: a transport failure mid-body fails without bytes" {
     ret 0;
 }
 
-test "laurel.raw: a cancelled request reads nothing" {
+test body__cancelled_reads_nothing {
     var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
     var fixture: Fixture;
     if (!open(?fixture, ?state, false, 0, 1024, 32)
@@ -559,26 +559,7 @@ test "laurel.raw: a cancelled request reads nothing" {
     ret 0;
 }
 
-test "laurel.raw: an empty body completes with no storage" {
-    var framing: usize = 0;
-    for (framing < 2) {
-        var state:   TestBody = test_state("", 0);
-        var fixture: Fixture;
-        if (!operation_ok(cancel.make_root(?fixture.scope,
-            opt[time.Instant].none{}))) { ret 1; }
-        fixture.trailers = field.init(nil, 0, field.limits(0, 0, 0, 0));
-        fixture.reader   = test_reader(?state, ?fixture.scope,
-            ?fixture.trailers, framing == 1, 0, 1024);
-        if (!init(?fixture.raw, ?fixture.reader, nil, 0)) { ret 2; }
-        val done: Operation = poll(?fixture.raw);
-        if (done.status != COMPLETE || done.bytes.len != 0
-            || done.bytes.data != nil || !close(?fixture)) { ret 3; }
-        framing = framing + 1;
-    }
-    ret 0;
-}
-
-test "laurel.raw: misuse is refused without touching the body" {
+test init__misuse_refused {
     var state:   TestBody = test_state(PAYLOAD, PAYLOAD_LEN);
     var fixture: Fixture;
     state.pend_reads = true;

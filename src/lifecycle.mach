@@ -391,7 +391,7 @@ fun test_items(states: *TestService, items: *Lifecycle, length: usize) {
     }
 }
 
-test "laurel.lifecycle: startup readiness drain and stop have fixed order" {
+test controller__fixed_order {
     trace_len = 0;
     var states: [2]TestService;
     states[0].id        = 1;
@@ -416,7 +416,7 @@ test "laurel.lifecycle: startup readiness drain and stop have fixed order" {
     ret 0;
 }
 
-test "laurel.lifecycle: pending callbacks retain exact ownership" {
+test controller__pending_callbacks {
     trace_len = 0;
     var states: [2]TestService;
     states[0].id            = 1;
@@ -441,7 +441,7 @@ test "laurel.lifecycle: pending callbacks retain exact ownership" {
     ret 0;
 }
 
-test "laurel.lifecycle: failures preserve the primary cause and cleanup ownership" {
+test controller__failure_keeps_primary_cause {
     trace_len = 0;
     var states: [2]TestService;
     states[0].id         = 1;

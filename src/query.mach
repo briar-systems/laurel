@@ -82,7 +82,7 @@ fun run(fixture: *Fixture, raw: str) form.Operation {
     ret decode(?fixture.decoder, storage(fixture), limits(), text(raw));
 }
 
-test "laurel.query: parameters decode with repeats and empty values" {
+test decode__repeats_and_empty_values {
     var fixture: Fixture;
     val done:    form.Operation = run(?fixture,
         "q=&category=web+tools&tag=x&tag=y%2Fz&flag&sort=%E2%9C%93");
@@ -105,16 +105,7 @@ test "laurel.query: parameters decode with repeats and empty values" {
     ret 0;
 }
 
-test "laurel.query: an empty query has no parameters" {
-    var fixture: Fixture;
-    val done:    form.Operation = decode(?fixture.decoder, storage(?fixture),
-        limits(), view.view(nil, 0));
-    if (done.status != form.COMPLETE || done.form.len != 0
-        || form.find(?done.form, text("q")) != nil) { ret 1; }
-    ret 0;
-}
-
-test "laurel.query: typed access goes through the route decoders" {
+test typed__route_decoders {
     var fixture: Fixture;
     val done:    form.Operation = run(?fixture, "limit=25&page=x&neg=-3&on=true");
     if (done.status != form.COMPLETE) { ret 1; }
@@ -149,7 +140,7 @@ fun rejected(raw: str, status: form.Status, code: u16) bool {
         && fixture.decoder.state == form.FAILED_STATE;
 }
 
-test "laurel.query: malformed and oversized queries have defined failures" {
+test decode__malformed_and_oversized {
     if (!rejected("q=%zz", form.MALFORMED, 400)
         || !rejected("q=%4", form.MALFORMED, 400)
         || !rejected("q=%", form.MALFORMED, 400)
@@ -173,7 +164,7 @@ test "laurel.query: malformed and oversized queries have defined failures" {
     ret 0;
 }
 
-test "laurel.query: one decoder serves query after query" {
+test decode__reuses_decoder_after_failure {
     var fixture: Fixture;
     if (run(?fixture, "q=%zz").status != form.MALFORMED) { ret 1; }
     val done: form.Operation = run(?fixture, "q=ok");

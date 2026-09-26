@@ -1031,7 +1031,7 @@ fun traced_middleware(trace: *Trace, before: handler.EnterFun,
     ret Middleware{ctx: trace::ptr, before: before, resume: nil, after: after};
 }
 
-test "laurel.middleware: before terminal and after run once in order" {
+test execute__halves_run_once_in_order {
     var fixture: Fixture;
     if (!fixture_init(?fixture, 31)) { ret 1; }
     var renderer: error.Default;
@@ -1084,7 +1084,7 @@ test "laurel.middleware: before terminal and after run once in order" {
     ret 0;
 }
 
-test "laurel.middleware: private errors never render" {
+test execute__private_errors_never_render {
     var private_fixture: Fixture;
     if (!fixture_init(?private_fixture, 42)) { ret 1; }
     var private_renderer: error.Default;
@@ -1157,7 +1157,7 @@ test "laurel.middleware: private errors never render" {
     ret 0;
 }
 
-test "laurel.middleware: nested errors and cancellation unwind in order" {
+test execute__nested_errors_and_cancellation_unwind {
     var fixture: Fixture;
     if (!fixture_init(?fixture, 51)) { ret 1; }
     var renderer: error.Default;
@@ -1207,7 +1207,7 @@ test "laurel.middleware: nested errors and cancellation unwind in order" {
     ret 0;
 }
 
-test "laurel.middleware: stack snapshots survive growth and shrinkage" {
+test execute__stack_snapshot_survives_mutation {
     var shrink_fixture: Fixture;
     if (!fixture_init(?shrink_fixture, 61)) { ret 1; }
     var shrink_renderer: error.Default;
@@ -1264,7 +1264,7 @@ test "laurel.middleware: stack snapshots survive growth and shrinkage" {
     ret 0;
 }
 
-test "laurel.middleware: reentrancy fails closed" {
+test execute__reentrancy_fails_closed {
     var reentrant_fixture: Fixture;
     if (!fixture_init(?reentrant_fixture, 72)) { ret 1; }
     var reentrant_renderer: error.Default;
@@ -1297,7 +1297,7 @@ test "laurel.middleware: reentrancy fails closed" {
     ret 0;
 }
 
-test "laurel.middleware: pre-cancel and allocator failures do not render" {
+test execute__precancel_and_allocator_failure {
     var cancelled_fixture: Fixture;
     if (!fixture_init(?cancelled_fixture, 81)) { ret 1; }
     var cancelled_renderer: error.Default;
@@ -1355,7 +1355,7 @@ test "laurel.middleware: pre-cancel and allocator failures do not render" {
     ret 0;
 }
 
-test "laurel.middleware: mapper failures are value owned" {
+test execute__mapper_failure_value_owned {
     var fixture: Fixture;
     if (!fixture_init(?fixture, 91)) { ret 1; }
     var empty_stack: Stack = Stack{items: nil, len: 0};
@@ -1394,7 +1394,7 @@ test "laurel.middleware: mapper failures are value owned" {
     ret 0;
 }
 
-test "laurel.middleware: a resumed terminal never re-runs what already ran" {
+test resume__never_reruns {
     var fixture: Fixture;
     if (!fixture_init(?fixture, 101)) { ret 1; }
     var renderer: error.Default;
@@ -1441,7 +1441,7 @@ test "laurel.middleware: a resumed terminal never re-runs what already ran" {
     ret 0;
 }
 
-test "laurel.middleware: an abandoned suspension releases every entered half" {
+test abandon__releases_entered_halves {
     var fixture: Fixture;
     if (!fixture_init(?fixture, 102)) { ret 1; }
     var renderer: error.Default;
@@ -1474,7 +1474,7 @@ test "laurel.middleware: an abandoned suspension releases every entered half" {
     ret 0;
 }
 
-test "laurel.middleware: a scope that dies under a suspension abandons" {
+test resume__dead_scope_abandons {
     var fixture: Fixture;
     if (!fixture_init(?fixture, 103)) { ret 1; }
     var renderer: error.Default;
@@ -1503,7 +1503,7 @@ test "laurel.middleware: a scope that dies under a suspension abandons" {
     ret 0;
 }
 
-test "laurel.middleware: a middleware suspends in either half" {
+test resume__middleware_suspends_either_half {
     var fixture: Fixture;
     if (!fixture_init(?fixture, 104)) { ret 1; }
     var renderer: error.Default;
@@ -1554,7 +1554,7 @@ test "laurel.middleware: a middleware suspends in either half" {
     ret 0;
 }
 
-test "laurel.middleware: suspending with no resume fails closed" {
+test execute__suspend_without_resume_fails_closed {
     var fixture: Fixture;
     if (!fixture_init(?fixture, 106)) { ret 1; }
     var renderer: error.Default;

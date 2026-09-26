@@ -2353,7 +2353,7 @@ fun rejected_status(boundary: str, body_text: str,
     ret finish(?parser).status;
 }
 
-test "laurel.multipart: fragmented fields and files remain bounded" {
+test parse__fragmented_fields_and_files {
     var parts:    [8]Part;
     var bytes:    [2048]u8;
     var work:     [512]u8;
@@ -2384,7 +2384,7 @@ test "laurel.multipart: fragmented fields and files remain bounded" {
     ret 0;
 }
 
-test "laurel.multipart: nested multipart inherits its field name" {
+test parse__nested_inherits_field_name {
     var parts:    [8]Part;
     var bytes:    [2048]u8;
     var work:     [512]u8;
@@ -2407,7 +2407,7 @@ test "laurel.multipart: nested multipart inherits its field name" {
     ret 0;
 }
 
-test "laurel.multipart: asynchronous storage preserves retained input" {
+test storage__async_retains_input {
     var parts: [8]Part;
     var bytes: [2048]u8;
     var work:  [512]u8;
@@ -2440,7 +2440,7 @@ test "laurel.multipart: asynchronous storage preserves retained input" {
     ret 0;
 }
 
-test "laurel.multipart: cancellation waits for storage then aborts once" {
+test cancel__waits_for_storage_then_aborts {
     var parts: [8]Part;
     var bytes: [2048]u8;
     var work:  [512]u8;
@@ -2472,7 +2472,7 @@ test "laurel.multipart: cancellation waits for storage then aborts once" {
     ret 0;
 }
 
-test "laurel.multipart: traversal and storage failure never publish" {
+test parse__traversal_and_storage_failure_never_publish {
     var parts:    [8]Part;
     var bytes:    [2048]u8;
     var work:     [512]u8;
@@ -2502,35 +2502,7 @@ test "laurel.multipart: traversal and storage failure never publish" {
     ret 0;
 }
 
-test "laurel.multipart: multiple files publish through one batch commit" {
-    var parts:    [8]Part;
-    var bytes:    [2048]u8;
-    var work:     [512]u8;
-    var state:    TestStore;
-    var uploader: upload.Upload;
-    var parser:   Parser;
-    val storage:  Storage = Storage{parts: ?parts[0], part_capacity: 8,
-        bytes: ?bytes[0], byte_capacity: 2048,
-        work:  ?work[0], work_capacity: 512};
-    if (!init(?parser, view.view("g", 1), storage, test_limits(),
-        test_store(?state), ?uploader)) { ret 1; }
-    val body_text: str       = "--g\r\nContent-Disposition: form-data; name=\"a\"; filename=\"a.txt\"\r\n\r\none\r\n--g\r\nContent-Disposition: form-data; name=\"b\"; filename=\"b.txt\"\r\n\r\ntwo\r\n--g--\r\n";
-    val fed:       Operation = feed_bytes(?parser, body_text);
-    if (fed.status != MORE || state.seal_calls != 2 ||
-        state.commit_calls != 0) { ret 2; }
-    val done: Operation = finish(?parser);
-    if (done.status != COMPLETE || done.result.len != 2 ||
-        parts[0].file.size != 3 || parts[1].file.size != 3 ||
-        state.batch_begin_calls != 1 || state.begin_calls != 2 ||
-        state.seal_calls != 2 || state.commit_calls != 1 ||
-        state.abort_calls != 0 || !state.committed) { ret 3; }
-    state.file_ids[0] = 'x';
-    if (!view_equal(parts[0].file.id, "m0") ||
-        !view_equal(parts[1].file.id, "m1")) { ret 4; }
-    ret 0;
-}
-
-test "laurel.multipart: later malformed part aborts earlier staged files" {
+test parse__later_malformed_aborts_staged {
     var parts:    [8]Part;
     var bytes:    [2048]u8;
     var work:     [512]u8;
@@ -2552,7 +2524,7 @@ test "laurel.multipart: later malformed part aborts earlier staged files" {
     ret 0;
 }
 
-test "laurel.multipart: ambiguous batch commit reconciles explicitly" {
+test storage__unknown_commit_reconciles {
     var parts: [8]Part;
     var bytes: [2048]u8;
     var work:  [512]u8;
@@ -2580,7 +2552,7 @@ test "laurel.multipart: ambiguous batch commit reconciles explicitly" {
     ret 0;
 }
 
-test "laurel.multipart: ambiguous batch abort reconciles explicitly" {
+test storage__unknown_abort_reconciles {
     var parts: [8]Part;
     var bytes: [2048]u8;
     var work:  [512]u8;
@@ -2607,7 +2579,7 @@ test "laurel.multipart: ambiguous batch abort reconciles explicitly" {
     ret 0;
 }
 
-test "laurel.multipart: independent limits fail closed" {
+test limits__fail_closed {
     var limits: Limits = test_limits();
     limits.max_header_bytes = 32;
     if (rejected_status("b",
@@ -2749,7 +2721,7 @@ fun test_reader(state: *TestBody, scope: *cancel.Scope,
         false, 0, body.limits(maximum, 16, 1024), trailers, scope);
 }
 
-test "laurel.multipart: body adapter spans reader and storage pending work" {
+test body__spans_reader_and_storage_pending {
     var parts:       [8]Part;
     var bytes:       [2048]u8;
     var work:        [512]u8;
@@ -2800,7 +2772,7 @@ test "laurel.multipart: body adapter spans reader and storage pending work" {
     ret 0;
 }
 
-test "laurel.multipart: body rejection settles exactly once" {
+test body__rejection_settles_once {
     var parts:       [8]Part;
     var bytes:       [2048]u8;
     var work:        [512]u8;

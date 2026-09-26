@@ -812,7 +812,7 @@ fun request_header(fixture: *PolicyFixture, name: *u8, name_len: usize,
     }) == field.ADD_OK;
 }
 
-test "laurel.security: secure response headers are bounded and transactional" {
+test headers__bounded_and_transactional {
     var policy: HeadersPolicy;
     if (!secure_headers(?policy) || !headers_valid(?policy) ||
         policy.csp_len != 78 || policy.permissions_len != 60 ||
@@ -870,7 +870,7 @@ test "laurel.security: secure response headers are bounded and transactional" {
     ret 0;
 }
 
-test "laurel.security: origin policy rejects cross-origin ambiguity" {
+test origin__rejects_cross_origin {
     var rule: OriginRule = OriginRule{
         serialized: view.view("https://trusted.example", 23)
     };
@@ -928,7 +928,7 @@ test "laurel.security: origin policy rejects cross-origin ambiguity" {
     ret 0;
 }
 
-test "laurel.security: redirects require an explicit safe destination" {
+test redirect__safe_destination_only {
     var rule: OriginRule = OriginRule{
         serialized: view.view("https://trusted.example", 23)
     };

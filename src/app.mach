@@ -673,7 +673,7 @@ fun test_release_principal(context_ptr: ptr, principal: ptr) bool {
     ret true;
 }
 
-test "laurel.app: assembly and lifecycle retain caller ownership" {
+test assembly__caller_ownership {
     var providers: provider.Set;
     if (!provider.init(?providers, nil, 0, 0, 32)) { ret 1; }
     var lifecycle_item: lifecycle.Lifecycle = lifecycle.Lifecycle{ctx: nil, start: test_lifecycle_start,
@@ -836,7 +836,7 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     ret 0;
 }
 
-test "laurel.app: cleanup failure remains observable after primary failure" {
+test lifecycle__cleanup_failure_observable {
     var providers: provider.Set;
     if (!provider.init(?providers, nil, 0, 0, 32)) { ret 1; }
     var failures: TestLifecycleFailure;
@@ -981,7 +981,7 @@ fun observed_app(app: *App, providers: *provider.Set,
     ret assemble(app, assembly);
 }
 
-test "laurel.app: an admitted request reaches the assembled observer" {
+test admit__reaches_observer {
     var providers: provider.Set;
     if (!provider.init(?providers, nil, 0, 0, 32)) { ret 1; }
     var lifecycle_item: lifecycle.Lifecycle = lifecycle.Lifecycle{ctx: nil,
@@ -1186,7 +1186,7 @@ fun deadline_is(state: *RequestFixture, sec: i64, nsec: i64) bool {
     ret context.deadline(?state.request_context, ?at) && at.sec == sec && at.nsec == nsec;
 }
 
-test "laurel.app: the handler timeout narrows the exchange deadline from the admission instant" {
+test admit__handler_timeout_narrows_deadline {
     var providers: provider.Set;
     if (!provider.init(?providers, nil, 0, 0, 32)) { ret 1; }
     var lifecycle_item: lifecycle.Lifecycle = lifecycle.Lifecycle{ctx: nil,

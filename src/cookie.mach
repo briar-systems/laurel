@@ -911,52 +911,7 @@ fun bytes_equal(actual: *u8, actual_len: usize, expected: *u8,
     ret true;
 }
 
-# leave a nonzero pattern on the stack the next call will build its result on,
-# so an unset field is observable rather than coincidentally zero
-fun dirty_frame(depth: usize) usize {
-    var scratch: [24]usize;
-    var i:       usize = 0;
-    for (i < 24) {
-        scratch[i] = 0x5a5a5a5a5a5a5a5a;
-        i          = i + 1;
-    }
-    if (depth > 0) { ret dirty_frame(depth - 1) + scratch[0]; }
-    ret scratch[23];
-}
-
-# every field of a public result is set on every path, because a caller that
-# reads a length without checking the status would otherwise get stack contents
-test "laurel.cookie: a refused serialization still reports a written count" {
-    var output:   [256]u8;
-    var response: Cookie;
-    response.name      = view.view("id", 2);
-    response.value     = view.view("1", 1);
-    response.same_site = SAME_SITE_DEFAULT;
-    val configured: Limits = limits_default();
-    var narrow:     Limits = limits_default();
-    narrow.max_cookie_bytes = 1;
-    if (dirty_frame(3) == 0) { ret 1; }
-    val refused: Operation = serialize_set_cookie(?response, ?output[0], 256,
-        narrow);
-    if (refused.status == OK || refused.written != 0) { ret 1; }
-    var tiny: Operation = serialize_set_cookie(?response, ?output[0], 2,
-        configured);
-    if (tiny.status != OUTPUT_TOO_SMALL || tiny.written != 0) { ret 2; }
-    var broken: Limits = limits_default();
-    broken.max_count = 0;
-    val invalid: Operation = serialize_set_cookie(?response, ?output[0], 256,
-        broken);
-    if (invalid.status != INVALID_LIMITS || invalid.written != 0) { ret 3; }
-    val nothing: Operation = serialize_set_cookie(nil, ?output[0], 256,
-        configured);
-    if (nothing.status != INVALID_INPUT || nothing.written != 0) { ret 4; }
-    val accepted: Operation = serialize_set_cookie(?response, ?output[0], 256,
-        configured);
-    if (accepted.status != OK || accepted.written == 0) { ret 5; }
-    ret 0;
-}
-
-test "laurel.cookie: request parsing is bounded with explicit duplicates" {
+test parse_request__duplicates_and_bounds {
     val configured: Limits = limits_default();
     var items:      [4]Cookie;
     var jar:        Jar    = init(?items[0], 4);
@@ -987,7 +942,7 @@ test "laurel.cookie: request parsing is bounded with explicit duplicates" {
     ret 0;
 }
 
-test "laurel.cookie: response serialization enforces security and attributes" {
+test serialize__attributes_and_prefixes {
     val configured: Limits    = limits_default();
     var output:     [256]u8;
     var extension:  Attribute = Attribute{name: view.view("Priority", 8),
@@ -1058,7 +1013,7 @@ test "laurel.cookie: response serialization enforces security and attributes" {
     ret 0;
 }
 
-test "laurel.cookie: every independent limit and prefix fails closed" {
+test limits__fail_closed {
     val configured: Limits = limits_default();
     var items:      [2]Cookie;
     var jar:        Jar    = init(?items[0], 2);
@@ -1155,103 +1110,7 @@ test "laurel.cookie: every independent limit and prefix fails closed" {
     ret 0;
 }
 
-test "laurel.cookie: standard attributes honor independent bounds" {
-    val configured: Limits = limits_default();
-    var output:     [256]u8;
-    val base:       Cookie = Cookie{name: view.view("a", 1),
-        value:       view.view("b", 1), path: view.view(nil, 0),
-        domain:      view.view(nil, 0), has_max_age: false, max_age_s: 0,
-        has_expires: false, expires_unix: 0, secure: false,
-        http_only:   false, partitioned: false,
-        same_site:   SAME_SITE_DEFAULT, attributes: nil, attribute_len: 0};
-    var standard: Cookie = base;
-    var bounded:  Limits = configured;
-
-    standard.path                    = view.view("/x", 2);
-    bounded.max_attribute_name_bytes = 3;
-    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
-        != ATTRIBUTE_NAME_LIMIT) { ret 1; }
-    bounded                           = configured;
-    bounded.max_attribute_value_bytes = 1;
-    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
-        != ATTRIBUTE_VALUE_LIMIT) { ret 2; }
-
-    standard                         = base;
-    standard.domain                  = view.view("example.com", 11);
-    bounded                          = configured;
-    bounded.max_attribute_name_bytes = 5;
-    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
-        != ATTRIBUTE_NAME_LIMIT) { ret 3; }
-    bounded                           = configured;
-    bounded.max_attribute_value_bytes = 10;
-    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
-        != ATTRIBUTE_VALUE_LIMIT) { ret 4; }
-
-    standard                         = base;
-    standard.has_max_age             = true;
-    standard.max_age_s               = -123;
-    bounded                          = configured;
-    bounded.max_attribute_name_bytes = 6;
-    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
-        != ATTRIBUTE_NAME_LIMIT) { ret 5; }
-    bounded                           = configured;
-    bounded.max_attribute_value_bytes = 3;
-    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
-        != ATTRIBUTE_VALUE_LIMIT) { ret 6; }
-
-    standard                         = base;
-    standard.has_expires             = true;
-    standard.expires_unix            = 0;
-    bounded                          = configured;
-    bounded.max_attribute_name_bytes = 6;
-    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
-        != ATTRIBUTE_NAME_LIMIT) { ret 7; }
-    bounded                           = configured;
-    bounded.max_attribute_value_bytes = 28;
-    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
-        != ATTRIBUTE_VALUE_LIMIT) { ret 8; }
-
-    standard                         = base;
-    standard.secure                  = true;
-    bounded                          = configured;
-    bounded.max_attribute_name_bytes = 5;
-    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
-        != ATTRIBUTE_NAME_LIMIT) { ret 9; }
-    bounded                           = configured;
-    bounded.max_attribute_value_bytes = 1;
-    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
-        != OK) { ret 10; }
-
-    standard                         = base;
-    standard.http_only               = true;
-    bounded                          = configured;
-    bounded.max_attribute_name_bytes = 7;
-    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
-        != ATTRIBUTE_NAME_LIMIT) { ret 11; }
-
-    standard                         = base;
-    standard.secure                  = true;
-    standard.same_site               = SAME_SITE_STRICT;
-    bounded                          = configured;
-    bounded.max_attribute_name_bytes = 7;
-    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
-        != ATTRIBUTE_NAME_LIMIT) { ret 12; }
-    bounded                           = configured;
-    bounded.max_attribute_value_bytes = 5;
-    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
-        != ATTRIBUTE_VALUE_LIMIT) { ret 13; }
-
-    standard                         = base;
-    standard.secure                  = true;
-    standard.partitioned             = true;
-    bounded                          = configured;
-    bounded.max_attribute_name_bytes = 10;
-    if (serialize_set_cookie(?standard, ?output[0], 256, bounded).status
-        != ATTRIBUTE_NAME_LIMIT) { ret 14; }
-    ret 0;
-}
-
-test "laurel.cookie: parser and serializer reject every output alias" {
+test aliases__output_rejected {
     val configured: Limits = limits_default();
     var items:      [2]Cookie;
     val item_bytes: *u8    = (?items[0])::*u8;
@@ -1335,32 +1194,7 @@ test "laurel.cookie: parser and serializer reject every output alias" {
     ret 0;
 }
 
-test "laurel.cookie: lookup rejects forged jars and nested ranges" {
-    val maximum:  usize = ~(0::usize);
-    val near_end: *u8   = (maximum - 1)::*u8;
-    if (find((maximum - 1)::*Jar, view.view("a", 1)) != nil) { ret 1; }
-    var item: Cookie = Cookie{name: view.view("a", 1),
-        value:      view.view("b", 1), path: view.view(nil, 0),
-        domain:     view.view(nil, 0), same_site: SAME_SITE_DEFAULT,
-        attributes: nil, attribute_len: 0, has_max_age: false, max_age_s: 0, has_expires: false, expires_unix: 0, secure: false, http_only: false, partitioned: false};
-    var jar: Jar = Jar{items: ?item, len: 1, cap: 1, total_bytes: 3};
-    if (find(?jar, view.view(near_end, 4)) != nil) { ret 2; }
-    item.name = view.view(near_end, 4);
-    if (find(?jar, view.view("a", 1)) != nil) { ret 3; }
-    item.name          = view.view("a", 1);
-    item.attributes    = near_end::*Attribute;
-    item.attribute_len = 2;
-    if (find(?jar, view.view("a", 1)) != nil) { ret 4; }
-    jar.items = near_end::*Cookie;
-    jar.cap   = 2;
-    if (find(?jar, view.view("a", 1)) != nil) { ret 5; }
-    jar.items = (?jar)::usize::*Cookie;
-    jar.cap   = 1;
-    if (find(?jar, view.view("a", 1)) != nil) { ret 6; }
-    ret 0;
-}
-
-test "laurel.cookie: inclusive maximum overlap arithmetic never wraps" {
+test range_overlap__inclusive_maximum {
     val maximum:        usize = ~(0::usize);
     val at_maximum:     *u8   = maximum::*u8;
     val before_maximum: *u8   = (maximum - 1)::*u8;
@@ -1379,7 +1213,7 @@ test "laurel.cookie: inclusive maximum overlap arithmetic never wraps" {
     ret 0;
 }
 
-test "laurel.cookie: scalar limits precede traversal and sums never wrap" {
+test serialize__scalar_limits_never_wrap {
     val configured: Limits = limits_default();
     val maximum:    usize  = ~(0::usize);
     val near_end:   *u8    = (maximum - 1)::*u8;

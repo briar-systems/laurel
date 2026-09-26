@@ -1493,7 +1493,7 @@ fun post_request(fields: field.Fields, path: view.View, id: view.View,
     ret built;
 }
 
-test "laurel.testing: the harness drives a whole application without a socket" {
+test harness__drives_application {
     val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
@@ -1562,7 +1562,7 @@ test "laurel.testing: the harness drives a whole application without a socket" {
 
 # the case the contract has to survive: a host that never settles the body a
 # suspended handler is waiting on
-test "laurel.testing: a suspension that is never resumed is abandoned" {
+test harness__unresumed_suspension_abandoned {
     val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
@@ -1608,7 +1608,7 @@ test "laurel.testing: a suspension that is never resumed is abandoned" {
     ret 0;
 }
 
-test "laurel.testing: a handler reaches its session through the application" {
+test harness__session_through_application {
     val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     if (!init_application(?fixture, limits)) { ret 1; }
@@ -1648,7 +1648,7 @@ test "laurel.testing: a handler reaches its session through the application" {
     ret 0;
 }
 
-test "laurel.testing: streaming request and response bodies flow in process" {
+test harness__streaming_bodies {
     val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
@@ -1718,7 +1718,7 @@ test "laurel.testing: streaming request and response bodies flow in process" {
     ret 0;
 }
 
-test "laurel.testing: the security corpus runs against every http version" {
+test harness__security_corpus_every_version {
     val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
@@ -1827,7 +1827,7 @@ fun body_is(result: *Result, expected: str) bool {
     ret same(response_body(result), view.view(expected, str_len(expected)));
 }
 
-test "laurel.testing: query parameters decode on every http version" {
+test harness__query_every_version {
     val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
@@ -1889,7 +1889,7 @@ test "laurel.testing: query parameters decode on every http version" {
 
 # a webhook signature covers the bytes on the wire, so the echo must match
 # them exactly whatever the framing, fragmentation or suspension
-test "laurel.testing: raw bodies are exact and bounded on every http version" {
+test harness__raw_body_every_version {
     val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
@@ -1993,7 +1993,7 @@ test "laurel.testing: raw bodies are exact and bounded on every http version" {
     ret 0;
 }
 
-test "laurel.testing: admission follows the driven application lifecycle" {
+test harness__admission_follows_lifecycle {
     val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
@@ -2186,7 +2186,7 @@ fun erase_result(value: *Result) ptr {
     ret value::ptr;
 }
 
-test "laurel.testing: every public type erases to the untyped ptr" {
+test public_types__erase_to_ptr {
     if (erase_app(nil) != nil || erase_assembly(nil) != nil
         || erase_context(nil) != nil || erase_handler(nil) != nil
         || erase_router(nil) != nil || erase_stack(nil) != nil

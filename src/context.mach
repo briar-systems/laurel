@@ -384,7 +384,7 @@ fun init_fixture(fixture: *Fixture, generation: u64,
     ret exchange.begin(?fixture.exchange);
 }
 
-test "laurel.context: one binding borrows the exact exchange generation" {
+test bind__borrows_exchange_generation {
     var fixture: Fixture;
     if (!init_fixture(?fixture, 41, opt[time.Instant].none{})) { ret 1; }
     var items: [2]Param;
@@ -414,7 +414,7 @@ test "laurel.context: one binding borrows the exact exchange generation" {
     ret 0;
 }
 
-test "laurel.context: stale generations and cancellation fail closed" {
+test bind__stale_and_cancelled_fail_closed {
     var fixture: Fixture;
     if (!init_fixture(?fixture, 51, opt[time.Instant].none{})) { ret 1; }
     val params:  Params = Params{items: nil, len: 0, generation: 51};
@@ -435,7 +435,7 @@ test "laurel.context: stale generations and cancellation fail closed" {
     ret 0;
 }
 
-test "laurel.context: capture and identity bounds are transactional" {
+test bind__refuses_invalid_captures {
     var fixture: Fixture;
     if (!init_fixture(?fixture, 61, opt[time.Instant].none{})) { ret 1; }
     var duplicate: [2]Param;
@@ -463,7 +463,7 @@ test "laurel.context: capture and identity bounds are transactional" {
     ret 0;
 }
 
-test "laurel.context: deadlines remain owned by the exchange scope" {
+test deadline__owned_by_exchange_scope {
     val expected: time.Instant = time.Instant{sec: 20, nsec: 7};
     var fixture:  Fixture;
     if (!init_fixture(?fixture, 71, opt[time.Instant].some{expected})) { ret 1; }

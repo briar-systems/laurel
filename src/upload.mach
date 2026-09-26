@@ -1290,7 +1290,7 @@ fun test_open(state: *TestStore, upload: *Upload,
         begin_batch(upload).status == OK;
 }
 
-test "laurel.upload: files stage until one atomic batch commit" {
+test batch__stages_until_commit {
     var state: TestStore;
     state.partial = 2;
     var upload: Upload;
@@ -1322,7 +1322,7 @@ test "laurel.upload: files stage until one atomic batch commit" {
     ret 0;
 }
 
-test "laurel.upload: every asynchronous stage retains ownership" {
+test stages__async_retain_ownership {
     var state: TestStore;
     state.pending_batch_begin  = true;
     state.pending_file_begin   = true;
@@ -1364,7 +1364,7 @@ test "laurel.upload: every asynchronous stage retains ownership" {
     ret 0;
 }
 
-test "laurel.upload: invalid files never enter provider storage" {
+test start_file__invalid_never_reaches_store {
     var state:  TestStore;
     var upload: Upload;
     if (!test_open(?state, ?upload, 4)) { ret 1; }
@@ -1384,7 +1384,7 @@ test "laurel.upload: invalid files never enter provider storage" {
     ret 0;
 }
 
-test "laurel.upload: storage failure has one batch abort path" {
+test write__storage_failure_single_abort {
     var state: TestStore;
     state.fail_write          = true;
     state.pending_batch_abort = true;
@@ -1404,7 +1404,7 @@ test "laurel.upload: storage failure has one batch abort path" {
     ret 0;
 }
 
-test "laurel.upload: unknown batch commit requires reconciliation" {
+test commit__unknown_requires_reconciliation {
     var state: TestStore;
     state.unknown_commit = true;
     var upload: Upload;
@@ -1421,7 +1421,7 @@ test "laurel.upload: unknown batch commit requires reconciliation" {
     ret 0;
 }
 
-test "laurel.upload: aliases and callback mutation poison the batch" {
+test aliases__poison_batch {
     var state:  TestStore;
     var upload: Upload;
     if (!test_open(?state, ?upload, 8)) { ret 1; }
@@ -1445,7 +1445,7 @@ test "laurel.upload: aliases and callback mutation poison the batch" {
     ret 0;
 }
 
-test "laurel.upload: release preserves completion generations" {
+test release__keeps_completion_generations {
     var state: TestStore;
     state.pending_batch_begin = true;
     var upload: Upload;

@@ -721,7 +721,7 @@ fun test_instant(ns: i64) time.Instant {
     ret time.Instant{sec: ns / 1000000000, nsec: ns % 1000000000};
 }
 
-test "laurel.observability: label names and values have fixed cardinality" {
+test labels__fixed_cardinality {
     var values:     [2]Term;
     var specs:      [2]LabelSpec;
     var vocabulary: Vocabulary;
@@ -783,7 +783,7 @@ test "laurel.observability: label names and values have fixed cardinality" {
     ret 0;
 }
 
-test "laurel.observability: one start and one terminal event per request" {
+test recorder__one_start_one_terminal {
     var values:     [2]Term;
     var specs:      [2]LabelSpec;
     var vocabulary: Vocabulary;
@@ -860,7 +860,7 @@ test "laurel.observability: one start and one terminal event per request" {
     ret 0;
 }
 
-test "laurel.observability: request fields have fixed size policies" {
+test fields__size_policies {
     var values:     [2]Term;
     var specs:      [2]LabelSpec;
     var vocabulary: Vocabulary;

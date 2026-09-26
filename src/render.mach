@@ -804,7 +804,7 @@ fun same(actual: *u8, length: usize, expected: view.View) bool {
     ret true;
 }
 
-test "laurel.render: content type and charset are explicit and bounded" {
+test media__explicit_and_bounded {
     var html: Media;
     if (!text_html(?html) || !media_valid(?html)) { ret 1; }
     if (!same(?html.header[0], html.header_len,
@@ -836,7 +836,7 @@ test "laurel.render: content type and charset are explicit and bounded" {
     ret 0;
 }
 
-test "laurel.render: escaping is explicit for html and json output" {
+test escape__html_and_json {
     var output:  [64]u8;
     var written: usize = 0;
     if (escape_html(view.view("<&>", 3), ?output[0], 64, ?written) != ESCAPE_OK
@@ -888,7 +888,7 @@ test "laurel.render: escaping is explicit for html and json output" {
     ret 0;
 }
 
-test "laurel.render: a bounded body reaches the wire without a template engine" {
+test respond__fixed_body {
     var state: Fixture;
     if (!init_fixture(?state, 31)) { ret 1; }
     var media:   Media;
@@ -970,7 +970,7 @@ fun test_settle(ctx: ptr, mode: body.Mode) bool {
     ret true;
 }
 
-test "laurel.render: streamed bodies suspend, resume, and cancel" {
+test stream__suspend_resume_cancel {
     var state: Fixture;
     if (!init_fixture(?state, 41)) { ret 1; }
     var source_state: TestSource = TestSource{pending: true, total: 3, produces: 0, resumes: 0, settles: 0, settle_mode: 0, emitted: 0};
@@ -1005,7 +1005,7 @@ test "laurel.render: streamed bodies suspend, resume, and cancel" {
     ret 0;
 }
 
-test "laurel.render: a renderer installs its own body with no engine coupling" {
+test render_into__renderer_body {
     var state: Fixture;
     if (!init_fixture(?state, 51)) { ret 1; }
     var media:   Media;
@@ -1052,7 +1052,7 @@ fun test_render(ctx: ptr, name: view.View, model: ptr) res[Rendered, error.AppEr
         body: ?state.content.reader, generation: state.generation}};
 }
 
-test "laurel.render: respond enforces host limits and explicit limits" {
+test respond__host_and_explicit_limits {
     var tight_limits: message.Limits = fixture_limits();
     tight_limits.response_body = body.limits(1024, 512, 16);
     var state: Fixture;

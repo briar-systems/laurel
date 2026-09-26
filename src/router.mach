@@ -876,7 +876,7 @@ fun test_request(request: *message.Request, request_method: method.Method,
     ret true;
 }
 
-test "laurel.router: compile typed routes and decode request-scoped parameters" {
+test dispatch__typed_params {
     var parameters: [2]Parameter;
     parameters[0] = Parameter{name: view.view("rest", 4), wildcard: true,
         decoder: text_decoder()};
@@ -970,7 +970,7 @@ test "laurel.router: compile typed routes and decode request-scoped parameters" 
     ret 0;
 }
 
-test "laurel.router: conflicts and typed declaration mismatches are structured" {
+test compile__conflicts_and_mismatches {
     var parameters: [2]Parameter;
     parameters[0] = Parameter{name: view.view("id", 2), wildcard: false,
         decoder: u64_decoder()};
@@ -1023,7 +1023,7 @@ test "laurel.router: conflicts and typed declaration mismatches are structured" 
     ret 0;
 }
 
-test "laurel.router: built-in decoders reject overflow and malformed values" {
+test decoders__bounds_and_malformed {
     var value: Value;
     if (is_err_u8_error_apperror(u64_decode(nil, nil,
         view.view("18446744073709551615", 20), ?value))
@@ -1061,7 +1061,7 @@ fun test_fallback(ctx: ptr, request_context: *context.Context,
     ret handler.respond();
 }
 
-test "laurel.router: the shared terminal maps every dispatch status" {
+test terminal__maps_dispatch_status {
     var routes: [1]Route;
     routes[0] = test_route(any_method(), any_host(),
         path(view.view("/hello", 6)), nil, 0, "hello");

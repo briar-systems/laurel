@@ -91,7 +91,7 @@ fun test_resolve(context: ptr, key: view.View) res[ptr, view.View] {
     ret res[ptr, view.View].ok{nil};
 }
 
-test "laurel.provider: resolution is ordered, bounded, and explicit" {
+test resolve__ordered_bounded_explicit {
     var value:  u8 = 7;
     var states: [2]TestProvider;
     states[0] = TestProvider{key: view.view("cache", 5), value: nil, calls: 0, fail: false};

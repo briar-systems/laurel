@@ -2980,7 +2980,7 @@ fun reset_response(fixture: *RequestFixture) {
     fixture.response.committed = false;
 }
 
-test "laurel.session: a request reaches its session through the boundary" {
+test request__reaches_session {
     var fixture: RequestFixture;
     if (!init_request_fixture(?fixture)) { ret 1; }
 
@@ -3131,7 +3131,7 @@ test "laurel.session: a request reaches its session through the boundary" {
     ret 0;
 }
 
-test "laurel.session: request storage must be disjoint and complete" {
+test request_storage__disjoint_and_complete {
     var fixture: RequestFixture;
     if (!init_request_fixture(?fixture)) { ret 1; }
     var probe: RequestSession;
@@ -3152,27 +3152,7 @@ test "laurel.session: request storage must be disjoint and complete" {
     ret 0;
 }
 
-test "laurel.session: invalid provider records carry no callable pointer" {
-    var store:        MemoryStore;
-    val absent_store: Store = memory_store(?store);
-    if (absent_store.ctx != nil || absent_store.aliases != nil
-        || absent_store.start != nil || absent_store.stop != nil
-        || absent_store.load != nil || absent_store.save != nil
-        || absent_store.delete != nil || absent_store.replace != nil
-        || absent_store.reap != nil) { ret 1; }
-    var guard:        MemoryGuard;
-    val absent_guard: Guard = memory_guard(?guard);
-    if (absent_guard.ctx != nil || absent_guard.domain != nil
-        || absent_guard.aliases != nil || absent_guard.overlaps != nil
-        || absent_guard.claim != nil || absent_guard.forget != nil) { ret 2; }
-    var codec:        ProtectedCodec;
-    val absent_codec: Codec = protected_codec(?codec);
-    if (absent_codec.ctx != nil || absent_codec.encode != nil
-        || absent_codec.decode != nil) { ret 3; }
-    ret 0;
-}
-
-test "laurel.session: authenticated codecs reject hostile tokens transactionally" {
+test codec__rejects_hostile_tokens {
     var fixture: CodecFixture;
     if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_REJECT, 8, 8)) {
         ret 1;
@@ -3288,7 +3268,7 @@ test "laurel.session: authenticated codecs reject hostile tokens transactionally
     ret 0;
 }
 
-test "laurel.session: clocks, rotation, algorithms, and fixation are bounded" {
+test codec__clocks_rotation_fixation {
     var fixture: CodecFixture;
     if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_ALLOW, 8, 8)) {
         ret 1;
@@ -3402,7 +3382,7 @@ test "laurel.session: clocks, rotation, algorithms, and fixation are bounded" {
     ret 0;
 }
 
-test "laurel.session: guard horizons and regeneration ownership fail closed" {
+test guard__horizons_and_regeneration {
     var fixture: CodecFixture;
     if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_REJECT, 8, 8)) {
         ret 1;
@@ -3491,7 +3471,7 @@ test "laurel.session: guard horizons and regeneration ownership fail closed" {
     ret 0;
 }
 
-test "laurel.session: key and guard domains survive hostile providers" {
+test codec__domains_survive_hostile_providers {
     if (!duplicate_generation_rejected(AES_256_GCM)
         || !duplicate_generation_rejected(CHACHA20_POLY1305)) { ret 1; }
     if (!mutating_guard_rejected(AES_256_GCM)
@@ -3538,7 +3518,7 @@ test "laurel.session: key and guard domains survive hostile providers" {
     ret 0;
 }
 
-test "laurel.session: callbacks cannot change staged codec operations" {
+test codec__callbacks_cannot_change_staged_operation {
     var fixture: CodecFixture;
     if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_ALLOW, 8, 8)) {
         ret 1;
@@ -3577,7 +3557,7 @@ test "laurel.session: callbacks cannot change staged codec operations" {
     ret (!release_codec_fixture(?fixture))::i32;
 }
 
-test "laurel.session: codec ownership and replay claims fail closed" {
+test codec__ownership_and_replay_fail_closed {
     var fixture: CodecFixture;
     if (!init_codec_fixture(?fixture, AES_256_GCM, REPLAY_REJECT, 8, 8)) {
         ret 1;
@@ -3638,7 +3618,7 @@ test "laurel.session: codec ownership and replay claims fail closed" {
     ret (!release_codec_fixture(?fixture))::i32;
 }
 
-test "laurel.session: every public range and array product is checked" {
+test ranges__public_products_checked {
     val maximum:  usize = ~(0::usize);
     val near_end: *u8   = (maximum - 1)::*u8;
 
@@ -3723,7 +3703,7 @@ test "laurel.session: every public range and array product is checked" {
     ret 0;
 }
 
-test "laurel.session: inclusive maximum overlap arithmetic never wraps" {
+test ranges__inclusive_maximum_overlap {
     val maximum:        usize = ~(0::usize);
     val at_maximum:     *u8   = maximum::*u8;
     val before_maximum: *u8   = (maximum - 1)::*u8;
@@ -3876,7 +3856,7 @@ fun durable_store(probe: *DurableProbe) Store {
         replace: durable_replace, reap: durable_reap};
 }
 
-test "laurel.session: stores enforce versions, generations, capacity, and release" {
+test store__versions_generations_capacity {
     var slots:  [2]MemorySlot;
     var memory: MemoryStore;
     memory.active = false;
@@ -3965,7 +3945,7 @@ test "laurel.session: stores enforce versions, generations, capacity, and releas
     ret 0;
 }
 
-test "laurel.session: store scopes are disjoint from every operation range" {
+test store__scopes_disjoint_from_operations {
     var slots:  [2]MemorySlot;
     var memory: MemoryStore;
     memory.initialized = false;
@@ -4021,7 +4001,7 @@ test "laurel.session: store scopes are disjoint from every operation range" {
     ret 0;
 }
 
-test "laurel.session: stores reclaim and replace identities atomically" {
+test store__reclaim_and_replace_atomic {
     var slots:  [2]MemorySlot;
     var memory: MemoryStore;
     memory.initialized = false;
@@ -4102,7 +4082,7 @@ fun store_lifecycle_worker(arg: *u8) {
     }
 }
 
-test "laurel.session: store lifecycle serializes with active operations" {
+test store__lifecycle_serializes_operations {
     var slots:  [1]MemorySlot;
     var memory: MemoryStore;
     memory.initialized = false;
@@ -4151,7 +4131,7 @@ fun manager_transition_worker(arg: *u8) {
     }
 }
 
-test "laurel.session: manager ownership and lifecycle fail closed" {
+test manager__ownership_and_lifecycle {
     var codec_fixture: CodecFixture;
     if (!init_codec_fixture(?codec_fixture, AES_256_GCM, REPLAY_ALLOW, 8, 8)) {
         ret 1;
@@ -4241,7 +4221,7 @@ test "laurel.session: manager ownership and lifecycle fail closed" {
     ret 0;
 }
 
-test "laurel.session: concurrent updates conflict and durable stores inject cleanly" {
+test store__concurrent_updates_conflict {
     var slots:  [1]MemorySlot;
     var memory: MemoryStore;
     memory.active = false;

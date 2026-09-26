@@ -1036,7 +1036,7 @@ fun repeated(output: *u8, length: usize, byte: u8) view.View {
     ret view.view(output, length);
 }
 
-test "laurel.realtime: a slow consumer applies backpressure to a bounded stream" {
+test stream__backpressure {
     var state: Fixture;
     if (!init_fixture(?state, 61, false)) { ret 1; }
     var storage: [32]u8;
@@ -1083,7 +1083,7 @@ test "laurel.realtime: a slow consumer applies backpressure to a bounded stream"
     ret 0;
 }
 
-test "laurel.realtime: server-sent events frame data, identity, and heartbeats" {
+test sse__framing {
     var state: Fixture;
     if (!init_fixture(?state, 71, false)) { ret 1; }
     var media: render.Media;
@@ -1135,7 +1135,7 @@ test "laurel.realtime: server-sent events frame data, identity, and heartbeats" 
     ret 0;
 }
 
-test "laurel.realtime: suspended readers resume and disconnects fail closed" {
+test stream__suspend_and_disconnect {
     var state: Fixture;
     if (!init_fixture(?state, 81, false)) { ret 1; }
     var storage: [32]u8;
@@ -1188,7 +1188,7 @@ fun mask_into(output: *u8, cursor: usize, key: *u8, payload: view.View) usize {
     ret cursor + payload.len;
 }
 
-test "laurel.realtime: websocket channels carry frames and close cleanly" {
+test websocket__frames_and_close {
     var state: Fixture;
     if (!init_fixture(?state, 91, false)) { ret 1; }
     var storage: [256]u8;
@@ -1255,7 +1255,7 @@ test "laurel.realtime: websocket channels carry frames and close cleanly" {
     ret 0;
 }
 
-test "laurel.realtime: websocket negotiation commits the mach-http handshake" {
+test websocket__negotiation {
     var state: Fixture;
     if (!init_fixture(?state, 101, true)) { ret 1; }
     var random: [16]u8;
