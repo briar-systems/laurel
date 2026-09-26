@@ -7,7 +7,8 @@ doc/api/
 *~
 .mach-seed/
 .mach-txn-lock
-demo/dep/
+# a subproject's git dependencies are pinned by committed gitlinks, and only
+# its path copy of laurel stays out
+demo/dep/laurel/
 demo/out/
-doc/bench/laurel/dep/
 doc/bench/laurel/out/
