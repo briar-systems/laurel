@@ -24,10 +24,12 @@ use std.types.option.opt;
 use std.types.size.usize;
 use std.types.view;
 
+#[testing]
 fun fixed_ok(outcome: err[A.Error]) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
@@ -868,12 +870,14 @@ pub fun verify_request(protector: *Protector,
     ret verify(protector, request_context, session_id, item.value, now);
 }
 
+#[testing]
 rec TestEntropy {
     seed:  u8;
     calls: usize;
     fail:  bool;
 }
 
+#[testing]
 fun test_entropy_aliases(ctx: ptr, data: *u8, len: usize) bool {
     val state: *TestEntropy = ctx::*TestEntropy;
     if (state == nil || !range_valid(state::*u8, $size_of(TestEntropy)) ||
@@ -881,6 +885,7 @@ fun test_entropy_aliases(ctx: ptr, data: *u8, len: usize) bool {
     ret overlap(state::*u8, $size_of(TestEntropy), data, len);
 }
 
+#[testing]
 fun test_entropy_fill(ctx: ptr, output: *u8, len: usize) i64 {
     val state: *TestEntropy = ctx::*TestEntropy;
     if (state == nil || state.fail || !range_valid(output, len)) { ret -1; }
@@ -894,11 +899,13 @@ fun test_entropy_fill(ctx: ptr, output: *u8, len: usize) i64 {
     ret 0;
 }
 
+#[testing]
 rec MutatingEntropy {
     target: *Policy;
     calls:  usize;
 }
 
+#[testing]
 fun mutating_entropy_aliases(ctx: ptr, data: *u8, len: usize) bool {
     val state: *MutatingEntropy = ctx::*MutatingEntropy;
     if (state == nil || !range_valid(state::*u8, $size_of(MutatingEntropy)) ||
@@ -906,6 +913,7 @@ fun mutating_entropy_aliases(ctx: ptr, data: *u8, len: usize) bool {
     ret overlap(state::*u8, $size_of(MutatingEntropy), data, len);
 }
 
+#[testing]
 fun mutating_entropy_fill(ctx: ptr, output: *u8, len: usize) i64 {
     val state: *MutatingEntropy = ctx::*MutatingEntropy;
     if (state == nil || state.target == nil || !range_valid(output, len)) {
@@ -921,6 +929,7 @@ fun mutating_entropy_fill(ctx: ptr, output: *u8, len: usize) i64 {
     ret 0;
 }
 
+#[testing]
 rec Fixture {
     scope:             cancel.Scope;
     request_body:      body.Reader;
@@ -942,6 +951,7 @@ rec Fixture {
     protector:         Protector;
 }
 
+#[testing]
 fun fixture_metadata() message.Metadata {
     ret message.Metadata{
         version:       message.version_h1(1, 1),
@@ -955,6 +965,7 @@ fun fixture_metadata() message.Metadata {
     };
 }
 
+#[testing]
 fun init_fixture(fixture: *Fixture, binding: BindingMode,
     request_method: method.Kind, generation: u64,
     request_id: view.View) bool {
@@ -1012,6 +1023,7 @@ fun init_fixture(fixture: *Fixture, binding: BindingMode,
     ret true;
 }
 
+#[testing]
 fun release_fixture(fixture: *Fixture) bool {
     if (fixture == nil ||
         !context.unbind(?fixture.request_context, (?fixture.owner)::ptr,
@@ -1188,6 +1200,7 @@ test protector__rejects_mutation_and_invalid_rings {
     ret 0;
 }
 
+#[testing]
 rec RegistryCase {
     entropy:   TestEntropy;
     keys:      [2]KeyGeneration;
@@ -1195,6 +1208,7 @@ rec RegistryCase {
     protector: Protector;
 }
 
+#[testing]
 fun init_registry_case(item: *RegistryCase, tag: u8) bool {
     item.entropy              = TestEntropy{seed: 1, calls: 0, fail: false};
     item.keys[0].id           = 1;
@@ -1216,16 +1230,19 @@ fun init_registry_case(item: *RegistryCase, tag: u8) bool {
     ret init_ring(?item.ring, ?item.keys[0], 2, 1, 1);
 }
 
+#[testing]
 fun case_entropy(item: *RegistryCase) Entropy {
     ret Entropy{ctx: (?item.entropy)::ptr, context_size: $size_of(TestEntropy),
         aliases_state: test_entropy_aliases, fill: test_entropy_fill};
 }
 
+#[testing]
 fun case_policy() Policy {
     ret Policy{binding: BIND_SESSION, max_age_s: 60, clock_skew_s: 5,
         require_unsafe: true};
 }
 
+#[testing]
 fun activate_case(item: *RegistryCase) bool {
     ret init(?item.protector, ?item.ring, case_entropy(item), case_policy());
 }

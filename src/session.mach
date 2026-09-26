@@ -28,18 +28,22 @@ use std.types.string.str;
 use std.types.string.str_len;
 use std.types.view;
 
+#[testing]
 fun thread_ok(outcome: thread.Operation) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun transition_ok(outcome: cancel.Transition) bool {
     ret (sel outcome.ok) && outcome.ok;
 }
 
+#[testing]
 fun scope_active(scope: *cancel.Scope) bool {
     val reason: cancel.Reason = cancel.reason(scope);
     ret sel reason.active;
@@ -1956,6 +1960,7 @@ pub fun stop_manager(manager: *Manager) StoreStatus {
     ret stopped;
 }
 
+#[testing]
 rec TestEntropyState {
     seed:   u8;
     calls:  usize;
@@ -1963,6 +1968,7 @@ rec TestEntropyState {
     repeat: bool;
 }
 
+#[testing]
 fun test_entropy_fill(ctx: ptr, output: *u8, len: usize) i64 {
     val state: *TestEntropyState = ctx::*TestEntropyState;
     if (state == nil || state.fail || (len != 0 && output == nil)) { ret -1; }
@@ -1976,6 +1982,7 @@ fun test_entropy_fill(ctx: ptr, output: *u8, len: usize) i64 {
     ret 0;
 }
 
+#[testing]
 fun test_entropy_aliases(ctx: ptr, data: *u8, len: usize) bool {
     val state: *TestEntropyState = ctx::*TestEntropyState;
     if (state == nil || !range_valid(state::*u8, $size_of(TestEntropyState))
@@ -1983,11 +1990,13 @@ fun test_entropy_aliases(ctx: ptr, data: *u8, len: usize) bool {
     ret ranges_overlap(data, len, state::*u8, $size_of(TestEntropyState));
 }
 
+#[testing]
 rec MutatingEntropyState {
     source: *Session;
     calls:  usize;
 }
 
+#[testing]
 fun mutating_entropy_fill(ctx: ptr, output: *u8, len: usize) i64 {
     val state: *MutatingEntropyState = ctx::*MutatingEntropyState;
     if (state == nil || state.source == nil || output == nil) { ret -1; }
@@ -2002,6 +2011,7 @@ fun mutating_entropy_fill(ctx: ptr, output: *u8, len: usize) i64 {
     ret 0;
 }
 
+#[testing]
 fun mutating_entropy_aliases(ctx: ptr, data: *u8, len: usize) bool {
     val state: *MutatingEntropyState = ctx::*MutatingEntropyState;
     if (state == nil
@@ -2011,11 +2021,13 @@ fun mutating_entropy_aliases(ctx: ptr, data: *u8, len: usize) bool {
         $size_of(MutatingEntropyState));
 }
 
+#[testing]
 rec MutatingGuardState {
     inner:     Guard;
     mutations: usize;
 }
 
+#[testing]
 fun mutating_guard_claim(ctx: ptr, key_id: u32, token: *u8,
     token_len: usize, expires_at: i64, now: i64) GuardStatus {
     val state: *MutatingGuardState = ctx::*MutatingGuardState;
@@ -2029,6 +2041,7 @@ fun mutating_guard_claim(ctx: ptr, key_id: u32, token: *u8,
     ret status;
 }
 
+#[testing]
 fun mutating_guard_forget(ctx: ptr, key_id: u32, token: *u8,
     token_len: usize) GuardStatus {
     val state: *MutatingGuardState = ctx::*MutatingGuardState;
@@ -2042,6 +2055,7 @@ fun mutating_guard_forget(ctx: ptr, key_id: u32, token: *u8,
     ret status;
 }
 
+#[testing]
 fun mutating_guard_aliases(ctx: ptr, data: *u8, len: usize) bool {
     val state: *MutatingGuardState = ctx::*MutatingGuardState;
     if (state == nil || !range_valid(data, len)
@@ -2051,6 +2065,7 @@ fun mutating_guard_aliases(ctx: ptr, data: *u8, len: usize) bool {
         || state.inner.aliases(state.inner.ctx, data, len);
 }
 
+#[testing]
 fun mutating_guard_overlaps(ctx: ptr, other_ctx: ptr,
     other_aliases: AliasesFun) bool {
     val state: *MutatingGuardState = ctx::*MutatingGuardState;
@@ -2060,6 +2075,7 @@ fun mutating_guard_overlaps(ctx: ptr, other_ctx: ptr,
         || state.inner.overlaps(state.inner.ctx, other_ctx, other_aliases);
 }
 
+#[testing]
 fun mutating_guard(state: *MutatingGuardState) Guard {
     if (state == nil || !guard_valid(state.inner)) {
         ret Guard{ctx: nil, domain: nil, aliases: nil, overlaps: nil,
@@ -2070,6 +2086,7 @@ fun mutating_guard(state: *MutatingGuardState) Guard {
         claim:   mutating_guard_claim, forget: mutating_guard_forget};
 }
 
+#[testing]
 rec CodecFixture {
     keys:         [2]KeyGeneration;
     ring:         KeyRing;
@@ -2082,6 +2099,7 @@ rec CodecFixture {
     codec:        Codec;
 }
 
+#[testing]
 fun init_codec_fixture(fixture: *CodecFixture, algorithm: Algorithm,
     replay_policy: ReplayPolicy, nonce_capacity: usize,
     replay_capacity: usize) bool {
@@ -2129,6 +2147,7 @@ fun init_codec_fixture(fixture: *CodecFixture, algorithm: Algorithm,
     ret fixture.codec.encode != nil && fixture.codec.decode != nil;
 }
 
+#[testing]
 fun release_codec_fixture(fixture: *CodecFixture) bool {
     ret release_protected_codec(?fixture.protected)
         && release_memory_guard(?fixture.nonce_guard)
@@ -2136,6 +2155,7 @@ fun release_codec_fixture(fixture: *CodecFixture) bool {
         && release_key_ring(?fixture.ring);
 }
 
+#[testing]
 fun duplicate_generation_rejected(algorithm: Algorithm) bool {
     var items: [2]KeyGeneration;
     items[0].id           = 1;
@@ -2163,6 +2183,7 @@ fun duplicate_generation_rejected(algorithm: Algorithm) bool {
         (?ring)::ptr) && !ring.active;
 }
 
+#[testing]
 fun mutating_guard_rejected(algorithm: Algorithm) bool {
     var fixture: CodecFixture;
     if (!init_codec_fixture(?fixture, algorithm, REPLAY_ALLOW, 8, 8)
@@ -2197,6 +2218,7 @@ fun mutating_guard_rejected(algorithm: Algorithm) bool {
     ret release_codec_fixture(?fixture);
 }
 
+#[testing]
 fun rotation_round_trip(algorithm: Algorithm) bool {
     var fixture: CodecFixture;
     if (!init_codec_fixture(?fixture, algorithm, REPLAY_ALLOW, 8, 8)) {
@@ -2225,6 +2247,7 @@ fun rotation_round_trip(algorithm: Algorithm) bool {
     ret release_codec_fixture(?fixture);
 }
 
+#[testing]
 fun sample_session() Session {
     ret Session{id: view.view("session-id", 10),
         data:            view.view("authenticated state", 19),
@@ -2856,6 +2879,7 @@ pub fun load(request_context: *context.Context, now_unix: i64) RequestStatus {
         now_unix, context.cancellation(request_context));
 }
 
+#[testing]
 rec RequestFixture {
     codec_fixture:  CodecFixture;
     memory:         MemoryStore;
@@ -2874,6 +2898,7 @@ rec RequestFixture {
     session:        RequestSession;
 }
 
+#[testing]
 fun request_fixture_storage(fixture: *RequestFixture) RequestStorage {
     ret RequestStorage{jar_items: ?fixture.jar_items[0], jar_capacity: 8,
         id_bytes:     ?fixture.id_bytes[0], id_capacity: 64,
@@ -2882,6 +2907,7 @@ fun request_fixture_storage(fixture: *RequestFixture) RequestStorage {
         header_bytes: ?fixture.header_bytes[0], header_capacity: 1024};
 }
 
+#[testing]
 fun init_request_fixture(fixture: *RequestFixture) bool {
     if (!init_codec_fixture(?fixture.codec_fixture, AES_256_GCM, REPLAY_ALLOW,
         8, 8)) { ret false; }
@@ -2917,6 +2943,7 @@ fun init_request_fixture(fixture: *RequestFixture) bool {
         request_fixture_storage(fixture));
 }
 
+#[testing]
 fun emitted_cookie(fixture: *RequestFixture) view.View {
     var i: usize = 0;
     for (i < fixture.response.fields.len) {
@@ -2929,6 +2956,7 @@ fun emitted_cookie(fixture: *RequestFixture) view.View {
     ret view.view(nil, 0);
 }
 
+#[testing]
 fun view_contains(haystack: view.View, needle: str) bool {
     val length: usize = str_len(needle);
     if (length == 0 || haystack.len < length || haystack.data == nil) {
@@ -2950,6 +2978,7 @@ fun view_contains(haystack: view.View, needle: str) bool {
 
 # take the token out of one response's Set-Cookie and present it as the next
 # request's Cookie, which is what a browser does
+#[testing]
 fun replay_cookie(fixture: *RequestFixture, buffer: *u8,
     capacity: usize) bool {
     val header: view.View = emitted_cookie(fixture);
@@ -2974,6 +3003,7 @@ fun replay_cookie(fixture: *RequestFixture, buffer: *u8,
     }) == field.ADD_OK;
 }
 
+#[testing]
 fun reset_response(fixture: *RequestFixture) {
     fixture.response.fields = field.init(?fixture.response_items[0], 8,
         field.limits(8, 8192, 64, 4096));
@@ -3728,6 +3758,7 @@ test ranges__inclusive_maximum_overlap {
     ret 0;
 }
 
+#[testing]
 rec UpdateAttempt {
     store:  *MemoryStore;
     value:  Session;
@@ -3735,6 +3766,7 @@ rec UpdateAttempt {
     result: SaveResult;
 }
 
+#[testing]
 fun concurrent_update(arg: *u8) {
     val attempt: *UpdateAttempt = arg::*UpdateAttempt;
     attempt.result = SaveResult{version: 0, generation: 0};
@@ -3742,6 +3774,7 @@ fun concurrent_update(arg: *u8) {
         ?attempt.result, nil);
 }
 
+#[testing]
 rec DurableProbe {
     starts:        usize;
     stops:         usize;
@@ -3759,12 +3792,14 @@ rec DurableProbe {
     stop_reentry:  StoreStatus;
 }
 
+#[testing]
 fun durable_aliases(ctx: ptr, data: *u8, len: usize) bool {
     val probe: *DurableProbe = ctx::*DurableProbe;
     if (probe == nil || !range_valid(data, len)) { ret true; }
     ret ranges_overlap(data, len, probe::*u8, $size_of(DurableProbe));
 }
 
+#[testing]
 fun durable_start(ctx: ptr) StoreStatus {
     val probe: *DurableProbe = ctx::*DurableProbe;
     if (probe == nil || probe.active) { ret STORE_INVALID; }
@@ -3777,6 +3812,7 @@ fun durable_start(ctx: ptr) StoreStatus {
     ret STORE_OK;
 }
 
+#[testing]
 fun durable_stop(ctx: ptr) StoreStatus {
     val probe: *DurableProbe = ctx::*DurableProbe;
     if (probe == nil || !probe.active) { ret STORE_INVALID; }
@@ -3789,6 +3825,7 @@ fun durable_stop(ctx: ptr) StoreStatus {
     ret STORE_OK;
 }
 
+#[testing]
 fun durable_load(ctx: ptr, id: view.View, now: i64, data_output: *u8,
     data_capacity: usize, output: *Session,
     scope: *cancel.Scope) StoreStatus {
@@ -3799,6 +3836,7 @@ fun durable_load(ctx: ptr, id: view.View, now: i64, data_output: *u8,
     ret STORE_NOT_FOUND;
 }
 
+#[testing]
 fun durable_save(ctx: ptr, value: *Session, expected_version: u64,
     now: i64, result: *SaveResult, scope: *cancel.Scope) StoreStatus {
     val probe: *DurableProbe = ctx::*DurableProbe;
@@ -3814,6 +3852,7 @@ fun durable_save(ctx: ptr, value: *Session, expected_version: u64,
     ret STORE_OK;
 }
 
+#[testing]
 fun durable_replace(ctx: ptr, old_id: view.View, expected_version: u64,
     generation: u64, replacement: *Session, now: i64,
     result: *SaveResult, scope: *cancel.Scope) StoreStatus {
@@ -3824,6 +3863,7 @@ fun durable_replace(ctx: ptr, old_id: view.View, expected_version: u64,
     ret STORE_NOT_FOUND;
 }
 
+#[testing]
 fun durable_reap(ctx: ptr, now: i64, result: *usize,
     scope: *cancel.Scope) StoreStatus {
     val probe: *DurableProbe = ctx::*DurableProbe;
@@ -3836,6 +3876,7 @@ fun durable_reap(ctx: ptr, now: i64, result: *usize,
     ret STORE_OK;
 }
 
+#[testing]
 fun durable_delete(ctx: ptr, id: view.View, expected_version: u64,
     generation: u64, scope: *cancel.Scope) StoreStatus {
     val probe: *DurableProbe = ctx::*DurableProbe;
@@ -3845,6 +3886,7 @@ fun durable_delete(ctx: ptr, id: view.View, expected_version: u64,
     ret STORE_NOT_FOUND;
 }
 
+#[testing]
 fun durable_store(probe: *DurableProbe) Store {
     if (probe == nil) {
         ret Store{ctx: nil, aliases: nil, start: nil, stop: nil, load: nil,
@@ -4058,12 +4100,14 @@ test store__reclaim_and_replace_atomic {
     ret 0;
 }
 
+#[testing]
 rec StoreLifecycleRace {
     store:    *MemoryStore;
     started:  *i64;
     failures: *i64;
 }
 
+#[testing]
 fun store_lifecycle_worker(arg: *u8) {
     val race: *StoreLifecycleRace = arg::*StoreLifecycleRace;
     atomic.store(race.started, 1);
@@ -4115,12 +4159,14 @@ test store__lifecycle_serializes_operations {
     ret 0;
 }
 
+#[testing]
 rec ManagerAttempt {
     manager: *Manager;
     start:   bool;
     status:  StoreStatus;
 }
 
+#[testing]
 fun manager_transition_worker(arg: *u8) {
     val attempt: *ManagerAttempt = arg::*ManagerAttempt;
     if (attempt.start) {

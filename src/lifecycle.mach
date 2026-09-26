@@ -317,6 +317,7 @@ pub fun destroy(controller: *Controller) bool {
     ret true;
 }
 
+#[testing]
 rec TestService {
     id:            usize;
     start_pending: usize;
@@ -331,14 +332,18 @@ rec TestService {
     stop_calls:    usize;
 }
 
-var trace:     [32]usize;
+#[testing]
+var trace: [32]usize;
+#[testing]
 var trace_len: usize;
 
+#[testing]
 fun trace_push(value: usize) {
     trace[trace_len] = value;
     trace_len        = trace_len + 1;
 }
 
+#[testing]
 fun test_start(context: ptr) res[CallbackStatus, view.View] {
     val service: *TestService = context::*TestService;
     service.start_calls = service.start_calls + 1;
@@ -351,10 +356,12 @@ fun test_start(context: ptr) res[CallbackStatus, view.View] {
     ret res[CallbackStatus, view.View].ok{CALLBACK_DONE};
 }
 
+#[testing]
 fun test_ready(context: ptr) Readiness {
     ret (context::*TestService).readiness;
 }
 
+#[testing]
 fun test_drain(context: ptr, deadline: opt[time.Instant]) res[CallbackStatus, view.View] {
     val service: *TestService = context::*TestService;
     service.drain_calls = service.drain_calls + 1;
@@ -367,6 +374,7 @@ fun test_drain(context: ptr, deadline: opt[time.Instant]) res[CallbackStatus, vi
     ret res[CallbackStatus, view.View].ok{CALLBACK_DONE};
 }
 
+#[testing]
 fun test_stop(context: ptr) res[CallbackStatus, view.View] {
     val service: *TestService = context::*TestService;
     service.stop_calls = service.stop_calls + 1;
@@ -382,6 +390,7 @@ fun test_stop(context: ptr) res[CallbackStatus, view.View] {
     ret res[CallbackStatus, view.View].ok{CALLBACK_DONE};
 }
 
+#[testing]
 fun test_items(states: *TestService, items: *Lifecycle, length: usize) {
     var i: usize = 0;
     for (i < length) {

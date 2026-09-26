@@ -18,10 +18,12 @@ use std.types.string.str;
 use std.types.string.str_len;
 use std.types.view;
 
+#[testing]
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun transition_ok(outcome: cancel.Transition) bool {
     ret (sel outcome.ok) && outcome.ok;
 }
@@ -767,6 +769,7 @@ pub fun complete_body(parser: *BodyParser, token: u64) Operation {
     ret consume_progress(parser, progress);
 }
 
+#[testing]
 fun view_equal(value: view.View, expected: str) bool {
     val len: usize = str_len(expected);
     if (value.len != len || !range_valid(value.data, value.len)) { ret false; }
@@ -806,6 +809,7 @@ test urlencoded__byte_fragmentation {
     ret 0;
 }
 
+#[testing]
 fun rejected(input: str, expected: Status) bool {
     var fields:  [2]Field;
     var bytes:   [32]u8;
@@ -857,6 +861,7 @@ test urlencoded__limits_and_aliases {
     ret 0;
 }
 
+#[testing]
 rec TestBody {
     input:               view.View;
     offset:              usize;
@@ -869,6 +874,7 @@ rec TestBody {
     release_calls:       usize;
 }
 
+#[testing]
 fun test_body_emit(state: *TestBody, output: *u8,
     capacity: usize) body.Progress {
     if (state.offset == state.input.len) {
@@ -889,6 +895,7 @@ fun test_body_emit(state: *TestBody, output: *u8,
     ret body.data(count);
 }
 
+#[testing]
 fun test_body_read(ctx: ptr, output: *u8, capacity: usize,
     trailers: *field.Fields) body.Progress {
     val state: *TestBody = ctx::*TestBody;
@@ -901,6 +908,7 @@ fun test_body_read(ctx: ptr, output: *u8, capacity: usize,
     ret test_body_emit(state, output, capacity);
 }
 
+#[testing]
 fun test_body_finish(ctx: ptr, mode: body.Mode,
     trailers: *field.Fields) body.Progress {
     val state: *TestBody = ctx::*TestBody;
@@ -916,6 +924,7 @@ fun test_body_finish(ctx: ptr, mode: body.Mode,
     ret body.complete(body.REUSE_ALLOWED);
 }
 
+#[testing]
 fun test_body_complete(ctx: ptr, token: u64,
     trailers: *field.Fields) body.Progress {
     val state: *TestBody = ctx::*TestBody;
@@ -936,11 +945,13 @@ fun test_body_complete(ctx: ptr, token: u64,
     ret body.failed("invalid test body completion", body.REUSE_FORBIDDEN);
 }
 
+#[testing]
 fun test_body_release(ctx: ptr) {
     val state: *TestBody = ctx::*TestBody;
     state.release_calls = state.release_calls + 1;
 }
 
+#[testing]
 fun make_reader(state: *TestBody, scope: *cancel.Scope,
     trailers: *field.Fields, max_bytes: u64) body.Reader {
     ret body.init_reader(state::ptr, test_body_read, test_body_finish,

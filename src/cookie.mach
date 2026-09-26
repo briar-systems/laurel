@@ -898,6 +898,7 @@ pub fun serialize_set_cookie(cookie: *Cookie, output: *u8,
     ret Operation{status: OK, written: offset};
 }
 
+#[testing]
 fun bytes_equal(actual: *u8, actual_len: usize, expected: *u8,
     expected_len: usize) bool {
     if (actual_len != expected_len || actual == nil || expected == nil) {

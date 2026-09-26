@@ -23,10 +23,12 @@ use std.types.size.usize;
 use std.types.string.str;
 use std.types.view;
 
+#[testing]
 fun fixed_ok(outcome: err[A.Error]) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
@@ -35,6 +37,7 @@ fun transition_ok(outcome: cancel.Transition) bool {
     ret (sel outcome.ok) && outcome.ok;
 }
 
+#[testing]
 fun scope_active(scope: *cancel.Scope) bool {
     val reason: cancel.Reason = cancel.reason(scope);
     ret sel reason.active;
@@ -600,6 +603,7 @@ pub fun pending_token(execution: *Execution) u64 {
     ret execution.token;
 }
 
+#[testing]
 rec Fixture {
     limits:            message.Limits;
     scope:             cancel.Scope;
@@ -618,16 +622,19 @@ rec Fixture {
     request_context:   context.Context;
 }
 
+#[testing]
 rec Trace {
     events:         [32]u8;
     len:            usize;
     terminal_calls: usize;
 }
 
+#[testing]
 rec MutableError {
     message: [14]u8;
 }
 
+#[testing]
 rec StackMutation {
     trace:             *Trace;
     stack:             *Stack;
@@ -635,6 +642,7 @@ rec StackMutation {
     replacement_len:   usize;
 }
 
+#[testing]
 rec Reentrant {
     trace:        *Trace;
     stack:        *Stack;
@@ -645,6 +653,7 @@ rec Reentrant {
     inner_status: ExecutionStatus;
 }
 
+#[testing]
 rec ReentrantMapper {
     stack:        *Stack;
     terminal:     handler.Handler;
@@ -655,12 +664,14 @@ rec ReentrantMapper {
 
 # per-request state a step leaves in its driver slot, allocated from the request
 # arena so it survives a suspension
+#[testing]
 rec Work {
     done:    usize;
     resumes: usize;
     carried: handler.Result;
 }
 
+#[testing]
 rec Suspender {
     trace:      *Trace;
     suspends:   usize;
@@ -671,6 +682,7 @@ rec Suspender {
     token:      u64;
 }
 
+#[testing]
 rec Halves {
     trace:  *Trace;
     before: u8;
@@ -680,6 +692,7 @@ rec Halves {
     token:  u64;
 }
 
+#[testing]
 fun fixture_init(fixture: *Fixture, generation: u64) bool {
     if (fixture == nil || generation == 0) { ret false; }
     fixture.limits = message.limits_default();
@@ -715,6 +728,7 @@ fun fixture_init(fixture: *Fixture, generation: u64) bool {
     ret true;
 }
 
+#[testing]
 fun fixture_end(fixture: *Fixture) bool {
     if (fixture == nil) { ret false; }
     if (fixture.request_context.bound
@@ -724,6 +738,7 @@ fun fixture_end(fixture: *Fixture) bool {
     ret operation_ok(cancel.destroy(?fixture.scope));
 }
 
+#[testing]
 fun record(trace: *Trace, event: u8) bool {
     if (trace == nil || trace.len >= 32) { ret false; }
     trace.events[trace.len] = event;
@@ -731,10 +746,12 @@ fun record(trace: *Trace, event: u8) bool {
     ret true;
 }
 
+#[testing]
 fun trace_error(detail: str) handler.Result {
     ret handler.fail(internal(detail));
 }
 
+#[testing]
 fun first_before(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val trace: *Trace = ctx::*Trace;
@@ -742,6 +759,7 @@ fun first_before(ctx: ptr, request_context: *context.Context,
     ret handler.proceed();
 }
 
+#[testing]
 fun first_after(ctx: ptr, request_context: *context.Context, state: ptr,
     carried: handler.Result) handler.Result {
     val trace: *Trace = ctx::*Trace;
@@ -749,6 +767,7 @@ fun first_after(ctx: ptr, request_context: *context.Context, state: ptr,
     ret carried;
 }
 
+#[testing]
 fun second_before(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val trace: *Trace = ctx::*Trace;
@@ -756,6 +775,7 @@ fun second_before(ctx: ptr, request_context: *context.Context,
     ret handler.proceed();
 }
 
+#[testing]
 fun second_after(ctx: ptr, request_context: *context.Context, state: ptr,
     carried: handler.Result) handler.Result {
     val trace: *Trace = ctx::*Trace;
@@ -763,6 +783,7 @@ fun second_after(ctx: ptr, request_context: *context.Context, state: ptr,
     ret carried;
 }
 
+#[testing]
 fun traced_terminal(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val trace: *Trace = ctx::*Trace;
@@ -771,6 +792,7 @@ fun traced_terminal(ctx: ptr, request_context: *context.Context,
     ret handler.respond();
 }
 
+#[testing]
 fun short_before(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val trace: *Trace = ctx::*Trace;
@@ -778,6 +800,7 @@ fun short_before(ctx: ptr, request_context: *context.Context,
     ret handler.respond();
 }
 
+#[testing]
 fun invalid_terminal(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val trace: *Trace = ctx::*Trace;
@@ -785,12 +808,14 @@ fun invalid_terminal(ctx: ptr, request_context: *context.Context,
     ret handler.Result.ok{handler.Disposition{action: 99, token: 0}};
 }
 
+#[testing]
 fun private_error_terminal(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     ret handler.fail(error.make(error.INTERNAL, 500,
         "unsafe public text", "top-secret database detail", false));
 }
 
+#[testing]
 fun mutable_error_terminal(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val source: *MutableError = ctx::*MutableError;
@@ -799,6 +824,7 @@ fun mutable_error_terminal(ctx: ptr, request_context: *context.Context,
         view.view("private detail", 14), false));
 }
 
+#[testing]
 fun inner_error_before(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val trace: *Trace = ctx::*Trace;
@@ -807,6 +833,7 @@ fun inner_error_before(ctx: ptr, request_context: *context.Context,
         "inner forbidden", "inner private detail", false));
 }
 
+#[testing]
 fun replace_error_before(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val trace: *Trace = ctx::*Trace;
@@ -814,6 +841,7 @@ fun replace_error_before(ctx: ptr, request_context: *context.Context,
     ret handler.proceed();
 }
 
+#[testing]
 fun replace_error_after(ctx: ptr, request_context: *context.Context,
     state: ptr, carried: handler.Result) handler.Result {
     val trace: *Trace = ctx::*Trace;
@@ -825,6 +853,7 @@ fun replace_error_after(ctx: ptr, request_context: *context.Context,
     ret carried;
 }
 
+#[testing]
 fun cancel_before(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val trace: *Trace = ctx::*Trace;
@@ -834,6 +863,7 @@ fun cancel_before(ctx: ptr, request_context: *context.Context,
     ret handler.proceed();
 }
 
+#[testing]
 fun cancel_after(ctx: ptr, request_context: *context.Context, state: ptr,
     carried: handler.Result) handler.Result {
     val trace: *Trace = ctx::*Trace;
@@ -841,6 +871,7 @@ fun cancel_after(ctx: ptr, request_context: *context.Context, state: ptr,
     ret carried;
 }
 
+#[testing]
 fun mutate_stack_before(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val mutation: *StackMutation = ctx::*StackMutation;
@@ -853,6 +884,7 @@ fun mutate_stack_before(ctx: ptr, request_context: *context.Context,
     ret handler.proceed();
 }
 
+#[testing]
 fun reentrant_before(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val reentrant: *Reentrant = ctx::*Reentrant;
@@ -870,6 +902,7 @@ fun reentrant_before(ctx: ptr, request_context: *context.Context,
     ret handler.proceed();
 }
 
+#[testing]
 fun failing_mapper(ctx: ptr, app_error: error.AppError,
     request_context: *context.Context) res[u8, error.RenderFailure] {
     val failure: error.RenderFailure = error.render_failure(
@@ -877,6 +910,7 @@ fun failing_mapper(ctx: ptr, app_error: error.AppError,
     ret res[u8, error.RenderFailure].err{failure};
 }
 
+#[testing]
 fun reentrant_mapper(ctx: ptr, app_error: error.AppError,
     request_context: *context.Context) res[u8, error.RenderFailure] {
     val reentrant: *ReentrantMapper = ctx::*ReentrantMapper;
@@ -893,6 +927,7 @@ fun reentrant_mapper(ctx: ptr, app_error: error.AppError,
         "mapper stack-local failure")};
 }
 
+#[testing]
 fun suspending_terminal(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val suspender: *Suspender = ctx::*Suspender;
@@ -912,6 +947,7 @@ fun suspending_terminal(ctx: ptr, request_context: *context.Context,
     ret handler.suspend(1001);
 }
 
+#[testing]
 fun suspending_resume(ctx: ptr, request_context: *context.Context,
     state: ptr, settlement: handler.Settlement, token: u64) handler.Result {
     val suspender: *Suspender = ctx::*Suspender;
@@ -935,12 +971,14 @@ fun suspending_resume(ctx: ptr, request_context: *context.Context,
     ret handler.respond();
 }
 
+#[testing]
 fun no_resume_terminal(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     ret handler.suspend(7);
 }
 
 # a middleware that suspends in whichever half the test arms
+#[testing]
 fun halves_before(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val halves: *Halves = ctx::*Halves;
@@ -958,6 +996,7 @@ fun halves_before(ctx: ptr, request_context: *context.Context,
     ret handler.proceed();
 }
 
+#[testing]
 fun halves_after(ctx: ptr, request_context: *context.Context, state: ptr,
     carried: handler.Result) handler.Result {
     val halves: *Halves = ctx::*Halves;
@@ -974,6 +1013,7 @@ fun halves_after(ctx: ptr, request_context: *context.Context, state: ptr,
     ret carried;
 }
 
+#[testing]
 fun halves_resume(ctx: ptr, request_context: *context.Context, state: ptr,
     settlement: handler.Settlement, token: u64) handler.Result {
     val halves: *Halves = ctx::*Halves;
@@ -989,6 +1029,7 @@ fun halves_resume(ctx: ptr, request_context: *context.Context, state: ptr,
     ret handler.proceed();
 }
 
+#[testing]
 fun response_text(fixture: *Fixture, output: *u8,
     output_capacity: usize, output_len: *usize) bool {
     if (fixture == nil || output == nil || output_len == nil
@@ -1003,6 +1044,7 @@ fun response_text(fixture: *Fixture, output: *u8,
     ret finished.status == body.COMPLETE;
 }
 
+#[testing]
 fun bytes_equal(actual: *u8, actual_len: usize,
     expected: *u8, expected_len: usize) bool {
     if (actual_len != expected_len || actual == nil || expected == nil) { ret false; }
@@ -1014,6 +1056,7 @@ fun bytes_equal(actual: *u8, actual_len: usize,
     ret true;
 }
 
+#[testing]
 fun default_error_mapper(fixture: *Fixture,
     renderer: *error.Default) error.Mapper {
     if (!error.initialize_default(renderer, fixture.limits, 128)) {
@@ -1022,10 +1065,12 @@ fun default_error_mapper(fixture: *Fixture,
     ret error.default_mapper(renderer);
 }
 
+#[testing]
 fun traced_handler(trace: *Trace) handler.Handler {
     ret handler.Handler{ctx: trace::ptr, call: traced_terminal, resume: nil};
 }
 
+#[testing]
 fun traced_middleware(trace: *Trace, before: handler.EnterFun,
     after: LeaveFun) Middleware {
     ret Middleware{ctx: trace::ptr, before: before, resume: nil, after: after};

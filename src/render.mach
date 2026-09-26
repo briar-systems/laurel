@@ -23,14 +23,17 @@ use std.types.result.res;
 use std.types.size.usize;
 use std.types.view;
 
+#[testing]
 fun fixed_ok(outcome: err[A.Error]) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun transition_ok(outcome: cancel.Transition) bool {
     ret (sel outcome.ok) && outcome.ok;
 }
@@ -737,6 +740,7 @@ pub fun render_into_with_limits(renderer: *Renderer, name: view.View, model: ptr
         "internal server error", "render response installation failed", false)};
 }
 
+#[testing]
 rec Fixture {
     scope:             cancel.Scope;
     request_body:      body.Reader;
@@ -753,6 +757,7 @@ rec Fixture {
     owner:             i64;
 }
 
+#[testing]
 fun fixture_limits() message.Limits {
     var configured: message.Limits = message.limits_default();
     configured.response_fields   = field.limits(16, 1024, 64, 256);
@@ -760,6 +765,7 @@ fun fixture_limits() message.Limits {
     ret configured;
 }
 
+#[testing]
 fun init_fixture_with_limits(state: *Fixture, generation: u64, configured: message.Limits) bool {
     if (state == nil || !operation_ok(cancel.make_root(?state.scope, opt[time.Instant].none{}))) {
         ret false;
@@ -790,10 +796,12 @@ fun init_fixture_with_limits(state: *Fixture, generation: u64, configured: messa
         ?state.owner, 3, nil, view.view("render-request", 14), 32);
 }
 
+#[testing]
 fun init_fixture(state: *Fixture, generation: u64) bool {
     ret init_fixture_with_limits(state, generation, fixture_limits());
 }
 
+#[testing]
 fun same(actual: *u8, length: usize, expected: view.View) bool {
     if (length != expected.len) { ret false; }
     var i: usize = 0;
@@ -925,6 +933,7 @@ test respond__fixed_body {
     ret 0;
 }
 
+#[testing]
 rec TestSource {
     produces:    usize;
     resumes:     usize;
@@ -935,6 +944,7 @@ rec TestSource {
     total:       u8;
 }
 
+#[testing]
 fun test_emit(state: *TestSource, output: *u8, capacity: usize) Chunk {
     if (state.emitted == state.total) { ret chunk_end(); }
     if (capacity < 4)                 { ret chunk_failed(); }
@@ -946,6 +956,7 @@ fun test_emit(state: *TestSource, output: *u8, capacity: usize) Chunk {
     ret chunk_data(4);
 }
 
+#[testing]
 fun test_produce(ctx: ptr, output: *u8, capacity: usize) Chunk {
     val state: *TestSource = ctx::*TestSource;
     state.produces = state.produces + 1;
@@ -956,6 +967,7 @@ fun test_produce(ctx: ptr, output: *u8, capacity: usize) Chunk {
     ret test_emit(state, output, capacity);
 }
 
+#[testing]
 fun test_resume(ctx: ptr, token: u64, output: *u8, capacity: usize) Chunk {
     val state: *TestSource = ctx::*TestSource;
     state.resumes = state.resumes + 1;
@@ -963,6 +975,7 @@ fun test_resume(ctx: ptr, token: u64, output: *u8, capacity: usize) Chunk {
     ret test_emit(state, output, capacity);
 }
 
+#[testing]
 fun test_settle(ctx: ptr, mode: body.Mode) bool {
     val state: *TestSource = ctx::*TestSource;
     state.settles     = state.settles + 1;
@@ -1033,6 +1046,7 @@ test render_into__renderer_body {
     ret 0;
 }
 
+#[testing]
 rec TemplateFree {
     media:      *Media;
     content:    *Fixed;
@@ -1041,6 +1055,7 @@ rec TemplateFree {
     fail:       bool;
 }
 
+#[testing]
 fun test_render(ctx: ptr, name: view.View, model: ptr) res[Rendered, error.AppError] {
     val state: *TemplateFree = ctx::*TemplateFree;
     state.calls = state.calls + 1;

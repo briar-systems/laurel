@@ -20,14 +20,17 @@ use std.types.size.usize;
 use std.types.string.str;
 use std.types.view;
 
+#[testing]
 fun fixed_ok(outcome: err[A.Error]) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun is_err_u8_error_apperror(outcome: res[u8, error.AppError]) bool {
     ret sel outcome.err;
 }
 
+#[testing]
 fun is_ok_u8_error_apperror(outcome: res[u8, error.AppError]) bool {
     ret sel outcome.ok;
 }
@@ -849,11 +852,13 @@ pub fun uuid_decoder() Decoder {
     ret Decoder{ctx: nil, kind: VALUE_UUID, call: uuid_decode};
 }
 
+#[testing]
 fun test_handler(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     ret handler.respond();
 }
 
+#[testing]
 fun test_route(route_method: Method, route_host: Host, route_path: Path,
     parameters: *Parameter, parameter_len: usize, name: str) Route {
     ret Route{method: route_method, host: route_host, path: route_path,
@@ -861,6 +866,7 @@ fun test_route(route_method: Method, route_host: Host, route_path: Path,
         handler: handler.Handler{ctx: nil, call: test_handler, resume: nil}};
 }
 
+#[testing]
 fun test_request(request: *message.Request, request_method: method.Method,
     request_path: view.View, host_item: *field.Field, host: view.View,
     generation: u64) bool {
@@ -1054,6 +1060,7 @@ test decoders__bounds_and_malformed {
     ret 0;
 }
 
+#[testing]
 fun test_fallback(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val seen: *usize = ctx::*usize;

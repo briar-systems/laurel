@@ -762,6 +762,7 @@ pub fun release_principal(authenticator: *Authenticator,
     ret true;
 }
 
+#[testing]
 rec PolicyFixture {
     request_items:  [8]field.Field;
     response_items: [8]field.Field;
@@ -769,6 +770,7 @@ rec PolicyFixture {
     response:       message.Response;
 }
 
+#[testing]
 fun init_policy_fixture(fixture: *PolicyFixture, request_method: method.Method,
     secure: bool, response_capacity: usize) bool {
     if (fixture == nil || response_capacity > 8) { ret false; }
@@ -804,6 +806,7 @@ fun init_policy_fixture(fixture: *PolicyFixture, request_method: method.Method,
     ret true;
 }
 
+#[testing]
 fun request_header(fixture: *PolicyFixture, name: *u8, name_len: usize,
     value: *u8, value_len: usize) bool {
     ret field.append(?fixture.request.fields, field.Field{

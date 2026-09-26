@@ -24,23 +24,28 @@ use std.types.string.str;
 use std.types.string.str_len;
 use std.types.view;
 
+#[testing]
 fun fixed_ok(outcome: err[A.Error]) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun transition_ok(outcome: cancel.Transition) bool {
     ret (sel outcome.ok) && outcome.ok;
 }
 
+#[testing]
 fun scope_active(scope: *cancel.Scope) bool {
     val reason: cancel.Reason = cancel.reason(scope);
     ret sel reason.active;
 }
 
+#[testing]
 fun scope_cancelled(scope: *cancel.Scope) bool {
     val reason: cancel.Reason = cancel.reason(scope);
     ret sel reason.cancelled;
@@ -468,16 +473,26 @@ pub fun default_mapper(renderer: *Default) Mapper {
     ret Mapper{ctx: renderer::ptr, render: render_default};
 }
 
+#[testing]
 def HostileMode: u8;
-val HOSTILE_INVALIDATE:  HostileMode = 1;
-val HOSTILE_COMMIT:      HostileMode = 2;
-val HOSTILE_BODY:        HostileMode = 3;
-val HOSTILE_CANCEL:      HostileMode = 4;
-val HOSTILE_FIELDS:      HostileMode = 5;
-val HOSTILE_IDENTITY:    HostileMode = 6;
-val HOSTILE_GENERATION:  HostileMode = 7;
+#[testing]
+val HOSTILE_INVALIDATE: HostileMode = 1;
+#[testing]
+val HOSTILE_COMMIT: HostileMode = 2;
+#[testing]
+val HOSTILE_BODY: HostileMode = 3;
+#[testing]
+val HOSTILE_CANCEL: HostileMode = 4;
+#[testing]
+val HOSTILE_FIELDS: HostileMode = 5;
+#[testing]
+val HOSTILE_IDENTITY: HostileMode = 6;
+#[testing]
+val HOSTILE_GENERATION: HostileMode = 7;
+#[testing]
 val HOSTILE_CANCEL_FAIL: HostileMode = 8;
 
+#[testing]
 rec HostileAllocator {
     backing:            A.Allocator;
     exposed:            *A.Allocator;
@@ -493,6 +508,7 @@ rec HostileAllocator {
     mode:               HostileMode;
 }
 
+#[testing]
 fun hostile_allocate(ctx: ptr, size: usize, align: usize) opt[ptr] {
     val state: *HostileAllocator = ctx::*HostileAllocator;
     if (state == nil) { ret opt[ptr].none{}; }
@@ -528,6 +544,7 @@ fun hostile_allocate(ctx: ptr, size: usize, align: usize) opt[ptr] {
     ret allocated;
 }
 
+#[testing]
 fun hostile_reallocate(ctx: ptr, allocation: ptr, old_size: usize,
     new_size: usize, align: usize) opt[ptr] {
     val state: *HostileAllocator = ctx::*HostileAllocator;
@@ -536,6 +553,7 @@ fun hostile_reallocate(ctx: ptr, allocation: ptr, old_size: usize,
         old_size, new_size, align);
 }
 
+#[testing]
 fun hostile_deallocate(ctx: ptr, allocation: ptr, size: usize,
     align: usize) i64 {
     val state: *HostileAllocator = ctx::*HostileAllocator;
@@ -543,23 +561,28 @@ fun hostile_deallocate(ctx: ptr, allocation: ptr, size: usize,
     ret state.backing.fn_deallocate(state.backing.ctx, allocation, size, align);
 }
 
+#[testing]
 fun hostile_body_read(ctx: ptr, output: *u8, capacity: usize,
     trailers: *field.Fields) body.Progress {
     ret body.pending(1);
 }
 
+#[testing]
 fun hostile_body_finish(ctx: ptr, mode: body.Mode,
     trailers: *field.Fields) body.Progress {
     ret body.pending(1);
 }
 
+#[testing]
 fun hostile_body_complete(ctx: ptr, token: u64,
     trailers: *field.Fields) body.Progress {
     ret body.pending(token);
 }
 
+#[testing]
 fun hostile_body_release(ctx: ptr) {}
 
+#[testing]
 rec HostileFixture {
     limits:                    message.Limits;
     scope:                     cancel.Scope;
@@ -585,6 +608,7 @@ rec HostileFixture {
     request_context:           context.Context;
 }
 
+#[testing]
 fun hostile_fixture_init_with_limits(fixture: *HostileFixture, generation: u64,
     mode: HostileMode, mutate_call: usize, limits: message.Limits) bool {
     if (fixture == nil || generation == 0 || mutate_call == 0) { ret false; }
@@ -648,12 +672,14 @@ fun hostile_fixture_init_with_limits(fixture: *HostileFixture, generation: u64,
     ret true;
 }
 
+#[testing]
 fun hostile_fixture_init(fixture: *HostileFixture, generation: u64,
     mode: HostileMode, mutate_call: usize) bool {
     ret hostile_fixture_init_with_limits(fixture, generation, mode, mutate_call,
         message.limits_default());
 }
 
+#[testing]
 fun hostile_fixture_end(fixture: *HostileFixture) bool {
     if (fixture == nil
         || (fixture.request_context.bound
@@ -665,6 +691,7 @@ fun hostile_fixture_end(fixture: *HostileFixture) bool {
     ret operation_ok(cancel.destroy(?fixture.scope));
 }
 
+#[testing]
 fun hostile_render(fixture: *HostileFixture,
     renderer: *Default) res[u8, RenderFailure] {
     if (fixture == nil || renderer == nil
@@ -750,6 +777,7 @@ test public_message__utf8_without_controls {
     ret 0;
 }
 
+#[testing]
 fun hostile_sentinel_preserved(fixture: *HostileFixture) bool {
     if (fixture == nil || fixture.response.fields.items
         != ?fixture.response_fields[0] || fixture.response.fields.len != 1

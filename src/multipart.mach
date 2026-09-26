@@ -16,6 +16,7 @@ use std.types.string.str;
 use std.types.string.str_len;
 use std.types.view;
 
+#[testing]
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
@@ -2045,6 +2046,7 @@ pub fun complete_body(parser: *BodyParser, token: u64) Operation {
     ret consume_body_progress(parser, progress);
 }
 
+#[testing]
 rec TestStore {
     bytes:                [512]u8;
     len:                  usize;
@@ -2076,11 +2078,13 @@ rec TestStore {
     abort_calls:          usize;
 }
 
+#[testing]
 fun test_aliases(ctx: ptr, data: *u8, len: usize) bool {
     val state: *TestStore = ctx::*TestStore;
     ret overlap(?state.file_ids[0], 64, data, len);
 }
 
+#[testing]
 fun test_progress(status: upload.Status, kind: upload.Kind,
     outcome: upload.Outcome, detail: str) upload.Progress {
     ret upload.Progress{status: status, kind: kind, token: 0,
@@ -2088,6 +2092,7 @@ fun test_progress(status: upload.Status, kind: upload.Kind,
         file:        empty_file(), outcome: outcome, error: detail};
 }
 
+#[testing]
 fun test_pending(state: *TestStore, kind: upload.Kind) upload.Progress {
     state.pending_kind  = kind;
     state.pending_token = state.pending_token + 1;
@@ -2098,6 +2103,7 @@ fun test_pending(state: *TestStore, kind: upload.Kind) upload.Progress {
     ret result;
 }
 
+#[testing]
 fun test_batch_begin_done(state: *TestStore) upload.Progress {
     state.batch_active = true;
     var result: upload.Progress = test_progress(upload.OK,
@@ -2107,6 +2113,7 @@ fun test_batch_begin_done(state: *TestStore) upload.Progress {
     ret result;
 }
 
+#[testing]
 fun test_batch_begin(ctx: ptr) upload.Progress {
     val state: *TestStore = ctx::*TestStore;
     state.batch_begin_calls = state.batch_begin_calls + 1;
@@ -2117,6 +2124,7 @@ fun test_batch_begin(ctx: ptr) upload.Progress {
     ret test_batch_begin_done(state);
 }
 
+#[testing]
 fun test_file_begin_done(state: *TestStore) upload.Progress {
     state.file_active = true;
     state.file_start  = state.len;
@@ -2127,6 +2135,7 @@ fun test_file_begin_done(state: *TestStore) upload.Progress {
     ret result;
 }
 
+#[testing]
 fun test_file_begin(ctx: ptr, batch: upload.Transaction,
     metadata: upload.Metadata) upload.Progress {
     val state: *TestStore = ctx::*TestStore;
@@ -2142,6 +2151,7 @@ fun test_file_begin(ctx: ptr, batch: upload.Transaction,
     ret test_file_begin_done(state);
 }
 
+#[testing]
 fun test_write_done(state: *TestStore, input: *u8,
     len: usize) upload.Progress {
     if (state.fail_write) {
@@ -2164,6 +2174,7 @@ fun test_write_done(state: *TestStore, input: *u8,
     ret result;
 }
 
+#[testing]
 fun test_write(ctx: ptr, batch: upload.Transaction,
     file: upload.Transaction, input: *u8, len: usize) upload.Progress {
     val state: *TestStore = ctx::*TestStore;
@@ -2182,6 +2193,7 @@ fun test_write(ctx: ptr, batch: upload.Transaction,
     ret test_write_done(state, input, len);
 }
 
+#[testing]
 fun test_file(state: *TestStore) upload.StoredFile {
     val start: usize = state.file_count * 8;
     state.file_ids[start]     = 'm';
@@ -2190,6 +2202,7 @@ fun test_file(state: *TestStore) upload.StoredFile {
         size: (state.len - state.file_start)::u64};
 }
 
+#[testing]
 fun test_file_seal_done(state: *TestStore) upload.Progress {
     state.file_active = false;
     var result: upload.Progress = test_progress(upload.OK,
@@ -2199,6 +2212,7 @@ fun test_file_seal_done(state: *TestStore) upload.Progress {
     ret result;
 }
 
+#[testing]
 fun test_file_seal(ctx: ptr, batch: upload.Transaction,
     file: upload.Transaction) upload.Progress {
     val state: *TestStore = ctx::*TestStore;
@@ -2215,6 +2229,7 @@ fun test_file_seal(ctx: ptr, batch: upload.Transaction,
     ret test_file_seal_done(state);
 }
 
+#[testing]
 fun test_batch_commit_done(state: *TestStore) upload.Progress {
     state.batch_active = false;
     state.committed    = true;
@@ -2226,6 +2241,7 @@ fun test_batch_commit_done(state: *TestStore) upload.Progress {
         upload.OUTCOME_COMMITTED, nil);
 }
 
+#[testing]
 fun test_batch_commit(ctx: ptr,
     batch: upload.Transaction) upload.Progress {
     val state: *TestStore = ctx::*TestStore;
@@ -2241,6 +2257,7 @@ fun test_batch_commit(ctx: ptr,
     ret test_batch_commit_done(state);
 }
 
+#[testing]
 fun test_batch_abort_done(state: *TestStore) upload.Progress {
     state.batch_active = false;
     state.file_active  = false;
@@ -2254,6 +2271,7 @@ fun test_batch_abort_done(state: *TestStore) upload.Progress {
         upload.OUTCOME_ABORTED, nil);
 }
 
+#[testing]
 fun test_batch_abort(ctx: ptr, batch: upload.Transaction,
     file: upload.Transaction) upload.Progress {
     val state: *TestStore = ctx::*TestStore;
@@ -2271,6 +2289,7 @@ fun test_batch_abort(ctx: ptr, batch: upload.Transaction,
     ret test_batch_abort_done(state);
 }
 
+#[testing]
 fun test_complete(ctx: ptr, token: u64) upload.Progress {
     val state: *TestStore = ctx::*TestStore;
     if (token == 0 || token != state.pending_token) {
@@ -2294,6 +2313,7 @@ fun test_complete(ctx: ptr, token: u64) upload.Progress {
     ret test_batch_abort_done(state);
 }
 
+#[testing]
 fun test_store(state: *TestStore) upload.Store {
     ret upload.Store{ctx: state::ptr, context_size: $size_of(TestStore),
         aliases_state: test_aliases, batch_begin: test_batch_begin,
@@ -2302,6 +2322,7 @@ fun test_store(state: *TestStore) upload.Store {
         batch_abort:   test_batch_abort, complete: test_complete};
 }
 
+#[testing]
 fun test_limits() Limits {
     ret Limits{max_total_bytes: 4096, max_parts: 8,
         max_headers_per_part: 8, max_header_bytes: 512,
@@ -2309,6 +2330,7 @@ fun test_limits() Limits {
         max_temporary_bytes:  2048, max_nesting: 4};
 }
 
+#[testing]
 fun view_equal(value: view.View, expected: str) bool {
     val len: usize = str_len(expected);
     if (value.len != len || !range_valid(value.data, value.len)) { ret false; }
@@ -2320,6 +2342,7 @@ fun view_equal(value: view.View, expected: str) bool {
     ret true;
 }
 
+#[testing]
 fun feed_bytes(parser: *Parser, input: str) Operation {
     val len:     usize     = str_len(input);
     var i:       usize     = 0;
@@ -2335,6 +2358,7 @@ fun feed_bytes(parser: *Parser, input: str) Operation {
     ret current;
 }
 
+#[testing]
 fun rejected_status(boundary: str, body_text: str,
     limits: Limits) Status {
     var parts:    [8]Part;
@@ -2630,6 +2654,7 @@ test limits__fail_closed {
     ret 0;
 }
 
+#[testing]
 rec TestBody {
     input:            view.View;
     offset:           usize;
@@ -2642,6 +2667,7 @@ rec TestBody {
     release_calls:    usize;
 }
 
+#[testing]
 fun test_body_emit(state: *TestBody, output: *u8,
     capacity: usize) body.Progress {
     if (state.offset == state.input.len) {
@@ -2662,6 +2688,7 @@ fun test_body_emit(state: *TestBody, output: *u8,
     ret body.data(count);
 }
 
+#[testing]
 fun test_body_read(ctx: ptr, output: *u8, capacity: usize,
     trailers: *field.Fields) body.Progress {
     val state: *TestBody = ctx::*TestBody;
@@ -2674,6 +2701,7 @@ fun test_body_read(ctx: ptr, output: *u8, capacity: usize,
     ret test_body_emit(state, output, capacity);
 }
 
+#[testing]
 fun test_body_finish(ctx: ptr, mode: body.Mode,
     trailers: *field.Fields) body.Progress {
     val state: *TestBody = ctx::*TestBody;
@@ -2689,6 +2717,7 @@ fun test_body_finish(ctx: ptr, mode: body.Mode,
     ret body.complete(body.REUSE_ALLOWED);
 }
 
+#[testing]
 fun test_body_complete(ctx: ptr, token: u64,
     trailers: *field.Fields) body.Progress {
     val state: *TestBody = ctx::*TestBody;
@@ -2709,11 +2738,13 @@ fun test_body_complete(ctx: ptr, token: u64,
     ret body.failed("invalid test completion token", body.REUSE_FORBIDDEN);
 }
 
+#[testing]
 fun test_body_release(ctx: ptr) {
     val state: *TestBody = ctx::*TestBody;
     state.release_calls = state.release_calls + 1;
 }
 
+#[testing]
 fun test_reader(state: *TestBody, scope: *cancel.Scope,
     trailers: *field.Fields, maximum: u64) body.Reader {
     ret body.init_reader(state::ptr, test_body_read, test_body_finish,

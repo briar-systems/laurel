@@ -47,10 +47,12 @@ pub fun parse(request_context: *context.Context, decoder: *form.UrlEncoded,
     ret decode(decoder, storage, limits, request.target.query);
 }
 
+#[testing]
 fun text(value: str) view.View {
     ret view.view(value, str_len(value));
 }
 
+#[testing]
 fun equal(actual: view.View, expected: str) bool {
     val len: usize = str_len(expected);
     if (actual.len != len) { ret false; }
@@ -78,6 +80,7 @@ fun limits() form.Limits {
         max_value_bytes: 32, max_temporary_bytes: 128};
 }
 
+#[testing]
 fun run(fixture: *Fixture, raw: str) form.Operation {
     ret decode(?fixture.decoder, storage(fixture), limits(), text(raw));
 }
@@ -132,6 +135,7 @@ test typed__route_decoders {
     ret 0;
 }
 
+#[testing]
 fun rejected(raw: str, status: form.Status, code: u16) bool {
     var fixture: Fixture;
     val done:    form.Operation = run(?fixture, raw);
