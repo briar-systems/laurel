@@ -52,8 +52,9 @@ duration.
 - five server variants: Laurel, Go and axum each restricted to one thread, plus
   Go and axum with every core available
 
-Hedge's serve loop is single threaded, so the like-for-like table restricts the
-baselines to one thread too: Go with `GOMAXPROCS=1`, axum on tokio's
+The Laurel server runs hedge with one worker (`server.workers = 1` in
+`laurel/hedge.toml`), so the like-for-like table restricts the baselines to one
+thread too: Go with `GOMAXPROCS=1`, axum on tokio's
 current-thread runtime. The all-core table is reported separately, because a
 reader choosing a stack needs to know the ceiling as well as the per-thread cost.
 

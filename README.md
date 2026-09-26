@@ -45,9 +45,11 @@ The framework has no global application registry, hidden allocator, mandatory te
 ## Demo
 
 [`demo/`](demo/) is a small but complete application: a JSON route, a typed path
-parameter, a CSRF-protected form, a session cookie, a static file, middleware,
-and an observer. It builds and serves in about a minute, and its README explains
-how a Laurel application is hosted, since Laurel owns no listener of its own.
+parameter, a decoded query string, a raw request body, a CSRF-protected form, a
+session cookie, middleware, and an observer, hosted by hedge across several
+workers beside a static file and a health check. Its README explains how a
+Laurel application is hosted, since Laurel owns no listener of its own, and
+states what one application shared by every worker must guarantee.
 
 ## Benchmarks
 

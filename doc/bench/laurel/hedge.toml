@@ -5,6 +5,8 @@
 
 [server]
 name = "laurel-bench"
+# one worker, so the like-for-like table compares one thread against one thread
+workers = 1
 
 [server.limits]
 max_connections_per_peer = 512
