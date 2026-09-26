@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-25
+
 ### Added
 - `query.decode` and `query.parse` decode a query string with the one `form.UrlEncoded` decoder, so percent escapes, `+` as a space, strict UTF-8, repeated keys and empty values behave as they do in a form body (#163). `form.init_source` names what the decoder reads: a malformed query is 400 `malformed query` and one past its limits is 400 `query is too large`, where a form body keeps 400 `malformed form` and 413 `form is too large`.
 - `form.find`, `form.find_next` and `form.typed` read a decoded form or query: the first field with a name, every later value of a repeated key in wire order, and one value through a `router.Decoder`, the same decoders that type path parameters (#163).
@@ -9,9 +11,10 @@
 - `testing.Request.chunked` presents a request body with no declared length, as HTTP/1.1 chunked coding and HTTP/2 or HTTP/3 data without `content-length` reach the application (#163). `testing.request` sets it false, and a `testing.Request` literal must now name it.
 
 ### Changed
-- `demo/` and `doc/bench/laurel/` host laurel the way hedge's own executable runs: the application is registered through `composition.Options.applications`, and a supervisor runs the configured workers, each on its own thread, all entering the one application (#162). Both build this working tree through a path dependency, on hedge at a pinned commit of its 0.11.0 line and std v8.1.0, and CI resolves them with `mach dep update`. The demo serves static files and `/healthz` from hedge's configuration beside the application, runs four workers, takes its listen address from `LISTEN_ADDRESS` or `PORT`, and adds `GET /api/search`, which decodes the query string, and `POST /api/raw`, which reads the raw body. The benchmark server runs one worker, so its like-for-like table still compares one thread with one thread. The demo README states the threading contract: what one application shares across workers, what laurel guarantees about it, and what the application's own state must guarantee.
+- **Breaking.** Dependencies: http `^0.20` at v0.20.0 (was `^0.19` at v0.19.0). Resolution is flat, so a consumer must move to http 0.20 with it. http 0.20's router refuses a target whose query is not well formed, such as `?q=%zz`, with `DISPATCH_TARGET` before any route runs, and `router.dispatch` answers it as 400 `malformed query` with `error.BAD_REQUEST`, the answer the query decoder gives. Without that mapping it would have been 500 `route dispatch failed`. http 0.20's other changes are in the h1 server engine and `core.target`, which the host drives. demo/ and doc/bench/laurel/ keep their hedge v0.6.0 pins until hedge moves (#171).
 
 ### Fixed
+- The README's dependency section names the current ranges and releases. It still named std v0.34.0, http v0.7.5 and crypto v0.8.1 (#171).
 - The in-process harness answers a body read with no allowance left the way a host does, so a request body past the configured `request_body.max_bytes` ends in the reader's limit rather than a provider failure (#163).
 
 ## [0.17.0] - 2026-09-25

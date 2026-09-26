@@ -60,10 +60,10 @@ side by side on performance and on ergonomics, including where Laurel loses.
 
 ## Local dependencies
 
-The manifest selects `mach-std` `^8.0`, `mach-http` `^0.19` and `mach-crypto`
-`^0.22` by version range, and the committed gitlinks under `dep/` pin mach-std
-v8.0.0, mach-http v0.19.0 and mach-crypto v0.22.0. Build output uses Mach's
-default `out/` directory.
+The manifest selects releases by version range, with the resolved release
+committed as a gitlink under `dep/`, and builds with mach 5.12 or later:
+`mach-std` `^8.0` (v8.0.0), `mach-http` `^0.20` (v0.20.0) and `mach-crypto`
+`^0.22` (v0.22.0). Build output uses Mach's default `out/` directory.
 
 ## Status
 
