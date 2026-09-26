@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-26
+
+### Changed
+- **Breaking.** Dependencies: std `^9.0` at v9.0.0 (was `^8.0` at v8.0.0), crypto `^0.24` at v0.24.0 (was `^0.22` at v0.22.0) and http `^0.21` at v0.21.0 (was `^0.20` at v0.20.0), and `mach.toml` requires mach `^6` (was `^5.12`), which std 9 requires (#177). Resolution is flat, so a consumer must move to std 9.x and mach 6 with it. laurel's public surface is unchanged. CI seeds mach v6.0.0, ahead of the family pin.
+- Tests follow the mach 6 test policy: each is named `<subject>__<case>`, and duplicates and pins of incidental state are dropped, one test per routing, parsing and security rule, so 122 run where 132 did (#177). Test-only helpers, fixtures and records are `#[testing]`, and the compiler confirms production code reaches none of them.
+- The demo is hosted by hedge 0.11.0's composition and supervisor across four workers, beside a hedge static service for `/static/**` and a fixed service for `/healthz` (#162). It adds `GET /api/search`, which reads the query through `query.parse`, `form.find` and `form.typed`, and `POST /api/raw`, which echoes the exact body through `raw.Body` with suspend and resume, and its counters are atomic. demo/README.md states the threading contract: one application is entered from every worker, so application callbacks and `app_state` synchronize themselves, while laurel's shared state is already safe and its lifecycle calls belong to the embedder's thread. The bench server is hosted the same way on one worker, so its single-thread table stays like for like.
+- demo/ and doc/bench/laurel/ build the laurel working tree by path and select hedge `=0.11.0`, std `^8.2` and http `^0.20`, and they commit their dependency pins under `dep/`, resolved with `mach dep pull` (#162, #175). They take `mach = "^6"` but cannot build until hedge moves to mach 6, so CI builds neither until then (#179).
+
 ## [0.18.0] - 2026-09-25
 
 ### Added
