@@ -21,10 +21,12 @@ use std.types.option.opt;
 use std.types.size.usize;
 use std.types.view;
 
+#[testing]
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun transition_ok(outcome: cancel.Transition) bool {
     ret (sel outcome.ok) && outcome.ok;
 }
@@ -936,6 +938,7 @@ pub fun socket_channel(socket: *Socket) Channel {
         close: socket_close_entry};
 }
 
+#[testing]
 rec Fixture {
     scope:             cancel.Scope;
     request_body:      body.Reader;
@@ -948,6 +951,7 @@ rec Fixture {
     exchange:          exchange.Exchange;
 }
 
+#[testing]
 fun fixture_limits() message.Limits {
     var configured: message.Limits = message.limits_default();
     configured.request_fields    = field.limits(8, 1024, 64, 256);
@@ -956,6 +960,7 @@ fun fixture_limits() message.Limits {
     ret configured;
 }
 
+#[testing]
 fun init_fixture(state: *Fixture, generation: u64, upgrade: bool) bool {
     if (state == nil || !operation_ok(cancel.make_root(?state.scope, opt[time.Instant].none{}))) {
         ret false;
@@ -995,6 +1000,7 @@ fun init_fixture(state: *Fixture, generation: u64, upgrade: bool) bool {
         && exchange.begin(?state.exchange);
 }
 
+#[testing]
 fun add_key(state: *Fixture, key: view.View) bool {
     ret field.append(?state.request.fields, field.Field{
         name:      view.view("sec-websocket-key", 17), value: key,
@@ -1002,6 +1008,7 @@ fun add_key(state: *Fixture, key: view.View) bool {
     }) == field.ADD_OK;
 }
 
+#[testing]
 fun same(actual: *u8, length: usize, expected: view.View) bool {
     if (length != expected.len) { ret false; }
     var i: usize = 0;
@@ -1012,21 +1019,25 @@ fun same(actual: *u8, length: usize, expected: view.View) bool {
     ret true;
 }
 
+#[testing]
 fun stream_policy() Policy {
     ret Policy{max_message_bytes: 16, max_close_reason_bytes: 0,
         heartbeat_interval: 0, close_code: 1000, allow_binary: true};
 }
 
+#[testing]
 fun sse_test_policy() Policy {
     ret Policy{max_message_bytes: 256, max_close_reason_bytes: 0,
         heartbeat_interval: 1000, close_code: 1000, allow_binary: false};
 }
 
+#[testing]
 fun socket_test_policy() Policy {
     ret Policy{max_message_bytes: 128, max_close_reason_bytes: MAX_CLOSE_REASON_BYTES,
         heartbeat_interval: 1000, close_code: 1000, allow_binary: true};
 }
 
+#[testing]
 fun repeated(output: *u8, length: usize, byte: u8) view.View {
     var i: usize = 0;
     for (i < length) {
@@ -1036,7 +1047,7 @@ fun repeated(output: *u8, length: usize, byte: u8) view.View {
     ret view.view(output, length);
 }
 
-test "laurel.realtime: a slow consumer applies backpressure to a bounded stream" {
+test stream__backpressure {
     var state: Fixture;
     if (!init_fixture(?state, 61, false)) { ret 1; }
     var storage: [32]u8;
@@ -1083,7 +1094,7 @@ test "laurel.realtime: a slow consumer applies backpressure to a bounded stream"
     ret 0;
 }
 
-test "laurel.realtime: server-sent events frame data, identity, and heartbeats" {
+test sse__framing {
     var state: Fixture;
     if (!init_fixture(?state, 71, false)) { ret 1; }
     var media: render.Media;
@@ -1135,7 +1146,7 @@ test "laurel.realtime: server-sent events frame data, identity, and heartbeats" 
     ret 0;
 }
 
-test "laurel.realtime: suspended readers resume and disconnects fail closed" {
+test stream__suspend_and_disconnect {
     var state: Fixture;
     if (!init_fixture(?state, 81, false)) { ret 1; }
     var storage: [32]u8;
@@ -1179,6 +1190,7 @@ test "laurel.realtime: suspended readers resume and disconnects fail closed" {
     ret 0;
 }
 
+#[testing]
 fun mask_into(output: *u8, cursor: usize, key: *u8, payload: view.View) usize {
     var i: usize = 0;
     for (i < payload.len) {
@@ -1188,7 +1200,7 @@ fun mask_into(output: *u8, cursor: usize, key: *u8, payload: view.View) usize {
     ret cursor + payload.len;
 }
 
-test "laurel.realtime: websocket channels carry frames and close cleanly" {
+test websocket__frames_and_close {
     var state: Fixture;
     if (!init_fixture(?state, 91, false)) { ret 1; }
     var storage: [256]u8;
@@ -1255,7 +1267,7 @@ test "laurel.realtime: websocket channels carry frames and close cleanly" {
     ret 0;
 }
 
-test "laurel.realtime: websocket negotiation commits the mach-http handshake" {
+test websocket__negotiation {
     var state: Fixture;
     if (!init_fixture(?state, 101, true)) { ret 1; }
     var random: [16]u8;

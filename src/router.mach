@@ -20,14 +20,17 @@ use std.types.size.usize;
 use std.types.string.str;
 use std.types.view;
 
+#[testing]
 fun fixed_ok(outcome: err[A.Error]) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun is_err_u8_error_apperror(outcome: res[u8, error.AppError]) bool {
     ret sel outcome.err;
 }
 
+#[testing]
 fun is_ok_u8_error_apperror(outcome: res[u8, error.AppError]) bool {
     ret sel outcome.ok;
 }
@@ -849,11 +852,13 @@ pub fun uuid_decoder() Decoder {
     ret Decoder{ctx: nil, kind: VALUE_UUID, call: uuid_decode};
 }
 
+#[testing]
 fun test_handler(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     ret handler.respond();
 }
 
+#[testing]
 fun test_route(route_method: Method, route_host: Host, route_path: Path,
     parameters: *Parameter, parameter_len: usize, name: str) Route {
     ret Route{method: route_method, host: route_host, path: route_path,
@@ -861,6 +866,7 @@ fun test_route(route_method: Method, route_host: Host, route_path: Path,
         handler: handler.Handler{ctx: nil, call: test_handler, resume: nil}};
 }
 
+#[testing]
 fun test_request(request: *message.Request, request_method: method.Method,
     request_path: view.View, host_item: *field.Field, host: view.View,
     generation: u64) bool {
@@ -876,7 +882,7 @@ fun test_request(request: *message.Request, request_method: method.Method,
     ret true;
 }
 
-test "laurel.router: compile typed routes and decode request-scoped parameters" {
+test dispatch__typed_params {
     var parameters: [2]Parameter;
     parameters[0] = Parameter{name: view.view("rest", 4), wildcard: true,
         decoder: text_decoder()};
@@ -970,7 +976,7 @@ test "laurel.router: compile typed routes and decode request-scoped parameters" 
     ret 0;
 }
 
-test "laurel.router: conflicts and typed declaration mismatches are structured" {
+test compile__conflicts_and_mismatches {
     var parameters: [2]Parameter;
     parameters[0] = Parameter{name: view.view("id", 2), wildcard: false,
         decoder: u64_decoder()};
@@ -1023,7 +1029,7 @@ test "laurel.router: conflicts and typed declaration mismatches are structured" 
     ret 0;
 }
 
-test "laurel.router: built-in decoders reject overflow and malformed values" {
+test decoders__bounds_and_malformed {
     var value: Value;
     if (is_err_u8_error_apperror(u64_decode(nil, nil,
         view.view("18446744073709551615", 20), ?value))
@@ -1054,6 +1060,7 @@ test "laurel.router: built-in decoders reject overflow and malformed values" {
     ret 0;
 }
 
+#[testing]
 fun test_fallback(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val seen: *usize = ctx::*usize;
@@ -1061,7 +1068,7 @@ fun test_fallback(ctx: ptr, request_context: *context.Context,
     ret handler.respond();
 }
 
-test "laurel.router: the shared terminal maps every dispatch status" {
+test terminal__maps_dispatch_status {
     var routes: [1]Route;
     routes[0] = test_route(any_method(), any_host(),
         path(view.view("/hello", 6)), nil, 0, "hello");

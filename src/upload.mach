@@ -988,6 +988,7 @@ pub fun release(upload: *Upload) bool {
     ret true;
 }
 
+#[testing]
 rec TestStore {
     bytes:                [128]u8;
     len:                  usize;
@@ -1022,19 +1023,23 @@ rec TestStore {
     complete_calls:       usize;
 }
 
+#[testing]
 fun test_aliases(ctx: ptr, data: *u8, len: usize) bool {
     val state: *TestStore = ctx::*TestStore;
     ret overlap(?state.file_ids[0], 64, data, len);
 }
 
+#[testing]
 fun test_batch(state: *TestStore) Transaction {
     ret Transaction{owner: state::ptr, id: 1};
 }
 
+#[testing]
 fun test_file_transaction(state: *TestStore) Transaction {
     ret Transaction{owner: state::ptr, id: state.file_count::u64 + 2};
 }
 
+#[testing]
 fun test_progress(status: Status, kind: Kind, outcome: Outcome,
     detail: str) Progress {
     ret Progress{status: status, kind: kind, token: 0,
@@ -1042,6 +1047,7 @@ fun test_progress(status: Status, kind: Kind, outcome: Outcome,
         file:        empty_file(), outcome: outcome, error: detail};
 }
 
+#[testing]
 fun test_pending(state: *TestStore, kind: Kind) Progress {
     state.pending_kind  = kind;
     state.pending_token = state.pending_token + 1;
@@ -1052,6 +1058,7 @@ fun test_pending(state: *TestStore, kind: Kind) Progress {
     ret result;
 }
 
+#[testing]
 fun test_batch_begin_done(state: *TestStore) Progress {
     state.batch_active = true;
     var result: Progress = test_progress(OK, BATCH_BEGIN,
@@ -1060,6 +1067,7 @@ fun test_batch_begin_done(state: *TestStore) Progress {
     ret result;
 }
 
+#[testing]
 fun test_batch_begin(ctx: ptr) Progress {
     val state: *TestStore = ctx::*TestStore;
     state.batch_begin_calls = state.batch_begin_calls + 1;
@@ -1073,6 +1081,7 @@ fun test_batch_begin(ctx: ptr) Progress {
     ret test_batch_begin_done(state);
 }
 
+#[testing]
 fun test_file_begin_done(state: *TestStore) Progress {
     state.file_active = true;
     state.file_start  = state.len;
@@ -1082,6 +1091,7 @@ fun test_file_begin_done(state: *TestStore) Progress {
     ret result;
 }
 
+#[testing]
 fun test_file_begin(ctx: ptr, batch: Transaction,
     metadata: Metadata) Progress {
     val state: *TestStore = ctx::*TestStore;
@@ -1100,6 +1110,7 @@ fun test_file_begin(ctx: ptr, batch: Transaction,
     ret test_file_begin_done(state);
 }
 
+#[testing]
 fun test_write_done(state: *TestStore, input: *u8,
     len: usize) Progress {
     if (state.fail_write) {
@@ -1125,6 +1136,7 @@ fun test_write_done(state: *TestStore, input: *u8,
     ret result;
 }
 
+#[testing]
 fun test_write(ctx: ptr, batch: Transaction, file: Transaction,
     input: *u8, len: usize) Progress {
     val state: *TestStore = ctx::*TestStore;
@@ -1146,6 +1158,7 @@ fun test_write(ctx: ptr, batch: Transaction, file: Transaction,
     ret test_write_done(state, input, len);
 }
 
+#[testing]
 fun test_stored_file(state: *TestStore) StoredFile {
     val start: usize = state.file_count * 8;
     state.file_ids[start]     = 'u';
@@ -1154,6 +1167,7 @@ fun test_stored_file(state: *TestStore) StoredFile {
         size: (state.len - state.file_start)::u64};
 }
 
+#[testing]
 fun test_file_seal_done(state: *TestStore) Progress {
     state.file_active = false;
     var result: Progress = test_progress(OK, FILE_SEAL,
@@ -1163,6 +1177,7 @@ fun test_file_seal_done(state: *TestStore) Progress {
     ret result;
 }
 
+#[testing]
 fun test_file_seal(ctx: ptr, batch: Transaction,
     file: Transaction) Progress {
     val state: *TestStore = ctx::*TestStore;
@@ -1182,6 +1197,7 @@ fun test_file_seal(ctx: ptr, batch: Transaction,
     ret test_file_seal_done(state);
 }
 
+#[testing]
 fun test_batch_commit_done(state: *TestStore) Progress {
     state.batch_active = false;
     state.committed    = true;
@@ -1192,6 +1208,7 @@ fun test_batch_commit_done(state: *TestStore) Progress {
     ret test_progress(OK, BATCH_COMMIT, OUTCOME_COMMITTED, nil);
 }
 
+#[testing]
 fun test_batch_commit(ctx: ptr, batch: Transaction) Progress {
     val state: *TestStore = ctx::*TestStore;
     state.batch_commit_calls = state.batch_commit_calls + 1;
@@ -1209,6 +1226,7 @@ fun test_batch_commit(ctx: ptr, batch: Transaction) Progress {
     ret test_batch_commit_done(state);
 }
 
+#[testing]
 fun test_batch_abort_done(state: *TestStore) Progress {
     state.batch_active = false;
     state.file_active  = false;
@@ -1217,6 +1235,7 @@ fun test_batch_abort_done(state: *TestStore) Progress {
     ret test_progress(OK, BATCH_ABORT, OUTCOME_ABORTED, nil);
 }
 
+#[testing]
 fun test_batch_abort(ctx: ptr, batch: Transaction,
     file: Transaction) Progress {
     val state: *TestStore = ctx::*TestStore;
@@ -1237,6 +1256,7 @@ fun test_batch_abort(ctx: ptr, batch: Transaction,
     ret test_batch_abort_done(state);
 }
 
+#[testing]
 fun test_complete(ctx: ptr, token: u64) Progress {
     val state: *TestStore = ctx::*TestStore;
     state.complete_calls = state.complete_calls + 1;
@@ -1261,6 +1281,7 @@ fun test_complete(ctx: ptr, token: u64) Progress {
     ret test_batch_abort_done(state);
 }
 
+#[testing]
 fun test_store(state: *TestStore) Store {
     ret Store{ctx: state::ptr, context_size: $size_of(TestStore),
         aliases_state: test_aliases, batch_begin: test_batch_begin,
@@ -1269,6 +1290,7 @@ fun test_store(state: *TestStore) Store {
         batch_abort:   test_batch_abort, complete: test_complete};
 }
 
+#[testing]
 fun test_str_len(value: str) usize {
     if (value == nil) { ret 0; }
     var len: usize = 0;
@@ -1276,6 +1298,7 @@ fun test_str_len(value: str) usize {
     ret len;
 }
 
+#[testing]
 fun test_metadata(file_name: str, declared_len: u64,
     has_length: bool) Metadata {
     ret Metadata{field_name: view.view("document", 8),
@@ -1284,13 +1307,14 @@ fun test_metadata(file_name: str, declared_len: u64,
         declared_len: declared_len, has_length: has_length};
 }
 
+#[testing]
 fun test_open(state: *TestStore, upload: *Upload,
     maximum: u64) bool {
     ret init(upload, test_store(state), maximum) &&
         begin_batch(upload).status == OK;
 }
 
-test "laurel.upload: files stage until one atomic batch commit" {
+test batch__stages_until_commit {
     var state: TestStore;
     state.partial = 2;
     var upload: Upload;
@@ -1322,7 +1346,7 @@ test "laurel.upload: files stage until one atomic batch commit" {
     ret 0;
 }
 
-test "laurel.upload: every asynchronous stage retains ownership" {
+test stages__async_retain_ownership {
     var state: TestStore;
     state.pending_batch_begin  = true;
     state.pending_file_begin   = true;
@@ -1364,7 +1388,7 @@ test "laurel.upload: every asynchronous stage retains ownership" {
     ret 0;
 }
 
-test "laurel.upload: invalid files never enter provider storage" {
+test start_file__invalid_never_reaches_store {
     var state:  TestStore;
     var upload: Upload;
     if (!test_open(?state, ?upload, 4)) { ret 1; }
@@ -1384,7 +1408,7 @@ test "laurel.upload: invalid files never enter provider storage" {
     ret 0;
 }
 
-test "laurel.upload: storage failure has one batch abort path" {
+test write__storage_failure_single_abort {
     var state: TestStore;
     state.fail_write          = true;
     state.pending_batch_abort = true;
@@ -1404,7 +1428,7 @@ test "laurel.upload: storage failure has one batch abort path" {
     ret 0;
 }
 
-test "laurel.upload: unknown batch commit requires reconciliation" {
+test commit__unknown_requires_reconciliation {
     var state: TestStore;
     state.unknown_commit = true;
     var upload: Upload;
@@ -1421,7 +1445,7 @@ test "laurel.upload: unknown batch commit requires reconciliation" {
     ret 0;
 }
 
-test "laurel.upload: aliases and callback mutation poison the batch" {
+test aliases__poison_batch {
     var state:  TestStore;
     var upload: Upload;
     if (!test_open(?state, ?upload, 8)) { ret 1; }
@@ -1445,7 +1469,7 @@ test "laurel.upload: aliases and callback mutation poison the batch" {
     ret 0;
 }
 
-test "laurel.upload: release preserves completion generations" {
+test release__keeps_completion_generations {
     var state: TestStore;
     state.pending_batch_begin = true;
     var upload: Upload;

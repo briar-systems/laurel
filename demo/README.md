@@ -12,7 +12,8 @@ real API of laurel and hedge. Nothing here is a mock.
 ## Run it
 
 The demo is its own Mach project with its own dependencies, so it does not
-inherit the repository's `dep/`. It needs mach 5.12.
+inherit the repository's `dep/`. It needs mach 6, and it cannot build until
+hedge moves to mach 6: hedge 0.11.0 still selects std 8.2.0.
 
 ```sh
 cd demo

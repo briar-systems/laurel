@@ -66,6 +66,7 @@ pub fun resolve(set: *Set, key: view.View) res[ptr, view.View] {
     ret res[ptr, view.View].err{view.view("provider not found", 18)};
 }
 
+#[testing]
 rec TestProvider {
     key:   view.View;
     value: ptr;
@@ -73,6 +74,7 @@ rec TestProvider {
     fail:  bool;
 }
 
+#[testing]
 fun view_equal(a: view.View, b: view.View) bool {
     if (a.len != b.len) { ret false; }
     var i: usize = 0;
@@ -83,6 +85,7 @@ fun view_equal(a: view.View, b: view.View) bool {
     ret true;
 }
 
+#[testing]
 fun test_resolve(context: ptr, key: view.View) res[ptr, view.View] {
     val state: *TestProvider = context::*TestProvider;
     state.calls = state.calls + 1;
@@ -91,7 +94,7 @@ fun test_resolve(context: ptr, key: view.View) res[ptr, view.View] {
     ret res[ptr, view.View].ok{nil};
 }
 
-test "laurel.provider: resolution is ordered, bounded, and explicit" {
+test resolve__ordered_bounded_explicit {
     var value:  u8 = 7;
     var states: [2]TestProvider;
     states[0] = TestProvider{key: view.view("cache", 5), value: nil, calls: 0, fail: false};

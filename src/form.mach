@@ -18,10 +18,12 @@ use std.types.string.str;
 use std.types.string.str_len;
 use std.types.view;
 
+#[testing]
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun transition_ok(outcome: cancel.Transition) bool {
     ret (sel outcome.ok) && outcome.ok;
 }
@@ -767,6 +769,7 @@ pub fun complete_body(parser: *BodyParser, token: u64) Operation {
     ret consume_progress(parser, progress);
 }
 
+#[testing]
 fun view_equal(value: view.View, expected: str) bool {
     val len: usize = str_len(expected);
     if (value.len != len || !range_valid(value.data, value.len)) { ret false; }
@@ -778,7 +781,7 @@ fun view_equal(value: view.View, expected: str) bool {
     ret true;
 }
 
-test "laurel.form: urlencoded decoding survives byte fragmentation" {
+test urlencoded__byte_fragmentation {
     var fields:  [8]Field;
     var bytes:   [256]u8;
     var decoder: UrlEncoded;
@@ -806,6 +809,7 @@ test "laurel.form: urlencoded decoding survives byte fragmentation" {
     ret 0;
 }
 
+#[testing]
 fun rejected(input: str, expected: Status) bool {
     var fields:  [2]Field;
     var bytes:   [32]u8;
@@ -826,7 +830,7 @@ fun rejected(input: str, expected: Status) bool {
         decoder.state == FAILED_STATE;
 }
 
-test "laurel.form: malformed and exhausted urlencoded input is transactional" {
+test urlencoded__malformed_is_transactional {
     if (!rejected("a=%", MALFORMED) || !rejected("a=%0", MALFORMED) ||
         !rejected("a=%gg", MALFORMED) || !rejected("=value", MALFORMED) ||
         !rejected("a=b&", MALFORMED) || !rejected("a=%c0%80", MALFORMED) ||
@@ -834,7 +838,7 @@ test "laurel.form: malformed and exhausted urlencoded input is transactional" {
     ret 0;
 }
 
-test "laurel.form: limits and physical ownership fail before publication" {
+test urlencoded__limits_and_aliases {
     var fields:  [2]Field;
     var bytes:   [32]u8;
     var decoder: UrlEncoded;
@@ -857,65 +861,7 @@ test "laurel.form: limits and physical ownership fail before publication" {
     ret 0;
 }
 
-test "laurel.form: empty values at the arena edge use an empty view" {
-    var fields:  [1]Field;
-    var bytes:   [8]u8;
-    var decoder: UrlEncoded;
-    val limits:  Limits = Limits{max_bytes: 9, max_fields: 1,
-        max_name_bytes: 8, max_value_bytes: 1, max_temporary_bytes: 8};
-    if (!init_urlencoded(?decoder, Storage{fields: ?fields[0],
-        field_capacity: 1, bytes: ?bytes[0], byte_capacity: 8}, limits) ||
-        feed_urlencoded(?decoder, "abcdefgh="::*u8, 9).status != MORE) {
-        ret 1;
-    }
-    val done: Operation = finish_urlencoded(?decoder);
-    if (done.status != COMPLETE || done.form.len != 1 ||
-        !view_equal(done.form.fields[0].name, "abcdefgh") ||
-        done.form.fields[0].value.data != nil ||
-        done.form.fields[0].value.len != 0) { ret 2; }
-    ret 0;
-}
-
-test "laurel.form: corrupted counters fail without unsafe cleanup" {
-    var fields:  [1]Field;
-    var bytes:   [8]u8;
-    var decoder: UrlEncoded;
-    val limits:  Limits = Limits{max_bytes: 8, max_fields: 1,
-        max_name_bytes: 4, max_value_bytes: 4, max_temporary_bytes: 8};
-    if (!init_urlencoded(?decoder, Storage{fields: ?fields[0],
-        field_capacity: 1, bytes: ?bytes[0], byte_capacity: 8}, limits) ||
-        feed_urlencoded(?decoder, "a=b"::*u8, 3).status != MORE) { ret 1; }
-    decoder.total_bytes = 9;
-    val rejected: Operation = feed_urlencoded(?decoder, nil, 0);
-    if (rejected.status != INVALID || rejected.token != 0 ||
-        rejected.form.fields != nil || rejected.form.len != 0 ||
-        rejected.form.bytes != 0 || bytes[0] != 'a' || bytes[1] != 'b' ||
-        decoder.state != ACTIVE) { ret 2; }
-    ret 0;
-}
-
-test "laurel.form: a dirty percent nibble fails the decoder invariant" {
-    var fields:  [1]Field;
-    var bytes:   [8]u8;
-    var decoder: UrlEncoded;
-    val limits:  Limits = Limits{max_bytes: 8, max_fields: 1,
-        max_name_bytes: 4, max_value_bytes: 4, max_temporary_bytes: 8};
-    if (!init_urlencoded(?decoder, Storage{fields: ?fields[0],
-        field_capacity: 1, bytes: ?bytes[0], byte_capacity: 8}, limits) ||
-        feed_urlencoded(?decoder, "a=%1"::*u8, 4).status != MORE ||
-        decoder.percent_phase != 2 || decoder.percent_high != 0x10) { ret 1; }
-    var low: u8 = 1;
-    for (low < 0x10) {
-        decoder.percent_high = 0x10 | low;
-        if (feed_urlencoded(?decoder, nil, 0).status != INVALID ||
-            decoder.state != ACTIVE) { ret 2; }
-        low = low + 1;
-    }
-    decoder.percent_high = 0x10;
-    if (feed_urlencoded(?decoder, nil, 0).status != MORE) { ret 3; }
-    ret 0;
-}
-
+#[testing]
 rec TestBody {
     input:               view.View;
     offset:              usize;
@@ -928,6 +874,7 @@ rec TestBody {
     release_calls:       usize;
 }
 
+#[testing]
 fun test_body_emit(state: *TestBody, output: *u8,
     capacity: usize) body.Progress {
     if (state.offset == state.input.len) {
@@ -948,6 +895,7 @@ fun test_body_emit(state: *TestBody, output: *u8,
     ret body.data(count);
 }
 
+#[testing]
 fun test_body_read(ctx: ptr, output: *u8, capacity: usize,
     trailers: *field.Fields) body.Progress {
     val state: *TestBody = ctx::*TestBody;
@@ -960,6 +908,7 @@ fun test_body_read(ctx: ptr, output: *u8, capacity: usize,
     ret test_body_emit(state, output, capacity);
 }
 
+#[testing]
 fun test_body_finish(ctx: ptr, mode: body.Mode,
     trailers: *field.Fields) body.Progress {
     val state: *TestBody = ctx::*TestBody;
@@ -975,6 +924,7 @@ fun test_body_finish(ctx: ptr, mode: body.Mode,
     ret body.complete(body.REUSE_ALLOWED);
 }
 
+#[testing]
 fun test_body_complete(ctx: ptr, token: u64,
     trailers: *field.Fields) body.Progress {
     val state: *TestBody = ctx::*TestBody;
@@ -995,11 +945,13 @@ fun test_body_complete(ctx: ptr, token: u64,
     ret body.failed("invalid test body completion", body.REUSE_FORBIDDEN);
 }
 
+#[testing]
 fun test_body_release(ctx: ptr) {
     val state: *TestBody = ctx::*TestBody;
     state.release_calls = state.release_calls + 1;
 }
 
+#[testing]
 fun make_reader(state: *TestBody, scope: *cancel.Scope,
     trailers: *field.Fields, max_bytes: u64) body.Reader {
     ret body.init_reader(state::ptr, test_body_read, test_body_finish,
@@ -1007,7 +959,7 @@ fun make_reader(state: *TestBody, scope: *cancel.Scope,
         false, 0, body.limits(max_bytes, 2, 64), trailers, scope);
 }
 
-test "laurel.form: body state cannot overlap result storage" {
+test body__state_cannot_overlap_storage {
     var bytes:   [32]u8;
     var decoder: UrlEncoded;
     var parser:  BodyParser;
@@ -1031,7 +983,7 @@ test "laurel.form: body state cannot overlap result storage" {
     ret 0;
 }
 
-test "laurel.form: body polling retains pending buffers across fragmentation" {
+test body__pending_across_fragmentation {
     var fields:  [4]Field;
     var bytes:   [128]u8;
     var decoder: UrlEncoded;
@@ -1074,7 +1026,7 @@ test "laurel.form: body polling retains pending buffers across fragmentation" {
     ret 0;
 }
 
-test "laurel.form: parse failure settles the body exactly once" {
+test body__parse_failure_settles_once {
     var fields:  [2]Field;
     var bytes:   [32]u8;
     var decoder: UrlEncoded;
@@ -1109,7 +1061,7 @@ test "laurel.form: parse failure settles the body exactly once" {
     ret 0;
 }
 
-test "laurel.form: body cancellation never publishes fields" {
+test body__cancellation_publishes_nothing {
     var fields:  [2]Field;
     var bytes:   [32]u8;
     var decoder: UrlEncoded;

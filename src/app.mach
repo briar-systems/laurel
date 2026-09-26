@@ -34,18 +34,22 @@ use std.types.size.usize;
 use std.types.string.str;
 use std.types.view;
 
+#[testing]
 fun fixed_ok(outcome: err[A.Error]) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun transition_ok(outcome: cancel.Transition) bool {
     ret (sel outcome.ok) && outcome.ok;
 }
 
+#[testing]
 fun is_ok_ptr_error_apperror(outcome: res[ptr, error.AppError]) bool {
     ret sel outcome.ok;
 }
@@ -509,27 +513,33 @@ pub fun release(app: *App) bool {
     ret true;
 }
 
+#[testing]
 fun test_lifecycle_start(context: ptr) res[lifecycle.CallbackStatus, view.View] {
     ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
+#[testing]
 fun test_lifecycle_ready(context: ptr) lifecycle.Readiness {
     ret lifecycle.READY_NOW;
 }
 
+#[testing]
 fun test_lifecycle_drain(context: ptr, deadline: opt[time.Instant]) res[lifecycle.CallbackStatus, view.View] {
     ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
+#[testing]
 fun test_lifecycle_stop(context: ptr) res[lifecycle.CallbackStatus, view.View] {
     ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
+#[testing]
 rec TestLifecycleFailure {
     fail_start: bool;
     fail_stop:  bool;
 }
 
+#[testing]
 fun test_failed_lifecycle_start(context: ptr) res[lifecycle.CallbackStatus, view.View] {
     val state: *TestLifecycleFailure = context::*TestLifecycleFailure;
     if (state != nil && state.fail_start) {
@@ -538,6 +548,7 @@ fun test_failed_lifecycle_start(context: ptr) res[lifecycle.CallbackStatus, view
     ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
+#[testing]
 fun test_failed_lifecycle_stop(context: ptr) res[lifecycle.CallbackStatus, view.View] {
     val state: *TestLifecycleFailure = context::*TestLifecycleFailure;
     if (state != nil && state.fail_stop) {
@@ -547,22 +558,26 @@ fun test_failed_lifecycle_stop(context: ptr) res[lifecycle.CallbackStatus, view.
     ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
+#[testing]
 fun test_handler(context_ptr: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     ret handler.respond();
 }
 
+#[testing]
 fun test_failing_handler(context_ptr: ptr,
     request_context: *context.Context, state: *ptr) handler.Result {
     ret handler.fail(error.make(error.NOT_FOUND, 404, "not found",
         "no matching resource", false));
 }
 
+#[testing]
 fun test_error(context_ptr: ptr, app_error: error.AppError,
     request_context: *context.Context) res[u8, error.RenderFailure] {
     ret res[u8, error.RenderFailure].ok{1};
 }
 
+#[testing]
 rec EventSink {
     start_calls:  usize;
     finish_calls: usize;
@@ -576,6 +591,7 @@ rec EventSink {
     label_len:    usize;
 }
 
+#[testing]
 fun record_event(state: *EventSink, event: *observability.RequestEvent) {
     if (state == nil || event == nil) { ret; }
     state.status    = event.status;
@@ -594,6 +610,7 @@ fun record_event(state: *EventSink, event: *observability.RequestEvent) {
     state.route_len = name.len;
 }
 
+#[testing]
 fun test_observer_start(context_ptr: ptr, event: *observability.RequestEvent) {
     val state: *EventSink = context_ptr::*EventSink;
     if (state == nil) { ret; }
@@ -601,6 +618,7 @@ fun test_observer_start(context_ptr: ptr, event: *observability.RequestEvent) {
     record_event(state, event);
 }
 
+#[testing]
 fun test_observer_finish(context_ptr: ptr, event: *observability.RequestEvent) {
     val state: *EventSink = context_ptr::*EventSink;
     if (state == nil) { ret; }
@@ -608,6 +626,7 @@ fun test_observer_finish(context_ptr: ptr, event: *observability.RequestEvent) {
     record_event(state, event);
 }
 
+#[testing]
 fun test_observer_error(context_ptr: ptr, event: *observability.RequestEvent,
     app_error: error.AppError) {
     val state: *EventSink = context_ptr::*EventSink;
@@ -616,6 +635,7 @@ fun test_observer_error(context_ptr: ptr, event: *observability.RequestEvent,
     record_event(state, event);
 }
 
+#[testing]
 fun test_vocabulary(vocabulary: *observability.Vocabulary,
     specs: *observability.LabelSpec) bool {
     if (!observability.term(?specs[0].name, view.view("kind", 4))) { ret false; }
@@ -625,6 +645,7 @@ fun test_vocabulary(vocabulary: *observability.Vocabulary,
     ret observability.init_vocabulary(vocabulary, specs, 1);
 }
 
+#[testing]
 rec TestAuthenticator {
     principal:          i64;
     authenticate_calls: usize;
@@ -635,6 +656,7 @@ rec TestAuthenticator {
     fail_release:       bool;
 }
 
+#[testing]
 fun test_auth_aliases(context_ptr: ptr, data: *u8, len: usize) bool {
     if (context_ptr == nil || len == 0 || data == nil) { ret false; }
     val state:  *TestAuthenticator = context_ptr::*TestAuthenticator;
@@ -645,6 +667,7 @@ fun test_auth_aliases(context_ptr: ptr, data: *u8, len: usize) bool {
         second <= first + $size_of(TestAuthenticator) - 1;
 }
 
+#[testing]
 fun test_authenticate(context_ptr: ptr, request: *message.Request)
     res[ptr, error.AppError] {
     val state: *TestAuthenticator = context_ptr::*TestAuthenticator;
@@ -664,6 +687,7 @@ fun test_authenticate(context_ptr: ptr, request: *message.Request)
     ret res[ptr, error.AppError].ok{?state.principal};
 }
 
+#[testing]
 fun test_release_principal(context_ptr: ptr, principal: ptr) bool {
     val state: *TestAuthenticator = context_ptr::*TestAuthenticator;
     if (!state.owned || principal != ?state.principal) { ret false; }
@@ -673,7 +697,7 @@ fun test_release_principal(context_ptr: ptr, principal: ptr) bool {
     ret true;
 }
 
-test "laurel.app: assembly and lifecycle retain caller ownership" {
+test assembly__caller_ownership {
     var providers: provider.Set;
     if (!provider.init(?providers, nil, 0, 0, 32)) { ret 1; }
     var lifecycle_item: lifecycle.Lifecycle = lifecycle.Lifecycle{ctx: nil, start: test_lifecycle_start,
@@ -836,7 +860,7 @@ test "laurel.app: assembly and lifecycle retain caller ownership" {
     ret 0;
 }
 
-test "laurel.app: cleanup failure remains observable after primary failure" {
+test lifecycle__cleanup_failure_observable {
     var providers: provider.Set;
     if (!provider.init(?providers, nil, 0, 0, 32)) { ret 1; }
     var failures: TestLifecycleFailure;
@@ -895,6 +919,7 @@ test "laurel.app: cleanup failure remains observable after primary failure" {
     ret 0;
 }
 
+#[testing]
 rec RequestFixture {
     scope:             cancel.Scope;
     request_body:      body.Reader;
@@ -910,10 +935,12 @@ rec RequestFixture {
     request_context:   context.Context;
 }
 
+#[testing]
 fun request_fixture(state: *RequestFixture, generation: u64, path: view.View) bool {
     ret request_fixture_until(state, generation, path, opt[time.Instant].none{});
 }
 
+#[testing]
 fun request_fixture_until(state: *RequestFixture, generation: u64, path: view.View,
     deadline: opt[time.Instant]) bool {
     if (state == nil
@@ -941,6 +968,7 @@ fun request_fixture_until(state: *RequestFixture, generation: u64, path: view.Vi
         && exchange.begin(?state.exchange);
 }
 
+#[testing]
 fun fixture_admission(state: *RequestFixture, generation: u64, request_id: view.View,
     route_name: view.View) Admission {
     ret Admission{exchange: ?state.exchange,
@@ -949,6 +977,7 @@ fun fixture_admission(state: *RequestFixture, generation: u64, request_id: view.
         started:   test_instant(0)};
 }
 
+#[testing]
 fun observed_app(app: *App, providers: *provider.Set,
     controller: *lifecycle.Controller, routes: *router.Router,
     stack: *middleware.Stack, headers: *security.HeadersPolicy,
@@ -981,7 +1010,7 @@ fun observed_app(app: *App, providers: *provider.Set,
     ret assemble(app, assembly);
 }
 
-test "laurel.app: an admitted request reaches the assembled observer" {
+test admit__reaches_observer {
     var providers: provider.Set;
     if (!provider.init(?providers, nil, 0, 0, 32)) { ret 1; }
     var lifecycle_item: lifecycle.Lifecycle = lifecycle.Lifecycle{ctx: nil,
@@ -1152,10 +1181,12 @@ test "laurel.app: an admitted request reaches the assembled observer" {
     ret 0;
 }
 
+#[testing]
 fun test_instant(ns: i64) time.Instant {
     ret time.Instant{sec: ns / duration.SECOND, nsec: ns % duration.SECOND};
 }
 
+#[testing]
 fun admit_at(app: *App, state: *RequestFixture, recorder: *observability.Recorder,
     generation: u64, deadline: opt[time.Instant], started: time.Instant) bool {
     if (!request_fixture_until(state, generation, view.view("/orders", 7), deadline)) {
@@ -1168,6 +1199,7 @@ fun admit_at(app: *App, state: *RequestFixture, recorder: *observability.Recorde
         route_name: view.view(nil, 0), started: started});
 }
 
+#[testing]
 fun finish_at(app: *App, state: *RequestFixture, finished: time.Instant) bool {
     var execution: middleware.Execution;
     execution.active = false;
@@ -1181,12 +1213,13 @@ fun finish_at(app: *App, state: *RequestFixture, finished: time.Instant) bool {
         && operation_ok(cancel.destroy(?state.scope));
 }
 
+#[testing]
 fun deadline_is(state: *RequestFixture, sec: i64, nsec: i64) bool {
     var at: time.Instant;
     ret context.deadline(?state.request_context, ?at) && at.sec == sec && at.nsec == nsec;
 }
 
-test "laurel.app: the handler timeout narrows the exchange deadline from the admission instant" {
+test admit__handler_timeout_narrows_deadline {
     var providers: provider.Set;
     if (!provider.init(?providers, nil, 0, 0, 32)) { ret 1; }
     var lifecycle_item: lifecycle.Lifecycle = lifecycle.Lifecycle{ctx: nil,
