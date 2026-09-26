@@ -339,8 +339,7 @@ Laurel release hedge selects and `hedge.service.laurel` is compiled against this
 tree. A Laurel change that breaks the adapter fails this build until hedge
 follows it.
 
-Hedge is pinned to commit `3c03255` on its dev branch, the 0.11.0 line that adds
-the supervisor and multiple workers, until hedge v0.11.0 is released. std is
-declared as `tag/v8.1.0`, which overrides hedge's exact `=8.0.0`. mach-http
-v0.19.0 is the release hedge and Laurel both select. Hedge brings mach-crypto
-v0.22.0, mach-tls v0.12.0, mach-quic v0.20.0 and mach-acme v0.8.0 with it.
+Hedge is selected as `=0.11.0`, the release that adds the supervisor and
+multiple workers. std `^8.2` and mach-http `^0.20` admit the exact v8.2.0 and
+v0.20.0 hedge selects, and Laurel accepts both. Hedge brings mach-crypto
+v0.22.0, mach-tls v0.12.0, mach-quic v0.20.0 and mach-acme v0.9.0 with it.

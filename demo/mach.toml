@@ -44,11 +44,11 @@ targets = ["*"]
 link = []
 need = []
 
-# std is declared by ref so the root's selection overrides hedge's exact
-# `=8.0.0`. mach resolves one std for the whole build.
+# std and http are imported directly. mach resolves one of each for the whole
+# build, so these ranges admit the exact releases hedge selects.
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-ref = "tag/v8.1.0"
+version = "^8.2"
 
 # the laurel this demo lives in, so the demo builds against the working tree.
 # the path overrides the laurel release hedge itself selects.
@@ -57,8 +57,8 @@ path = "../"
 
 [dep.hedge]
 git = "https://github.com/briar-systems/hedge"
-ref = "commit/3c0325522eb60a1405bfb41d8dcc8cd4d4b882c3"
+version = "=0.11.0"
 
 [dep.http]
 git = "https://github.com/briar-systems/mach-http"
-ref = "tag/v0.19.0"
+version = "^0.20"
