@@ -16,14 +16,13 @@ inherit the repository's `dep/`. It needs mach 5.12.
 
 ```sh
 cd demo
-mach dep update . --all
+mach dep pull .
 mach build . --profile release
 mach run . --profile release -- hedge.toml
 ```
 
-`mach dep update` rather than `mach dep pull`, because hedge selects its own
-dependencies by exact version and the demo commits no gitlinks for them, so they
-are resolved rather than realized. `mach run` forwards everything after `--` to
+`mach dep pull` realizes the pins committed under `demo/dep/` and copies laurel
+from this working tree. `mach run` forwards everything after `--` to
 the program, which is how the demo receives its configuration path, and a
 second argument `--quiet` stops the per-request log. The first build takes a few
 minutes and a few gigabytes of memory; after that only the third command is

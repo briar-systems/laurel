@@ -1,4 +1,4 @@
 .tool/
 go/go-bench
 laurel/out/
-laurel/dep/
+laurel/dep/laurel/
