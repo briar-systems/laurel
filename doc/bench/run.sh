@@ -65,9 +65,8 @@ oha_version="$("$OHA" --version | head -n 1)"
 
 echo "run.sh: building laurel"
 need mach
-# hedge selects its dependencies by exact version and the server commits no
-# gitlinks, so update resolves them, and it recopies laurel from this tree
-( cd laurel && mach dep update . --all && mach build . --profile release )
+# pull realizes the committed pins and recopies laurel from this tree
+( cd laurel && mach dep pull . && mach build . --profile release )
 laurel_bin="$(find laurel/out -type f -name laurel-bench -perm -u+x | head -n 1)"
 [ -n "$laurel_bin" ] || { echo "run.sh: the laurel server was not built" >&2; exit 1; }
 
