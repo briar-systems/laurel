@@ -22,10 +22,12 @@ use std.types.size.usize;
 use std.types.string.str;
 use std.types.view;
 
+#[testing]
 fun fixed_ok(outcome: err[A.Error]) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
@@ -596,6 +598,7 @@ pub fun recorder_event(recorder: *Recorder) *RequestEvent {
     ret ?recorder.event;
 }
 
+#[testing]
 rec Fixture {
     scope:             cancel.Scope;
     request_body:      body.Reader;
@@ -612,6 +615,7 @@ rec Fixture {
     owner:             i64;
 }
 
+#[testing]
 fun init_fixture(state: *Fixture, generation: u64, path: view.View,
     request_id: view.View) bool {
     if (state == nil || !operation_ok(cancel.make_root(?state.scope, opt[time.Instant].none{}))) {
@@ -642,10 +646,12 @@ fun init_fixture(state: *Fixture, generation: u64, path: view.View,
         ?state.owner, 3, nil, request_id, MAX_REQUEST_ID_BYTES);
 }
 
+#[testing]
 fun release_fixture(state: *Fixture) bool {
     ret context.unbind(?state.context, ?state.owner, 3) && operation_ok(cancel.destroy(?state.scope));
 }
 
+#[testing]
 rec Sink {
     starts:        usize;
     finishes:      usize;
@@ -660,6 +666,7 @@ rec Sink {
     truncated:     bool;
 }
 
+#[testing]
 fun sink_start(ctx: ptr, event: *RequestEvent) {
     val state: *Sink = ctx::*Sink;
     state.starts       = state.starts + 1;
@@ -669,6 +676,7 @@ fun sink_start(ctx: ptr, event: *RequestEvent) {
     state.truncated    = event.truncated;
 }
 
+#[testing]
 fun sink_finish(ctx: ptr, event: *RequestEvent) {
     val state: *Sink = ctx::*Sink;
     state.finishes      = state.finishes + 1;
@@ -680,6 +688,7 @@ fun sink_finish(ctx: ptr, event: *RequestEvent) {
     state.last_route    = event.route_name_len;
 }
 
+#[testing]
 fun sink_error(ctx: ptr, event: *RequestEvent, app_error: error.AppError) {
     val state: *Sink = ctx::*Sink;
     state.errors       = state.errors + 1;
@@ -689,11 +698,13 @@ fun sink_error(ctx: ptr, event: *RequestEvent, app_error: error.AppError) {
     state.last_kind    = event.error_kind;
 }
 
+#[testing]
 fun sink_observer(state: *Sink) Observer {
     ret Observer{ctx: state::ptr, start: sink_start, finish: sink_finish,
         error: sink_error};
 }
 
+#[testing]
 fun same(actual: view.View, expected: view.View) bool {
     if (actual.len != expected.len) { ret false; }
     var i: usize = 0;
@@ -704,6 +715,7 @@ fun same(actual: view.View, expected: view.View) bool {
     ret true;
 }
 
+#[testing]
 fun build_vocabulary(vocabulary: *Vocabulary, specs: *LabelSpec, values: *Term) bool {
     if (!term(?values[0], view.view("get", 3)) || !term(?values[1], view.view("post", 4))
         || !term(?specs[0].name, view.view("verb", 4))
@@ -717,11 +729,12 @@ fun build_vocabulary(vocabulary: *Vocabulary, specs: *LabelSpec, values: *Term) 
     ret init_vocabulary(vocabulary, specs, 2);
 }
 
+#[testing]
 fun test_instant(ns: i64) time.Instant {
     ret time.Instant{sec: ns / 1000000000, nsec: ns % 1000000000};
 }
 
-test "laurel.observability: label names and values have fixed cardinality" {
+test labels__fixed_cardinality {
     var values:     [2]Term;
     var specs:      [2]LabelSpec;
     var vocabulary: Vocabulary;
@@ -783,7 +796,7 @@ test "laurel.observability: label names and values have fixed cardinality" {
     ret 0;
 }
 
-test "laurel.observability: one start and one terminal event per request" {
+test recorder__one_start_one_terminal {
     var values:     [2]Term;
     var specs:      [2]LabelSpec;
     var vocabulary: Vocabulary;
@@ -860,7 +873,7 @@ test "laurel.observability: one start and one terminal event per request" {
     ret 0;
 }
 
-test "laurel.observability: request fields have fixed size policies" {
+test fields__size_policies {
     var values:     [2]Term;
     var specs:      [2]LabelSpec;
     var vocabulary: Vocabulary;

@@ -6,41 +6,59 @@
 
 [server]
 name = "laurel-demo"
+# more than one worker, whatever the host's CPU count, so the demo always runs
+# the one application on several threads at once
+workers = 4
 
 [server.limits]
 max_connections_per_peer = 256
 
+# the address comes from the environment. the demo's resolver reads
+# LISTEN_ADDRESS, falls back to 0.0.0.0:$PORT when only PORT is set (as on
+# Railway), and to 127.0.0.1:8080 when neither is
 [[listener]]
 name = "public"
-address = "127.0.0.1:8080"
+address = "${ENV:LISTEN_ADDRESS}"
 transport = "tcp"
 protocols = ["http/1.1"]
 backlog = 256
 accept_depth = 8
 
+# "*" answers every host name, since a deployment's public name is not known here
 [host.site]
 listener = "public"
-names = ["localhost", "127.0.0.1"]
+server_name = "*"
 
 [service.app]
 kind = "laurel"
 application = "site"
 
-# a plain file service on the same listener, to show that a laurel application
-# is one service among several rather than the whole server
+# two services hedge answers itself, next to the application: a plain file
+# service and a fixed health check. a laurel application is one service among
+# several rather than the whole server.
 # hedge's static service maps the whole request path under the root, so a
 # request for /static/index.html reads public/static/index.html
 [service.assets]
 kind = "static"
 root = "public"
 
-# a literal segment outranks the catch-all, so /static/... reaches the files
-# and everything else reaches the application
+[service.health]
+kind = "fixed"
+body = "ok\n"
+
+# a literal segment outranks the catch-all, so /static/... and /healthz reach
+# hedge's services and everything else reaches the application
 [[route]]
 name = "assets"
 host = "site"
 path = "/static/**"
 service = "assets"
+
+[[route]]
+name = "health"
+host = "site"
+path = "/healthz"
+service = "health"
 
 [[route]]
 name = "app"

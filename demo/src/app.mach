@@ -29,6 +29,8 @@ use io_error:    std.io.error;
 use std.memory;
 use std.memory.secret;
 use std.print;
+use std.sync.atomic;
+use std.sync.thread;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -49,7 +51,7 @@ fun wall_now() time.Time {
     ret time.Time{sec: 0, nsec: 0};
 }
 
-pub val ROUTE_COUNT:      usize = 4;
+pub val ROUTE_COUNT:      usize = 6;
 val     SEGMENT_COUNT:    usize = 16;
 val     MIDDLEWARE_COUNT: usize = 2;
 val     SESSION_SLOTS:    usize = 1024;
@@ -101,42 +103,52 @@ pub rec Application {
     application: app.App;
 }
 
-# the observer is where the application learns what happened to a request.
-# laurel calls start exactly once per admitted request and exactly one of
-# finish or error per request, both from inside the framework.
 # both entropy contracts require a real context that can report whether a byte
 # range aliases its own storage, so the framework can refuse a source that
 # shares memory with the keys it is being asked to protect
 pub rec EntropyState {
-    calls: u64;
+    calls: i64;
 }
 
+# the observer is where the application learns what happened to a request.
+# laurel calls start exactly once per admitted request and exactly one of
+# finish or error per request, both from inside the framework. every hedge
+# worker calls into the one application, so these run on several threads at
+# once and the counts are atomic.
 pub rec Counters {
-    started:  u64;
-    finished: u64;
-    failed:   u64;
+    started:  i64;
+    finished: i64;
+    failed:   i64;
     quiet:    bool;
 }
 
 fun observer_start(ctx: ptr, event: *observability.RequestEvent) {
     val state: *Counters = ctx::*Counters;
-    state.started = state.started + 1;
+    atomic.fetch_add(?state.started, 1);
 }
 
+# the thread token names the hedge worker that served the request
 fun observer_finish(ctx: ptr, event: *observability.RequestEvent) {
     val state: *Counters = ctx::*Counters;
-    state.finished = state.finished + 1;
+    atomic.fetch_add(?state.finished, 1);
     if (state.quiet) { ret; }
-    print.printlnf("demo: {} {} -> {}",
-        observability.event_route_name(event).len::u64, event.sequence,
-        event.status::u64);
+    val route: view.View = observability.event_route_name(event);
+    var name:  [129]u8;
+    var i:     usize     = 0;
+    for (i < route.len && i < 128) {
+        name[i] = route.data[i]::u8;
+        i       = i + 1;
+    }
+    name[i] = 0;
+    print.printlnf("demo: {} -> {} on worker thread {}", (?name[0])::str,
+        event.status::u64, thread.current_token());
 }
 
 # the private detail never reaches the wire; the observer is where it surfaces
 fun observer_error(ctx: ptr, event: *observability.RequestEvent,
     failure: error.AppError) {
     val state: *Counters = ctx::*Counters;
-    state.failed = state.failed + 1;
+    atomic.fetch_add(?state.failed, 1);
     if (state.quiet) { ret; }
     var copy:   error.AppError = failure;
     val detail: view.View      = error.private_detail(?copy);
@@ -155,7 +167,7 @@ fun observer_error(ctx: ptr, event: *observability.RequestEvent,
 # application trusts. laurel ships no default, on purpose.
 fun entropy_fill(ctx: ptr, output: *u8, length: usize) i64 {
     val state: *EntropyState = ctx::*EntropyState;
-    if (state != nil)                               { state.calls = state.calls + 1; }
+    if (state != nil)                               { atomic.fetch_add(?state.calls, 1); }
     if (!rand_ok(crypto_rand.fill(output, length))) { ret 1; }
     ret 0;
 }
@@ -319,6 +331,14 @@ pub fun assemble(demo: *Application, limits: message.Limits, quiet: bool) bool {
         router.exact_method(method.from_kind(method.POST)),
         handlers.text("/form"), "form.submit", nil, 0,
         handlers.form_submit, handlers.form_resume, (?demo.state)::ptr);
+    demo.routes[4] = route(
+        router.exact_method(method.from_kind(method.GET)),
+        handlers.text("/api/search"), "api.search", nil, 0,
+        handlers.search, nil, (?demo.state)::ptr);
+    demo.routes[5] = route(
+        router.exact_method(method.from_kind(method.POST)),
+        handlers.text("/api/raw"), "api.raw", nil, 0,
+        handlers.raw_submit, handlers.raw_resume, (?demo.state)::ptr);
 
     val storage: router.Storage = router.Storage{
         specifications:  ?demo.specifications[0], specification_cap: ROUTE_COUNT,

@@ -639,6 +639,7 @@ pub fun run_suite(harness: *Harness, cases: *Case, case_len: usize,
     ret report.failed == 0;
 }
 
+#[testing]
 rec HandlerState {
     store:          session.Store;
     providers:      *provider.Set;
@@ -673,10 +674,12 @@ rec HandlerState {
     reply_len:      usize;
 }
 
+#[testing]
 fun internal_error(detail: str) error.AppError {
     ret error.make(error.INTERNAL, 500, "internal server error", detail, false);
 }
 
+#[testing]
 fun write_u64(value: u64, output: *u8, capacity: usize) usize {
     var digits: usize = 1;
     var rest:   u64   = value / 10;
@@ -695,6 +698,7 @@ fun write_u64(value: u64, output: *u8, capacity: usize) usize {
     ret digits;
 }
 
+#[testing]
 fun set_text(state: *HandlerState, prefix: view.View, value: u64) bool {
     if (prefix.len > 64) { ret false; }
     var i: usize = 0;
@@ -708,6 +712,7 @@ fun set_text(state: *HandlerState, prefix: view.View, value: u64) bool {
     ret true;
 }
 
+#[testing]
 fun respond_text(state: *HandlerState,
     request_context: *context.Context) handler.Result {
     val response: *message.Response = context.response(request_context);
@@ -726,6 +731,7 @@ fun respond_text(state: *HandlerState,
     ret handler.respond();
 }
 
+#[testing]
 fun orders_show(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val state: *HandlerState  = ctx::*HandlerState;
@@ -739,6 +745,7 @@ fun orders_show(ctx: ptr, request_context: *context.Context,
     ret respond_text(state, request_context);
 }
 
+#[testing]
 fun upload_store(state: *HandlerState,
     request_context: *context.Context) handler.Result {
     val scope: *cancel.Scope = context.cancellation(request_context);
@@ -794,6 +801,7 @@ fun upload_store(state: *HandlerState,
 
 # the body is read in suspendable steps: a read that cannot be served now leaves
 # the handler through its host and comes back exactly here
+#[testing]
 fun upload_drain(state: *HandlerState, request_context: *context.Context,
     token: u64) handler.Result {
     val request: *message.Request = context.request(request_context);
@@ -827,6 +835,7 @@ fun upload_drain(state: *HandlerState, request_context: *context.Context,
     ret upload_store(state, request_context);
 }
 
+#[testing]
 fun upload_create(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val handler_state: *HandlerState = ctx::*HandlerState;
@@ -840,6 +849,7 @@ fun upload_create(ctx: ptr, request_context: *context.Context,
     ret upload_drain(handler_state, request_context, 0);
 }
 
+#[testing]
 fun upload_resume(ctx: ptr, request_context: *context.Context, state: ptr,
     settlement: handler.Settlement, token: u64) handler.Result {
     val handler_state: *HandlerState = state::*HandlerState;
@@ -854,6 +864,7 @@ fun upload_resume(ctx: ptr, request_context: *context.Context, state: ptr,
     ret upload_drain(handler_state, request_context, token);
 }
 
+#[testing]
 fun stream_produce(ctx: ptr, output: *u8, capacity: usize) render.Chunk {
     val state: *HandlerState = ctx::*HandlerState;
     if (state == nil || state.emitted >= state.chunks) { ret render.chunk_end(); }
@@ -866,14 +877,17 @@ fun stream_produce(ctx: ptr, output: *u8, capacity: usize) render.Chunk {
     ret render.chunk_data(4);
 }
 
+#[testing]
 fun stream_resume(ctx: ptr, token: u64, output: *u8, capacity: usize) render.Chunk {
     ret stream_produce(ctx, output, capacity);
 }
 
+#[testing]
 fun stream_settle(ctx: ptr, mode: body.Mode) bool {
     ret true;
 }
 
+#[testing]
 fun stream_show(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val state:    *HandlerState     = ctx::*HandlerState;
@@ -898,6 +912,7 @@ fun stream_show(ctx: ptr, request_context: *context.Context,
     ret handler.respond();
 }
 
+#[testing]
 fun reply_append(state: *HandlerState, value: view.View) bool {
     if (value.len > 128 - state.reply_len) { ret false; }
     var i: usize = 0;
@@ -909,6 +924,7 @@ fun reply_append(state: *HandlerState, value: view.View) bool {
     ret true;
 }
 
+#[testing]
 fun respond_reply(state: *HandlerState,
     request_context: *context.Context) handler.Result {
     if (state.reply_len > 64) {
@@ -924,6 +940,7 @@ fun respond_reply(state: *HandlerState,
 }
 
 # GET /search: every value of a repeated key, empty values, and a typed one
+#[testing]
 fun search_show(ctx: ptr, request_context: *context.Context,
     slot: *ptr) handler.Result {
     val state: *HandlerState = ctx::*HandlerState;
@@ -964,6 +981,7 @@ fun search_show(ctx: ptr, request_context: *context.Context,
 }
 
 # POST /hooks: the exact body bytes, as a signature check would see them
+#[testing]
 fun hook_drive(state: *HandlerState, request_context: *context.Context,
     current: raw.Operation) handler.Result {
     if (current.status == raw.PENDING)  { ret handler.suspend(current.token); }
@@ -975,6 +993,7 @@ fun hook_drive(state: *HandlerState, request_context: *context.Context,
     ret respond_reply(state, request_context);
 }
 
+#[testing]
 fun hook_create(ctx: ptr, request_context: *context.Context,
     slot: *ptr) handler.Result {
     val state:   *HandlerState    = ctx::*HandlerState;
@@ -992,6 +1011,7 @@ fun hook_create(ctx: ptr, request_context: *context.Context,
     ret hook_drive(state, request_context, raw.poll(?state.raw_body));
 }
 
+#[testing]
 fun hook_resume(ctx: ptr, request_context: *context.Context, slot: ptr,
     settlement: handler.Settlement, token: u64) handler.Result {
     val state: *HandlerState = slot::*HandlerState;
@@ -1002,22 +1022,26 @@ fun hook_resume(ctx: ptr, request_context: *context.Context, slot: ptr,
         raw.complete(?state.raw_body, token));
 }
 
+#[testing]
 fun conflict_handler(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     ret handler.fail(error.make(error.CONFLICT, 409, "conflict",
         "private detail must never reach the wire", false));
 }
 
+#[testing]
 fun secret_handler(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     ret handler.fail(error.make(error.INTERNAL, 500,
         "database dsn user:password@host", "private detail", false));
 }
 
+#[testing]
 fun harness_clock(ctx: ptr) i64 {
     ret 1000;
 }
 
+#[testing]
 fun contains(haystack: view.View, needle: str) bool {
     val length: usize = str_len(needle);
     if (length == 0 || haystack.len < length || haystack.data == nil) {
@@ -1039,6 +1063,7 @@ fun contains(haystack: view.View, needle: str) bool {
 
 # the ordinary application path: a handler reaches its session through the
 # context, and never sees the binder, the manager, or a buffer
+#[testing]
 fun session_login(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val request_session: *session.RequestSession =
@@ -1071,12 +1096,14 @@ fun session_login(ctx: ptr, request_context: *context.Context,
     ret handler.respond();
 }
 
+#[testing]
 fun fallback_handler(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     ret handler.fail(error.make(error.NOT_FOUND, 404, "not found",
         "no route matched the request target", false));
 }
 
+#[testing]
 fun trace_before(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val handler_state: *HandlerState = ctx::*HandlerState;
@@ -1089,6 +1116,7 @@ fun trace_before(ctx: ptr, request_context: *context.Context,
     ret handler.proceed();
 }
 
+#[testing]
 fun trace_after(ctx: ptr, request_context: *context.Context, state: ptr,
     carried: handler.Result) handler.Result {
     val handler_state: *HandlerState = state::*HandlerState;
@@ -1101,6 +1129,7 @@ fun trace_after(ctx: ptr, request_context: *context.Context, state: ptr,
 }
 
 # the outermost middleware also marks the start of one traced request
+#[testing]
 fun headers_before(ctx: ptr, request_context: *context.Context,
     state: *ptr) handler.Result {
     val handler_state: *HandlerState = ctx::*HandlerState;
@@ -1114,6 +1143,7 @@ fun headers_before(ctx: ptr, request_context: *context.Context,
     ret handler.proceed();
 }
 
+#[testing]
 fun headers_after(ctx: ptr, request_context: *context.Context, state: ptr,
     carried: handler.Result) handler.Result {
     val handler_state: *HandlerState = state::*HandlerState;
@@ -1131,35 +1161,42 @@ fun headers_after(ctx: ptr, request_context: *context.Context, state: ptr,
     ret carried;
 }
 
+#[testing]
 fun counter_resolve(ctx: ptr, key: view.View) res[ptr, view.View] {
     if (key.len == 7 && key.data[0] == 'c') { ret res[ptr, view.View].ok{ctx}; }
     ret res[ptr, view.View].ok{nil};
 }
 
+#[testing]
 fun service_start(ctx: ptr) res[lifecycle.CallbackStatus, view.View] {
     val state: *usize = ctx::*usize;
     if (state != nil) { @state = @state + 1; }
     ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
+#[testing]
 fun service_ready(ctx: ptr) lifecycle.Readiness {
     ret lifecycle.READY_NOW;
 }
 
+#[testing]
 fun service_drain(ctx: ptr,
     deadline: opt[time.Instant]) res[lifecycle.CallbackStatus, view.View] {
     ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
+#[testing]
 fun service_stop(ctx: ptr) res[lifecycle.CallbackStatus, view.View] {
     ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
 }
 
+#[testing]
 rec EntropyState {
     seed:  u8;
     calls: usize;
 }
 
+#[testing]
 fun entropy_fill(ctx: ptr, output: *u8, length: usize) i64 {
     val state: *EntropyState = ctx::*EntropyState;
     if (state == nil || output == nil) { ret -1; }
@@ -1173,6 +1210,7 @@ fun entropy_fill(ctx: ptr, output: *u8, length: usize) i64 {
     ret 0;
 }
 
+#[testing]
 fun entropy_aliases(ctx: ptr, data: *u8, length: usize) bool {
     val state: *EntropyState = ctx::*EntropyState;
     if (state == nil || !memory.range_valid(data, length)
@@ -1180,6 +1218,7 @@ fun entropy_aliases(ctx: ptr, data: *u8, length: usize) bool {
     ret memory.ranges_overlap(data, length, state::*u8, $size_of(EntropyState));
 }
 
+#[testing]
 rec Sink {
     starts:    usize;
     finishes:  usize;
@@ -1193,6 +1232,7 @@ rec Sink {
     route_len: usize;
 }
 
+#[testing]
 fun capture_event(state: *Sink, event: *observability.RequestEvent) {
     state.status    = event.status;
     state.outcome   = event.outcome;
@@ -1211,17 +1251,20 @@ fun capture_event(state: *Sink, event: *observability.RequestEvent) {
     }
 }
 
+#[testing]
 fun sink_start(ctx: ptr, event: *observability.RequestEvent) {
     val state: *Sink = ctx::*Sink;
     state.starts = state.starts + 1;
 }
 
+#[testing]
 fun sink_finish(ctx: ptr, event: *observability.RequestEvent) {
     val state: *Sink = ctx::*Sink;
     state.finishes = state.finishes + 1;
     capture_event(state, event);
 }
 
+#[testing]
 fun sink_error(ctx: ptr, event: *observability.RequestEvent,
     app_error: error.AppError) {
     val state: *Sink = ctx::*Sink;
@@ -1229,6 +1272,7 @@ fun sink_error(ctx: ptr, event: *observability.RequestEvent,
     capture_event(state, event);
 }
 
+#[testing]
 rec AppFixture {
     parameters:     [1]router.Parameter;
     routes:         [8]router.Route;
@@ -1267,6 +1311,7 @@ rec AppFixture {
     application:    app.App;
 }
 
+#[testing]
 rec HarnessStorage {
     response_fields:   [16]field.Field;
     response_trailers: [8]field.Field;
@@ -1275,6 +1320,7 @@ rec HarnessStorage {
     captured:          [4096]u8;
 }
 
+#[testing]
 fun harness_storage(state: *HarnessStorage) Storage {
     ret Storage{response_fields: ?state.response_fields[0], response_field_cap: 16,
         response_trailers: ?state.response_trailers[0], response_trailer_cap: 8,
@@ -1283,6 +1329,7 @@ fun harness_storage(state: *HarnessStorage) Storage {
         captured:          ?state.captured[0], captured_capacity: 4096};
 }
 
+#[testing]
 fun test_route(method_rule: router.Method, route_path: router.Path, name: str,
     parameters: *router.Parameter, parameter_len: usize,
     call: handler.EnterFun, resume: handler.ResumeFun,
@@ -1292,6 +1339,7 @@ fun test_route(method_rule: router.Method, route_path: router.Path, name: str,
         handler: handler.Handler{ctx: ctx, call: call, resume: resume}};
 }
 
+#[testing]
 fun init_sessions(fixture: *AppFixture) bool {
     fixture.memory.active = false;
     if (!session.init_memory_store(?fixture.memory, ?fixture.store_slots[0], 2)) {
@@ -1331,6 +1379,7 @@ fun init_sessions(fixture: *AppFixture) bool {
     ret true;
 }
 
+#[testing]
 fun init_application(fixture: *AppFixture, limits: message.Limits) bool {
     if (fixture == nil) { ret false; }
     fixture.handlers.limits  = limits;
@@ -1445,6 +1494,7 @@ fun init_application(fixture: *AppFixture, limits: message.Limits) bool {
     ret app.assemble(?fixture.application, assembly);
 }
 
+#[testing]
 fun release_code(fixture: *AppFixture) usize {
     if (session.stop_manager(?fixture.manager) != session.STORE_OK) { ret 1; }
     if (!session.release_protected_codec(?fixture.codec))           { ret 2; }
@@ -1456,10 +1506,12 @@ fun release_code(fixture: *AppFixture) usize {
     ret 0;
 }
 
+#[testing]
 fun release_application(fixture: *AppFixture) bool {
     ret release_code(fixture) == 0;
 }
 
+#[testing]
 fun same(actual: view.View, expected: view.View) bool {
     if (actual.len != expected.len) { ret false; }
     var i: usize = 0;
@@ -1470,6 +1522,7 @@ fun same(actual: view.View, expected: view.View) bool {
     ret true;
 }
 
+#[testing]
 fun host_fields(items: *field.Field, limits: message.Limits,
     output: *field.Fields) bool {
     @output = field.init(items, 4, limits.request_fields);
@@ -1477,11 +1530,13 @@ fun host_fields(items: *field.Field, limits: message.Limits,
         value: view.view("laurel.test", 11), sensitive: false}) == field.ADD_OK;
 }
 
+#[testing]
 fun get_request(fields: field.Fields, path: view.View, id: view.View) Request {
     ret request(message.version_h1(1, 1), method.from_kind(method.GET),
         target.origin(path, path, view.view(nil, 0)), fields, id);
 }
 
+#[testing]
 fun post_request(fields: field.Fields, path: view.View, id: view.View,
     payload: view.View, fragment: usize, suspend: bool) Request {
     var built: Request = request(message.version_h1(1, 1),
@@ -1493,7 +1548,7 @@ fun post_request(fields: field.Fields, path: view.View, id: view.View,
     ret built;
 }
 
-test "laurel.testing: the harness drives a whole application without a socket" {
+test harness__drives_application {
     val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
@@ -1562,7 +1617,7 @@ test "laurel.testing: the harness drives a whole application without a socket" {
 
 # the case the contract has to survive: a host that never settles the body a
 # suspended handler is waiting on
-test "laurel.testing: a suspension that is never resumed is abandoned" {
+test harness__unresumed_suspension_abandoned {
     val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
@@ -1608,7 +1663,7 @@ test "laurel.testing: a suspension that is never resumed is abandoned" {
     ret 0;
 }
 
-test "laurel.testing: a handler reaches its session through the application" {
+test harness__session_through_application {
     val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     if (!init_application(?fixture, limits)) { ret 1; }
@@ -1648,7 +1703,7 @@ test "laurel.testing: a handler reaches its session through the application" {
     ret 0;
 }
 
-test "laurel.testing: streaming request and response bodies flow in process" {
+test harness__streaming_bodies {
     val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
@@ -1718,7 +1773,7 @@ test "laurel.testing: streaming request and response bodies flow in process" {
     ret 0;
 }
 
-test "laurel.testing: the security corpus runs against every http version" {
+test harness__security_corpus_every_version {
     val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
@@ -1800,6 +1855,7 @@ test "laurel.testing: the security corpus runs against every http version" {
     ret 0;
 }
 
+#[testing]
 fun query_request(version: message.Version, fields: field.Fields,
     raw_target: str, id: view.View) Request {
     val raw_len: usize = str_len(raw_target);
@@ -1814,6 +1870,7 @@ fun query_request(version: message.Version, fields: field.Fields,
         view.view(raw_target, mark), query_view), fields, id);
 }
 
+#[testing]
 fun hook_request(version: message.Version, fields: field.Fields,
     payload: view.View, chunked: bool, fragment: usize, suspend: bool) Request {
     var built: Request = post_request(fields, view.view("/hooks", 6),
@@ -1823,11 +1880,12 @@ fun hook_request(version: message.Version, fields: field.Fields,
     ret built;
 }
 
+#[testing]
 fun body_is(result: *Result, expected: str) bool {
     ret same(response_body(result), view.view(expected, str_len(expected)));
 }
 
-test "laurel.testing: query parameters decode on every http version" {
+test harness__query_every_version {
     val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
@@ -1889,7 +1947,7 @@ test "laurel.testing: query parameters decode on every http version" {
 
 # a webhook signature covers the bytes on the wire, so the echo must match
 # them exactly whatever the framing, fragmentation or suspension
-test "laurel.testing: raw bodies are exact and bounded on every http version" {
+test harness__raw_body_every_version {
     val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
@@ -1993,7 +2051,7 @@ test "laurel.testing: raw bodies are exact and bounded on every http version" {
     ret 0;
 }
 
-test "laurel.testing: admission follows the driven application lifecycle" {
+test harness__admission_follows_lifecycle {
     val limits:  message.Limits = message.limits_default();
     var fixture: AppFixture;
     var storage: HarnessStorage;
@@ -2038,155 +2096,192 @@ test "laurel.testing: admission follows the driven application lifecycle" {
 #
 # `csrf.KeyRing` is deliberately absent: it owns key material and must keep
 # refusing to erase.
+#[testing]
 fun erase_app(value: *app.App) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_assembly(value: *app.Assembly) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_context(value: *context.Context) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_handler(value: *handler.Handler) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_router(value: *router.Router) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_stack(value: *middleware.Stack) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_mapper(value: *error.Mapper) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_default_errors(value: *error.Default) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_manager(value: *session.Manager) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_request_session(value: *session.RequestSession) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_request_storage(value: *session.RequestStorage) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_binder(value: *session.Binder) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_headers(value: *security.HeadersPolicy) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_origins(value: *security.OriginPolicy) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_redirects(value: *security.RedirectPolicy) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_authenticator(value: *security.Authenticator) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_protector(value: *csrf.Protector) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_csrf_handle(value: *csrf.Handle) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_providers(value: *provider.Set) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_controller(value: *lifecycle.Controller) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_jar(value: *cookie.Jar) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_form(value: *form.UrlEncoded) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_form_body(value: *form.BodyParser) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_multipart(value: *multipart.Parser) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_upload(value: *upload.Upload) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_media(value: *render.Media) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_fixed(value: *render.Fixed) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_render_stream(value: *render.Stream) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_renderer(value: *render.Renderer) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_realtime_stream(value: *realtime.Stream) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_socket(value: *realtime.Socket) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_admission(value: *app.Admission) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_termination(value: *app.Termination) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_recorder(value: *observability.Recorder) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_observer(value: *observability.Observer) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_harness(value: *Harness) ptr {
     ret value::ptr;
 }
 
+#[testing]
 fun erase_result(value: *Result) ptr {
     ret value::ptr;
 }
 
-test "laurel.testing: every public type erases to the untyped ptr" {
+test public_types__erase_to_ptr {
     if (erase_app(nil) != nil || erase_assembly(nil) != nil
         || erase_context(nil) != nil || erase_handler(nil) != nil
         || erase_router(nil) != nil || erase_stack(nil) != nil

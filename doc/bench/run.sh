@@ -65,8 +65,8 @@ oha_version="$("$OHA" --version | head -n 1)"
 
 echo "run.sh: building laurel"
 need mach
-( cd laurel && [ -d dep/hedge ] || ( cd laurel && mach dep pull ) ) >/dev/null 2>&1 || true
-( cd laurel && if [ ! -d dep/hedge ]; then mach dep pull; fi && mach build . --profile release )
+# pull realizes the committed pins and recopies laurel from this tree
+( cd laurel && mach dep pull . && mach build . --profile release )
 laurel_bin="$(find laurel/out -type f -name laurel-bench -perm -u+x | head -n 1)"
 [ -n "$laurel_bin" ] || { echo "run.sh: the laurel server was not built" >&2; exit 1; }
 
@@ -235,7 +235,8 @@ dep_ref() {
         found && /^\[/ { exit }
     ' laurel/mach.toml
 }
-LAUREL_VERSION="$(dep_ref laurel)"
+# the server builds laurel from this working tree, so its version is the commit
+LAUREL_VERSION="working tree at $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 HEDGE_VERSION="$(dep_ref hedge)"
 
 python3 report.py \

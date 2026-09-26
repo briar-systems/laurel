@@ -12,6 +12,7 @@ use laurel.form;
 use laurel.handler;
 use laurel.render;
 use A: std.allocator;
+use std.sync.atomic;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -25,8 +26,9 @@ val FORM_FIELDS:     usize = 4;
 val FORM_BYTES:      usize = 512;
 val FORM_READ_BYTES: usize = 256;
 
+# one application serves every hedge worker, so the count is atomic
 pub rec State {
-    requests: u64;
+    requests: i64;
 }
 
 rec Body {
@@ -134,7 +136,7 @@ pub fun json_hello(ctx: ptr, request_context: *context.Context,
     if (state == nil) {
         ret handler.fail(internal("handler state is missing"));
     }
-    state.requests = state.requests + 1;
+    atomic.fetch_add(?state.requests, 1);
     ret respond_json(request_context, text("{\"message\":\"hello\"}"));
 }
 
@@ -147,7 +149,7 @@ pub fun echo(ctx: ptr, request_context: *context.Context,
     if (state == nil || found == nil || found.kind != context.PARAM_U64) {
         ret handler.fail(internal("route parameter is missing"));
     }
-    state.requests = state.requests + 1;
+    atomic.fetch_add(?state.requests, 1);
     val arena: *A.Allocator = request_context.alloc;
     if (arena == nil) {
         ret handler.fail(internal("request arena is unavailable"));
@@ -227,7 +229,7 @@ pub fun submit(ctx: ptr, request_context: *context.Context,
     if (state == nil) {
         ret handler.fail(internal("handler state is missing"));
     }
-    state.requests = state.requests + 1;
+    atomic.fetch_add(?state.requests, 1);
     val request: *message.Request = context.request(request_context);
     val arena:   *A.Allocator     = request_context.alloc;
     if (request == nil || request.body == nil || arena == nil) {

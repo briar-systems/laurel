@@ -19,14 +19,17 @@ use std.types.option.opt;
 use std.types.size.usize;
 use std.types.view;
 
+#[testing]
 fun fixed_ok(outcome: err[A.Error]) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun transition_ok(outcome: cancel.Transition) bool {
     ret (sel outcome.ok) && outcome.ok;
 }
@@ -337,6 +340,7 @@ pub fun unbind(context: *Context, app_owner: ptr, app_generation: u64) bool {
     ret true;
 }
 
+#[testing]
 rec Fixture {
     scope:             cancel.Scope;
     request_body:      body.Reader;
@@ -351,6 +355,7 @@ rec Fixture {
     allocator:         A.Allocator;
 }
 
+#[testing]
 fun metadata(deadline_value: opt[time.Instant]) message.Metadata {
     ret message.Metadata{
         version:       message.version_h1(1, 1),
@@ -364,6 +369,7 @@ fun metadata(deadline_value: opt[time.Instant]) message.Metadata {
     };
 }
 
+#[testing]
 fun init_fixture(fixture: *Fixture, generation: u64,
     deadline_value: opt[time.Instant]) bool {
     if (fixture == nil || !operation_ok(cancel.make_root(?fixture.scope, deadline_value))) { ret false; }
@@ -384,7 +390,7 @@ fun init_fixture(fixture: *Fixture, generation: u64,
     ret exchange.begin(?fixture.exchange);
 }
 
-test "laurel.context: one binding borrows the exact exchange generation" {
+test bind__borrows_exchange_generation {
     var fixture: Fixture;
     if (!init_fixture(?fixture, 41, opt[time.Instant].none{})) { ret 1; }
     var items: [2]Param;
@@ -414,7 +420,7 @@ test "laurel.context: one binding borrows the exact exchange generation" {
     ret 0;
 }
 
-test "laurel.context: stale generations and cancellation fail closed" {
+test bind__stale_and_cancelled_fail_closed {
     var fixture: Fixture;
     if (!init_fixture(?fixture, 51, opt[time.Instant].none{})) { ret 1; }
     val params:  Params = Params{items: nil, len: 0, generation: 51};
@@ -435,7 +441,7 @@ test "laurel.context: stale generations and cancellation fail closed" {
     ret 0;
 }
 
-test "laurel.context: capture and identity bounds are transactional" {
+test bind__refuses_invalid_captures {
     var fixture: Fixture;
     if (!init_fixture(?fixture, 61, opt[time.Instant].none{})) { ret 1; }
     var duplicate: [2]Param;
@@ -463,7 +469,7 @@ test "laurel.context: capture and identity bounds are transactional" {
     ret 0;
 }
 
-test "laurel.context: deadlines remain owned by the exchange scope" {
+test deadline__owned_by_exchange_scope {
     val expected: time.Instant = time.Instant{sec: 20, nsec: 7};
     var fixture:  Fixture;
     if (!init_fixture(?fixture, 71, opt[time.Instant].some{expected})) { ret 1; }
