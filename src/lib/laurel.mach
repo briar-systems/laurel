@@ -26,4 +26,5 @@ fwd laurel.realtime;
 fwd laurel.secret;
 fwd laurel.config;
 fwd laurel.task;
-fwd laurel.testing.tasks;
+fwd laurel.task.runner;
+fwd laurel.serve;

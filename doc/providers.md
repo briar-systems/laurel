@@ -111,14 +111,23 @@ released. After it, every operation is refused.
 outcome and error, whether a run is running or queued, and the sequence of its
 current snapshot.
 
-### The in-process provider
+### The task runner
 
-`laurel.testing.tasks.Runner` implements `task.Provider` in caller-owned
-storage for tests. Nothing runs until `tasks.poll(runner, now)`, which takes the
-caller's clock, schedules due periods, starts queued runs, steps each running
-task once, and abandons runs still in flight past the drain deadline. Tests
-drive a task through the interface exactly as a host would, with no thread and
-no clock.
+`laurel.task.runner.Runner` implements `task.Provider` in caller-owned
+storage, and it is the one runner both hosts use. Nothing runs until
+`runner.poll(runner, now)`, which takes the caller's clock, schedules due
+periods, starts queued runs, steps each running task once, and abandons runs
+still in flight past the drain deadline. Every provider call and `poll` take
+the runner's lock, and a step runs with the lock released, so a step may
+publish, read or trigger through the provider and handlers may read snapshots
+from any thread. One driver polls at a time.
+
+`laurel.testing` drives it by hand: a test calls `poll` with a fixed clock, so
+a task runs exactly when the test says, with no thread and no clock.
+`laurel.serve` drives it from a thread of its own, polling when the runner
+reports work (`runner.next_due`, and `runner.on_wake` for a registration,
+trigger or drain), and stepping a run that returned `STEP_PENDING` again after
+`serve.Options.step_interval_ns`.
 
 ## Secrets
 
@@ -169,3 +178,23 @@ increment), `SIGNAL_GAUGE` or `SIGNAL_EVENT` with a name and value.
 `observability.Vocabulary`, under the same rules as request labels, so signal
 cardinality is as fixed as request cardinality. `observability.emit` hands the
 signal to the host's `emit` callback.
+
+## Built-in providers under `laurel.serve`
+
+`serve.Host` owns one of each facility, and `serve.providers(host)` returns
+them as one `provider.Provider` entry that owns all four keys:
+
+| facility | built in | configured by |
+|---|---|---|
+| background tasks | a `task.runner.Runner` on its own thread, drained with the application and stopped after it | `Options.step_interval_ns` |
+| configuration | the process environment: key `a.b-c` reads `<prefix>A_B_C` | `Options.config_prefix` |
+| secrets | the process environment: name `token` reads `<prefix>TOKEN`, copied into welded scratch for the borrow and wiped after it, at most `serve.MAX_SECRET_BYTES` | `Options.secret_prefix` |
+| telemetry | one line per signal on stderr, written with one call | `Options.telemetry` |
+
+An application replaces any of them by listing its own provider for that key
+before the host's entry in its `provider.Set`: `provider.resolve` answers with
+the first provider that owns a key. `laurel.serve` drains and stops the task
+provider the application's set resolves, whichever that is. An environment
+secret sits in process memory in the clear for as long as the process runs, so
+a deployment that keeps secrets in a vault or a credentials directory supplies
+its own `secret.Resolver`.

@@ -12,3 +12,5 @@ doc/api/
 demo/dep/laurel/
 demo/out/
 doc/bench/laurel/out/
+demo/standalone/dep/laurel/
+demo/standalone/out/

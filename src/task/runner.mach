@@ -1,4 +1,11 @@
-# a deterministic in-process task provider driven by the caller's clock
+# the task provider's runner: host-driven steps behind one lock
+#
+# nothing runs until a driver calls poll with its clock. laurel.testing drives it
+# by hand with a fixed clock, and laurel.serve drives it from a thread of its own.
+# every provider call and poll take the runner's lock, and a step runs with the
+# lock released, so a step may call back into the provider (publish, read,
+# trigger) and applications may call it from any thread. one driver polls at a
+# time.
 
 use crypto.contracts;
 use laurel.secret;
@@ -7,6 +14,7 @@ use std.chrono.duration;
 use std.chrono.time;
 use std.crypto.ct;
 use std.sync.cancel;
+use std.sync.mutex;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -24,6 +32,7 @@ rec Entry {
     queued:     bool;
     cause:      task.Cause;
     running:    bool;
+    stepping:   bool;
     scheduled:  bool;
     due:        time.Instant;
     scope:      cancel.Scope;
@@ -39,12 +48,20 @@ rec Entry {
     report:     task.Report;
 }
 
-# caller-owned runner state; nothing runs until poll
+# called after a provider call gives the driver new work: a registration, a
+# trigger, or the start of drain. it runs with the runner's lock released
+pub def WakeFun: fun(ptr);
+
+# caller-owned runner state
 pub rec Runner {
     entries:  [16]Entry;
     root:     cancel.Scope;
     secrets:  secret.Source;
     provider: task.Provider;
+    lock:     mutex.Mutex;
+    wake:     WakeFun;
+    wake_ctx: ptr;
+    polling:  bool;
     draining: bool;
     deadline: opt[time.Instant];
     stopped:  bool;
@@ -53,12 +70,29 @@ pub rec Runner {
 
 fun runner_of(context: ptr) *Runner {
     val runner: *Runner = context::*Runner;
-    if (runner == nil || !runner.valid || runner.stopped) { ret nil; }
+    if (runner == nil || !runner.valid) { ret nil; }
     ret runner;
 }
 
+fun lock(runner: *Runner) {
+    mutex.lock(?runner.lock);
+}
+
+fun unlock(runner: *Runner) {
+    mutex.unlock(?runner.lock);
+}
+
+# the lock is released before the driver hears of new work
+fun unlock_and_wake(runner: *Runner) {
+    val wake:    WakeFun = runner.wake;
+    val context: ptr     = runner.wake_ctx;
+    mutex.unlock(?runner.lock);
+    if (wake != nil) { wake(context); }
+}
+
 fun entry_of(runner: *Runner, handle: task.Handle) *Entry {
-    if (runner == nil || handle.generation == 0 || handle.slot::usize >= task.MAX_TASKS) {
+    if (runner == nil || runner.stopped || handle.generation == 0
+        || handle.slot::usize >= task.MAX_TASKS) {
         ret nil;
     }
     val entry: *Entry = ?runner.entries[handle.slot::usize];
@@ -79,10 +113,9 @@ fun slot_data(entry: *Entry, slot: usize) *u8 {
     ret ?entry.spec.slots[slot * entry.spec.slot_bytes];
 }
 
-fun register_task(context: ptr, spec: *task.Spec, output: *task.Handle) task.Status {
-    val runner: *Runner = runner_of(context);
-    if (runner == nil || !task.spec_valid(spec) || output == nil) { ret task.STATUS_INVALID; }
-    if (runner.draining)                                          { ret task.STATUS_DRAINING; }
+fun register_locked(runner: *Runner, spec: *task.Spec, output: *task.Handle) task.Status {
+    if (runner.stopped)  { ret task.STATUS_INVALID; }
+    if (runner.draining) { ret task.STATUS_DRAINING; }
     var i: usize = 0;
     for (i < task.MAX_TASKS) {
         val entry: *Entry = ?runner.entries[i];
@@ -93,6 +126,7 @@ fun register_task(context: ptr, spec: *task.Spec, output: *task.Handle) task.Sta
             entry.queued           = false;
             entry.cause            = task.CAUSE_PERIOD;
             entry.running          = false;
+            entry.stepping         = false;
             entry.scheduled        = false;
             entry.scope_live       = false;
             entry.runs             = 0;
@@ -119,9 +153,21 @@ fun register_task(context: ptr, spec: *task.Spec, output: *task.Handle) task.Sta
     ret task.STATUS_FULL;
 }
 
-fun trigger_task(context: ptr, handle: task.Handle) task.Status {
+fun register_task(context: ptr, spec: *task.Spec, output: *task.Handle) task.Status {
     val runner: *Runner = runner_of(context);
-    val entry:  *Entry  = entry_of(runner, handle);
+    if (runner == nil || !task.spec_valid(spec) || output == nil) { ret task.STATUS_INVALID; }
+    lock(runner);
+    val status: task.Status = register_locked(runner, spec, output);
+    if (status != task.STATUS_OK) {
+        unlock(runner);
+        ret status;
+    }
+    unlock_and_wake(runner);
+    ret status;
+}
+
+fun trigger_locked(runner: *Runner, handle: task.Handle) task.Status {
+    val entry: *Entry = entry_of(runner, handle);
     if (entry == nil)    { ret task.STATUS_INVALID; }
     if (runner.draining) { ret task.STATUS_DRAINING; }
     entry.cause = task.CAUSE_TRIGGER;
@@ -130,10 +176,23 @@ fun trigger_task(context: ptr, handle: task.Handle) task.Status {
     ret task.STATUS_OK;
 }
 
-fun read_task(context: ptr, handle: task.Handle, output: *task.Lease) task.Status {
-    val entry: *Entry = entry_of(runner_of(context), handle);
-    if (entry == nil || output == nil) { ret task.STATUS_INVALID; }
-    if (entry.current == NO_SLOT)      { ret task.STATUS_EMPTY; }
+fun trigger_task(context: ptr, handle: task.Handle) task.Status {
+    val runner: *Runner = runner_of(context);
+    if (runner == nil) { ret task.STATUS_INVALID; }
+    lock(runner);
+    val status: task.Status = trigger_locked(runner, handle);
+    if (status != task.STATUS_OK) {
+        unlock(runner);
+        ret status;
+    }
+    unlock_and_wake(runner);
+    ret status;
+}
+
+fun read_locked(runner: *Runner, handle: task.Handle, output: *task.Lease) task.Status {
+    val entry: *Entry = entry_of(runner, handle);
+    if (entry == nil)             { ret task.STATUS_INVALID; }
+    if (entry.current == NO_SLOT) { ret task.STATUS_EMPTY; }
     val slot: usize = entry.current;
     if (entry.refs[slot] == 4294967295) { ret task.STATUS_FULL; }
     entry.refs[slot] = entry.refs[slot] + 1;
@@ -142,9 +201,17 @@ fun read_task(context: ptr, handle: task.Handle, output: *task.Lease) task.Statu
     ret task.STATUS_OK;
 }
 
-fun release_task(context: ptr, lease: *task.Lease) task.Status {
-    if (lease == nil) { ret task.STATUS_INVALID; }
-    val entry: *Entry = entry_of(runner_of(context), lease.task);
+fun read_task(context: ptr, handle: task.Handle, output: *task.Lease) task.Status {
+    val runner: *Runner = runner_of(context);
+    if (runner == nil || output == nil) { ret task.STATUS_INVALID; }
+    lock(runner);
+    val status: task.Status = read_locked(runner, handle, output);
+    unlock(runner);
+    ret status;
+}
+
+fun release_locked(runner: *Runner, lease: *task.Lease) task.Status {
+    val entry: *Entry = entry_of(runner, lease.task);
     if (entry == nil || lease.slot::usize >= entry.spec.slot_count) { ret task.STATUS_INVALID; }
     val slot: usize = lease.slot::usize;
     if (entry.refs[slot] == 0 || entry.sequences[slot] != lease.sequence) {
@@ -156,10 +223,19 @@ fun release_task(context: ptr, lease: *task.Lease) task.Status {
     ret task.STATUS_OK;
 }
 
-fun draft_task(context: ptr, run: *task.Run, output: *task.Draft) task.Status {
-    val entry: *Entry = live_run(runner_of(context), run);
-    if (entry == nil || output == nil || entry.spec.slot_count == 0) { ret task.STATUS_INVALID; }
-    if (entry.drafting != NO_SLOT)                                   { ret task.STATUS_BUSY; }
+fun release_task(context: ptr, lease: *task.Lease) task.Status {
+    val runner: *Runner = runner_of(context);
+    if (runner == nil || lease == nil) { ret task.STATUS_INVALID; }
+    lock(runner);
+    val status: task.Status = release_locked(runner, lease);
+    unlock(runner);
+    ret status;
+}
+
+fun draft_locked(runner: *Runner, run: *task.Run, output: *task.Draft) task.Status {
+    val entry: *Entry = live_run(runner, run);
+    if (entry == nil || entry.spec.slot_count == 0) { ret task.STATUS_INVALID; }
+    if (entry.drafting != NO_SLOT)                  { ret task.STATUS_BUSY; }
     var slot: usize = 0;
     for (slot < entry.spec.slot_count) {
         if (slot != entry.current && entry.refs[slot] == 0) {
@@ -173,14 +249,23 @@ fun draft_task(context: ptr, run: *task.Run, output: *task.Draft) task.Status {
     ret task.STATUS_FULL;
 }
 
+fun draft_task(context: ptr, run: *task.Run, output: *task.Draft) task.Status {
+    val runner: *Runner = runner_of(context);
+    if (runner == nil || output == nil) { ret task.STATUS_INVALID; }
+    lock(runner);
+    val status: task.Status = draft_locked(runner, run, output);
+    unlock(runner);
+    ret status;
+}
+
 fun draft_matches(entry: *Entry, run: *task.Run, pending: *task.Draft) bool {
     ret entry != nil && pending != nil && entry.drafting != NO_SLOT
         && pending.slot::usize == entry.drafting && pending.sequence == run.sequence
         && pending.task.slot == run.task.slot && pending.task.generation == run.task.generation;
 }
 
-fun commit_task(context: ptr, run: *task.Run, pending: *task.Draft, len: usize) task.Status {
-    val entry: *Entry = live_run(runner_of(context), run);
+fun commit_locked(runner: *Runner, run: *task.Run, pending: *task.Draft, len: usize) task.Status {
+    val entry: *Entry = live_run(runner, run);
     if (!draft_matches(entry, run, pending) || len > entry.spec.slot_bytes) {
         ret task.STATUS_INVALID;
     }
@@ -195,8 +280,17 @@ fun commit_task(context: ptr, run: *task.Run, pending: *task.Draft, len: usize) 
     ret task.STATUS_OK;
 }
 
-fun discard_task(context: ptr, run: *task.Run, pending: *task.Draft) task.Status {
-    val entry: *Entry = live_run(runner_of(context), run);
+fun commit_task(context: ptr, run: *task.Run, pending: *task.Draft, len: usize) task.Status {
+    val runner: *Runner = runner_of(context);
+    if (runner == nil) { ret task.STATUS_INVALID; }
+    lock(runner);
+    val status: task.Status = commit_locked(runner, run, pending, len);
+    unlock(runner);
+    ret status;
+}
+
+fun discard_locked(runner: *Runner, run: *task.Run, pending: *task.Draft) task.Status {
+    val entry: *Entry = live_run(runner, run);
     if (!draft_matches(entry, run, pending)) { ret task.STATUS_INVALID; }
     entry.drafting   = NO_SLOT;
     pending.data     = nil;
@@ -204,13 +298,29 @@ fun discard_task(context: ptr, run: *task.Run, pending: *task.Draft) task.Status
     ret task.STATUS_OK;
 }
 
+fun discard_task(context: ptr, run: *task.Run, pending: *task.Draft) task.Status {
+    val runner: *Runner = runner_of(context);
+    if (runner == nil) { ret task.STATUS_INVALID; }
+    lock(runner);
+    val status: task.Status = discard_locked(runner, run, pending);
+    unlock(runner);
+    ret status;
+}
+
 fun report_task(context: ptr, handle: task.Handle, output: *task.Report) task.Status {
-    val entry: *Entry = entry_of(runner_of(context), handle);
-    if (entry == nil || output == nil) { ret task.STATUS_INVALID; }
+    val runner: *Runner = runner_of(context);
+    if (runner == nil || output == nil) { ret task.STATUS_INVALID; }
+    lock(runner);
+    val entry: *Entry = entry_of(runner, handle);
+    if (entry == nil) {
+        unlock(runner);
+        ret task.STATUS_INVALID;
+    }
     entry.report.running   = entry.running;
     entry.report.queued    = entry.queued;
     entry.report.published = entry.published;
     @output                = entry.report;
+    unlock(runner);
     ret task.STATUS_OK;
 }
 
@@ -243,12 +353,12 @@ fun same_deadline(a: opt[time.Instant], b: opt[time.Instant]) bool {
 
 # the first call cancels every run and drops queued ones; runs still in flight
 # at the deadline are abandoned by poll
-fun drain_tasks(context: ptr, deadline: opt[time.Instant]) task.Drain {
-    val runner: *Runner = runner_of(context);
-    if (runner == nil) { ret task.Drain{status: task.DRAIN_INVALID, abandoned: 0}; }
+fun drain_locked(runner: *Runner, deadline: opt[time.Instant], started: *bool) task.Drain {
+    if (runner.stopped) { ret task.Drain{status: task.DRAIN_INVALID, abandoned: 0}; }
     if (!runner.draining) {
         runner.draining = true;
         runner.deadline = deadline;
+        @started        = true;
         cancel.cancel(?runner.root);
         var i: usize = 0;
         for (i < task.MAX_TASKS) {
@@ -263,6 +373,20 @@ fun drain_tasks(context: ptr, deadline: opt[time.Instant]) task.Drain {
         ret task.Drain{status: task.DRAIN_PENDING, abandoned: abandoned_count(runner)};
     }
     ret task.Drain{status: task.DRAIN_DONE, abandoned: abandoned_count(runner)};
+}
+
+fun drain_tasks(context: ptr, deadline: opt[time.Instant]) task.Drain {
+    val runner: *Runner = runner_of(context);
+    if (runner == nil) { ret task.Drain{status: task.DRAIN_INVALID, abandoned: 0}; }
+    lock(runner);
+    var started: bool       = false;
+    val drained: task.Drain = drain_locked(runner, deadline, ?started);
+    if (!started) {
+        unlock(runner);
+        ret drained;
+    }
+    unlock_and_wake(runner);
+    ret drained;
 }
 
 fun leased(runner: *Runner) bool {
@@ -291,9 +415,8 @@ fun close_scope(entry: *Entry) {
 }
 
 # refused until drain is done and every lease is released
-fun stop_tasks(context: ptr) task.Status {
-    val runner: *Runner = runner_of(context);
-    if (runner == nil)                                                   { ret task.STATUS_INVALID; }
+fun stop_locked(runner: *Runner) task.Status {
+    if (runner.stopped)                                                  { ret task.STATUS_INVALID; }
     if (!runner.draining || running_count(runner) > 0 || leased(runner)) { ret task.STATUS_BUSY; }
     var i: usize = 0;
     for (i < task.MAX_TASKS) {
@@ -305,6 +428,15 @@ fun stop_tasks(context: ptr) task.Status {
     ret task.STATUS_OK;
 }
 
+fun stop_tasks(context: ptr) task.Status {
+    val runner: *Runner = runner_of(context);
+    if (runner == nil) { ret task.STATUS_INVALID; }
+    lock(runner);
+    val status: task.Status = stop_locked(runner);
+    unlock(runner);
+    ret status;
+}
+
 pub fun init(runner: *Runner, secrets: secret.Source) bool {
     if (runner == nil || runner.valid)                                           { ret false; }
     if (!operation_ok(cancel.make_root(?runner.root, opt[time.Instant].none{}))) { ret false; }
@@ -313,6 +445,7 @@ pub fun init(runner: *Runner, secrets: secret.Source) bool {
         runner.entries[i].used       = false;
         runner.entries[i].generation = 0;
         runner.entries[i].running    = false;
+        runner.entries[i].stepping   = false;
         runner.entries[i].scope_live = false;
         i                            = i + 1;
     }
@@ -321,10 +454,24 @@ pub fun init(runner: *Runner, secrets: secret.Source) bool {
         trigger: trigger_task, read: read_task, release: release_task, draft: draft_task,
         commit:  commit_task, discard: discard_task, report: report_task, drain: drain_tasks,
         stop:    stop_tasks};
+    runner.lock     = mutex.make();
+    runner.wake     = nil;
+    runner.wake_ctx = nil;
+    runner.polling  = false;
     runner.draining = false;
     runner.deadline = opt[time.Instant].none{};
     runner.stopped  = false;
     runner.valid    = true;
+    ret true;
+}
+
+# names the driver to tell of new work. set before the provider is handed out
+pub fun on_wake(runner: *Runner, wake: WakeFun, context: ptr) bool {
+    if (runner == nil || !runner.valid) { ret false; }
+    lock(runner);
+    runner.wake     = wake;
+    runner.wake_ctx = context;
+    unlock(runner);
     ret true;
 }
 
@@ -379,9 +526,8 @@ fun start_run(runner: *Runner, index: usize, entry: *Entry, now: time.Instant) b
     ret true;
 }
 
-fun step_run(entry: *Entry, now: time.Instant) {
-    cancel.expire(?entry.scope, now);
-    val result: res[task.StepStatus, view.View] = entry.spec.step(entry.spec.state, ?entry.run);
+# the step's result, applied with the lock held
+fun settle_step(entry: *Entry, result: res[task.StepStatus, view.View], now: time.Instant) {
     if (sel result.err) {
         copy_error(entry, result.err);
         finish_run(entry, task.OUTCOME_FAILED, now);
@@ -403,9 +549,16 @@ fun past(deadline: opt[time.Instant], now: time.Instant) bool {
 }
 
 # one pass at instant now: schedules due periods, starts queued runs, and
-# steps each running task once. returns the number of steps taken.
+# steps each running task once, with the lock released around each step.
+# returns the number of steps taken, 0 when another poll is in progress
 pub fun poll(runner: *Runner, now: time.Instant) usize {
-    if (runner == nil || !runner.valid || runner.stopped) { ret 0; }
+    if (runner == nil || !runner.valid) { ret 0; }
+    lock(runner);
+    if (runner.stopped || runner.polling) {
+        unlock(runner);
+        ret 0;
+    }
+    runner.polling = true;
     var steps: usize = 0;
     var i:     usize = 0;
     for (i < task.MAX_TASKS) {
@@ -427,20 +580,83 @@ pub fun poll(runner: *Runner, now: time.Instant) usize {
                     finish_run(entry, task.OUTCOME_ABANDONED, now);
                 }
                 or {
-                    step_run(entry, now);
+                    cancel.expire(?entry.scope, now);
+                    entry.stepping = true;
+                    val step:  task.StepFun = entry.spec.step;
+                    val state: ptr          = entry.spec.state;
+                    val run:   *task.Run    = ?entry.run;
+                    unlock(runner);
+                    val result: res[task.StepStatus, view.View] = step(state, run);
+                    lock(runner);
+                    entry.stepping = false;
+                    settle_step(entry, result, now);
                     steps = steps + 1;
                 }
             }
         }
         i = i + 1;
     }
+    runner.polling = false;
+    unlock(runner);
     ret steps;
+}
+
+# the earliest instant poll has work: a queued run or a stepping task is due
+# now, a period at its due instant, and a draining run at the drain deadline.
+# none when nothing is scheduled
+pub fun next_due(runner: *Runner, now: time.Instant) opt[time.Instant] {
+    if (runner == nil || !runner.valid) { ret opt[time.Instant].none{}; }
+    lock(runner);
+    var found: bool         = false;
+    var at:    time.Instant = now;
+    if (runner.stopped) {
+        unlock(runner);
+        ret opt[time.Instant].none{};
+    }
+    var i: usize = 0;
+    for (i < task.MAX_TASKS) {
+        val entry: *Entry = ?runner.entries[i];
+        if (entry.used) {
+            var candidate: opt[time.Instant] = opt[time.Instant].none{};
+            if (entry.running || (!runner.draining && entry.queued)
+                || (!runner.draining && !entry.scheduled && (sel entry.spec.period.some))) {
+                candidate = opt[time.Instant].some{now};
+            }
+            or (!runner.draining && entry.scheduled) {
+                candidate = opt[time.Instant].some{entry.due};
+            }
+            if (sel candidate.some) {
+                if (!found || time.instant_before(candidate.some, at)) { at = candidate.some; }
+                found = true;
+            }
+        }
+        i = i + 1;
+    }
+    unlock(runner);
+    if (!found) { ret opt[time.Instant].none{}; }
+    ret opt[time.Instant].some{at};
+}
+
+# whether a run is in flight, so its next step is due as soon as the driver's
+# pacing allows
+pub fun busy(runner: *Runner) bool {
+    if (runner == nil || !runner.valid) { ret false; }
+    lock(runner);
+    val running: bool = running_count(runner) > 0;
+    unlock(runner);
+    ret running;
 }
 
 # releases the runner's scopes once stop has succeeded
 pub fun destroy(runner: *Runner) bool {
-    if (runner == nil || !runner.valid || !runner.stopped) { ret false; }
-    if (!operation_ok(cancel.destroy(?runner.root)))       { ret false; }
+    if (runner == nil || !runner.valid) { ret false; }
+    lock(runner);
+    if (!runner.stopped) {
+        unlock(runner);
+        ret false;
+    }
+    unlock(runner);
+    if (!operation_ok(cancel.destroy(?runner.root))) { ret false; }
     runner.valid = false;
     ret true;
 }

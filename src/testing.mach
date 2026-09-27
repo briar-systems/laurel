@@ -30,7 +30,7 @@ use laurel.security;
 use laurel.security.csrf;
 use laurel.session;
 use laurel.task;
-use laurel.testing.tasks;
+use laurel.task.runner;
 use laurel.upload;
 use A:               std.allocator;
 use fixed_allocator: std.allocator.fixed;
@@ -2306,7 +2306,7 @@ fun erase_task_lease(value: *task.Lease) ptr {
 }
 
 #[testing]
-fun erase_task_runner(value: *tasks.Runner) ptr {
+fun erase_task_runner(value: *runner.Runner) ptr {
     ret value::ptr;
 }
 
