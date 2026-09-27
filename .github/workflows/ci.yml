@@ -28,11 +28,12 @@ jobs:
       mach-version: v6.2.1
       # crypto links std's start code that requires PSTATE.DIT on aarch64
       dit: required
-      # the demo and the bench server build this working tree through a path
+      # the demos and the bench server build this working tree through a path
       # dependency, once, on the primary leg, and pull the gitlinks committed
-      # under their dep/
+      # under their dep/. the standalone example also runs its in-process test
       subprojects: >-
         [{"path": "demo", "build": true, "test": false, "legs": ["x86_64-linux"]},
+         {"path": "demo/standalone", "build": true, "test": true, "legs": ["x86_64-linux"]},
          {"path": "doc/bench/laurel", "build": true, "test": false, "legs": ["x86_64-linux"]}]
 
   gate:
