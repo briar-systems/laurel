@@ -1,0 +1,276 @@
+# background-task provider: host-run steps, single-flight triggers, snapshot leases
+
+use laurel.provider;
+use laurel.secret;
+use std.chrono.duration;
+use std.chrono.time;
+use std.sync.cancel;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.view;
+
+pub val MAX_TASKS:          usize = 16;
+pub val MIN_SNAPSHOT_SLOTS: usize = 2;
+pub val MAX_SNAPSHOT_SLOTS: usize = 8;
+pub val MAX_NAME_BYTES:     usize = 64;
+pub val MAX_ERROR_BYTES:    usize = 128;
+
+pub def StepStatus: u8;
+pub val STEP_DONE:    StepStatus = 1;
+pub val STEP_PENDING: StepStatus = 2;
+
+pub def Cause: u8;
+pub val CAUSE_PERIOD:  Cause = 1;
+pub val CAUSE_TRIGGER: Cause = 2;
+
+pub def Status: u8;
+pub val STATUS_OK:        Status = 1;
+pub val STATUS_INVALID:   Status = 2;
+pub val STATUS_DRAINING:  Status = 3;
+pub val STATUS_FULL:      Status = 4;
+pub val STATUS_EMPTY:     Status = 5;
+pub val STATUS_COALESCED: Status = 6;
+pub val STATUS_BUSY:      Status = 7;
+
+pub def Outcome: u8;
+pub val OUTCOME_NONE:      Outcome = 1;
+pub val OUTCOME_COMPLETED: Outcome = 2;
+pub val OUTCOME_FAILED:    Outcome = 3;
+pub val OUTCOME_ABANDONED: Outcome = 4;
+
+pub def DrainStatus: u8;
+pub val DRAIN_PENDING: DrainStatus = 1;
+pub val DRAIN_DONE:    DrainStatus = 2;
+pub val DRAIN_INVALID: DrainStatus = 3;
+
+# an opaque public name for one registered task
+pub rec Handle {
+    slot:       u32;
+    generation: u32;
+}
+
+# one run of one task, owned by the provider and valid only during a step.
+# scope is cancelled when drain begins and times out at deadline.
+pub rec Run {
+    task:     Handle;
+    provider: *Provider;
+    scope:    *cancel.Scope;
+    deadline: opt[time.Instant];
+    cause:    Cause;
+    sequence: u64;
+    secrets:  secret.Source;
+}
+
+# a step never blocks: pending asks to be stepped again, an error fails the run
+pub def StepFun: fun(ptr, *Run) res[StepStatus, view.View];
+
+# state is public task state only. secrets are borrowed through Run.secrets.
+# slots is caller-owned storage for slot_count snapshots of slot_bytes each,
+# and slot_count 0 registers a task that publishes nothing.
+pub rec Spec {
+    name:        view.View;
+    state:       ptr;
+    step:        StepFun;
+    period:      opt[duration.Duration];
+    run_timeout: opt[duration.Duration];
+    slots:       *u8;
+    slot_bytes:  usize;
+    slot_count:  usize;
+}
+
+# a writable snapshot slot claimed by a run, published by commit
+pub rec Draft {
+    task:     Handle;
+    slot:     u32;
+    sequence: u64;
+    data:     *u8;
+    capacity: usize;
+}
+
+# a counted borrow of one published snapshot, valid until release
+pub rec Lease {
+    task:     Handle;
+    slot:     u32;
+    sequence: u64;
+    data:     *u8;
+    len:      usize;
+}
+
+pub rec Report {
+    runs:      u64;
+    failures:  u64;
+    abandoned: u64;
+    last:      Outcome;
+    running:   bool;
+    queued:    bool;
+    published: u64;
+    error:     [128]u8;
+    error_len: usize;
+}
+
+pub rec Drain {
+    status:    DrainStatus;
+    abandoned: usize;
+}
+
+pub def RegisterFun: fun(ptr, *Spec, *Handle) Status;
+pub def TriggerFun:  fun(ptr, Handle) Status;
+pub def ReadFun:     fun(ptr, Handle, *Lease) Status;
+pub def ReleaseFun:  fun(ptr, *Lease) Status;
+pub def DraftFun:    fun(ptr, *Run, *Draft) Status;
+pub def CommitFun:   fun(ptr, *Run, *Draft, usize) Status;
+pub def DiscardFun:  fun(ptr, *Run, *Draft) Status;
+pub def ReportFun:   fun(ptr, Handle, *Report) Status;
+pub def DrainFun:    fun(ptr, opt[time.Instant]) Drain;
+pub def StopFun:     fun(ptr) Status;
+
+# the host-supplied task runner. applications use register, trigger, read,
+# release, and report; runs use draft, commit, and discard; the host alone
+# calls drain and stop.
+pub rec Provider {
+    ctx:      ptr;
+    register: RegisterFun;
+    trigger:  TriggerFun;
+    read:     ReadFun;
+    release:  ReleaseFun;
+    draft:    DraftFun;
+    commit:   CommitFun;
+    discard:  DiscardFun;
+    report:   ReportFun;
+    drain:    DrainFun;
+    stop:     StopFun;
+}
+
+# the provider.Set key under which a host supplies a *Provider
+pub fun key() view.View {
+    ret view.view("laurel.task", 11);
+}
+
+pub fun resolve(set: *provider.Set) *Provider {
+    val found: res[ptr, view.View] = provider.resolve(set, key());
+    if (sel found.err) { ret nil; }
+    val value: *Provider = found.ok::*Provider;
+    if (!valid(value)) { ret nil; }
+    ret value;
+}
+
+pub fun valid(value: *Provider) bool {
+    ret value != nil && value.register != nil && value.trigger != nil && value.read != nil
+        && value.release != nil && value.draft != nil && value.commit != nil
+        && value.discard != nil && value.report != nil && value.drain != nil
+        && value.stop != nil;
+}
+
+pub fun name_valid(name: view.View) bool {
+    if (name.len == 0 || name.len > MAX_NAME_BYTES || name.data == nil) { ret false; }
+    var i: usize = 0;
+    for (i < name.len) {
+        val byte: u8 = name.data[i];
+        if (byte < 0x21 || byte > 0x7e) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun positive(value: opt[duration.Duration]) bool {
+    if (sel value.none) { ret true; }
+    ret value.some > 0;
+}
+
+pub fun spec_valid(spec: *Spec) bool {
+    if (spec == nil || !name_valid(spec.name) || spec.step == nil || !positive(spec.period)
+        || !positive(spec.run_timeout)) { ret false; }
+    if (spec.slot_count == 0) { ret true; }
+    ret spec.slot_count >= MIN_SNAPSHOT_SLOTS && spec.slot_count <= MAX_SNAPSHOT_SLOTS
+        && spec.slots != nil && spec.slot_bytes > 0
+        && spec.slot_bytes <= 18446744073709551615 / spec.slot_count;
+}
+
+pub fun register(value: *Provider, spec: *Spec, output: *Handle) Status {
+    if (!valid(value) || !spec_valid(spec) || output == nil) { ret STATUS_INVALID; }
+    ret value.register(value.ctx, spec, output);
+}
+
+# queues one run; a trigger while a run is queued or in flight coalesces into it
+pub fun trigger(value: *Provider, task: Handle) Status {
+    if (!valid(value)) { ret STATUS_INVALID; }
+    ret value.trigger(value.ctx, task);
+}
+
+# never waits on a run: returns the latest published snapshot or STATUS_EMPTY
+pub fun read(value: *Provider, task: Handle, output: *Lease) Status {
+    if (!valid(value) || output == nil) { ret STATUS_INVALID; }
+    ret value.read(value.ctx, task, output);
+}
+
+pub fun release(value: *Provider, lease: *Lease) Status {
+    if (!valid(value) || lease == nil) { ret STATUS_INVALID; }
+    ret value.release(value.ctx, lease);
+}
+
+pub fun report(value: *Provider, task: Handle, output: *Report) Status {
+    if (!valid(value) || output == nil) { ret STATUS_INVALID; }
+    ret value.report(value.ctx, task, output);
+}
+
+pub fun drain(value: *Provider, deadline: opt[time.Instant]) Drain {
+    if (!valid(value)) { ret Drain{status: DRAIN_INVALID, abandoned: 0}; }
+    ret value.drain(value.ctx, deadline);
+}
+
+pub fun stop(value: *Provider) Status {
+    if (!valid(value)) { ret STATUS_INVALID; }
+    ret value.stop(value.ctx);
+}
+
+# claims a free slot; STATUS_FULL when every slot is current, leased, or drafting
+pub fun draft(run: *Run, output: *Draft) Status {
+    if (run == nil || !valid(run.provider) || output == nil) { ret STATUS_INVALID; }
+    ret run.provider.draft(run.provider.ctx, run, output);
+}
+
+pub fun commit(run: *Run, pending: *Draft, len: usize) Status {
+    if (run == nil || !valid(run.provider) || pending == nil || len > pending.capacity) {
+        ret STATUS_INVALID;
+    }
+    ret run.provider.commit(run.provider.ctx, run, pending, len);
+}
+
+pub fun discard(run: *Run, pending: *Draft) Status {
+    if (run == nil || !valid(run.provider) || pending == nil) { ret STATUS_INVALID; }
+    ret run.provider.discard(run.provider.ctx, run, pending);
+}
+
+# copies bytes into a free slot and publishes it
+pub fun publish(run: *Run, bytes: view.View) Status {
+    if (bytes.len > 0 && bytes.data == nil) { ret STATUS_INVALID; }
+    var pending: Draft;
+    val claimed: Status = draft(run, ?pending);
+    if (claimed != STATUS_OK) { ret claimed; }
+    if (bytes.len > pending.capacity) {
+        discard(run, ?pending);
+        ret STATUS_INVALID;
+    }
+    var i: usize = 0;
+    for (i < bytes.len) {
+        pending.data[i] = bytes.data[i];
+        i               = i + 1;
+    }
+    ret commit(run, ?pending, bytes.len);
+}
+
+pub fun lease_view(lease: *Lease) view.View {
+    if (lease == nil || lease.data == nil) { ret view.view(nil, 0); }
+    ret view.view(lease.data, lease.len);
+}
+
+pub fun report_error(value: *Report) view.View {
+    if (value == nil || value.error_len == 0 || value.error_len > MAX_ERROR_BYTES) {
+        ret view.view(nil, 0);
+    }
+    ret view.view(?value.error[0], value.error_len);
+}

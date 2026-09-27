@@ -24,13 +24,17 @@ jobs:
     uses: briar-systems/.github/.github/workflows/mach-lib.yml@main
     with:
       heavy: ${{ inputs.heavy }}
-      # std 9 needs mach 6, so this seeds v6.0.0 until the family pin moves
-      mach-version: v6.0.0
+      # std 9 needs mach 6 and hedge 0.12 needs 6.2.1, ahead of the family pin
+      mach-version: v6.2.1
       # crypto links std's start code that requires PSTATE.DIT on aarch64
       dit: required
-      # demo/ and doc/bench/laurel/ build this working tree through hedge, which
-      # still selects std 8 and mach 5. they return as subprojects once hedge
-      # moves to mach 6
+      # the demos and the bench server build this working tree through a path
+      # dependency, once, on the primary leg, and pull the gitlinks committed
+      # under their dep/. the standalone example also runs its in-process test
+      subprojects: >-
+        [{"path": "demo", "build": true, "test": false, "legs": ["x86_64-linux"]},
+         {"path": "demo/standalone", "build": true, "test": true, "legs": ["x86_64-linux"]},
+         {"path": "doc/bench/laurel", "build": true, "test": false, "legs": ["x86_64-linux"]}]
 
   gate:
     if: always()

@@ -9,6 +9,7 @@ use http.core.status;
 use http.core.target;
 use http_router: http.router.router;
 use laurel.app;
+use laurel.config;
 use laurel.context;
 use laurel.cookie;
 use laurel.error;
@@ -24,9 +25,12 @@ use laurel.raw;
 use laurel.realtime;
 use laurel.render;
 use laurel.router;
+use laurel.secret;
 use laurel.security;
 use laurel.security.csrf;
 use laurel.session;
+use laurel.task;
+use laurel.task.runner;
 use laurel.upload;
 use A:               std.allocator;
 use fixed_allocator: std.allocator.fixed;
@@ -2094,8 +2098,8 @@ test harness__admission_follows_lifecycle {
 # public record silently makes the whole consumer graph unerasable. These
 # helpers are the compile-time assertion; they never dereference their argument.
 #
-# `csrf.KeyRing` is deliberately absent: it owns key material and must keep
-# refusing to erase.
+# `csrf.KeyRing` and `secret.Resolver` are deliberately absent: they own or
+# hand out key material and must keep refusing to erase.
 #[testing]
 fun erase_app(value: *app.App) ptr {
     ret value::ptr;
@@ -2281,6 +2285,46 @@ fun erase_result(value: *Result) ptr {
     ret value::ptr;
 }
 
+#[testing]
+fun erase_task_provider(value: *task.Provider) ptr {
+    ret value::ptr;
+}
+
+#[testing]
+fun erase_task_run(value: *task.Run) ptr {
+    ret value::ptr;
+}
+
+#[testing]
+fun erase_task_spec(value: *task.Spec) ptr {
+    ret value::ptr;
+}
+
+#[testing]
+fun erase_task_lease(value: *task.Lease) ptr {
+    ret value::ptr;
+}
+
+#[testing]
+fun erase_task_runner(value: *runner.Runner) ptr {
+    ret value::ptr;
+}
+
+#[testing]
+fun erase_secret_source(value: *secret.Source) ptr {
+    ret value::ptr;
+}
+
+#[testing]
+fun erase_config(value: *config.Provider) ptr {
+    ret value::ptr;
+}
+
+#[testing]
+fun erase_telemetry(value: *observability.Telemetry) ptr {
+    ret value::ptr;
+}
+
 test public_types__erase_to_ptr {
     if (erase_app(nil) != nil || erase_assembly(nil) != nil
         || erase_context(nil) != nil || erase_handler(nil) != nil
@@ -2302,5 +2346,9 @@ test public_types__erase_to_ptr {
     if (erase_recorder(nil) != nil || erase_observer(nil) != nil
         || erase_harness(nil) != nil || erase_result(nil) != nil
         || erase_admission(nil) != nil || erase_termination(nil) != nil) { ret 5; }
+    if (erase_task_provider(nil) != nil || erase_task_run(nil) != nil
+        || erase_task_spec(nil) != nil || erase_task_lease(nil) != nil
+        || erase_task_runner(nil) != nil || erase_secret_source(nil) != nil
+        || erase_config(nil) != nil || erase_telemetry(nil) != nil) { ret 7; }
     ret 0;
 }

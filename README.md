@@ -6,7 +6,7 @@ The application foundation is implemented. Applications assemble caller-owned pr
 
 Production scope includes typed handlers, middleware, secure sessions and cookies, forms, streamed uploads, rendering, service providers, application lifecycle, structured failures, observability, in-process tests, streaming responses, server-sent events, and WebSockets. Database clients, template engines, queues, and identity systems remain replaceable providers rather than mandatory framework subsystems.
 
-The framework has no global application registry, hidden allocator, mandatory template language, mandatory persistence layer, or server-specific connection state. Its one piece of process-wide state is a bounded module-private table inside `security.csrf` that maps an opaque handle to a caller-owned key ring, which is what keeps key material off every public type. See [`doc/security.md`](doc/security.md).
+The framework has no global application registry, hidden allocator, mandatory template language, mandatory persistence layer, or server-specific connection state. Its only process-wide state is three bounded module-private tables: one inside `security.csrf` that maps an opaque handle to a caller-owned key ring, one inside `secret` that maps an opaque source to a host-owned secret resolver, and one inside `serve` that holds each host's environment resolver. They are what keep key material off every public type. See [`doc/security.md`](doc/security.md) and [`doc/providers.md`](doc/providers.md).
 
 ## Boundaries
 
@@ -36,20 +36,55 @@ The framework has no global application registry, hidden allocator, mandatory te
   client, across every wire version the HTTP dependency exposes.
 - `cookie` defines bounded request and response cookie storage.
 - `provider` injects application services without a global container.
+- `task`, `config`, and `secret` define the facilities a host supplies:
+  background tasks with single-flight triggers, snapshots read without waiting,
+  and a bounded drain; read-only configuration; and secrets borrowed for one
+  call through a public source. `observability.Telemetry` carries application
+  signals outside a request. `task.runner` is the task provider both hosts
+  run, stepped by hand under `testing` and from its own thread under `serve`.
+  See [`doc/providers.md`](doc/providers.md).
+- `serve` runs an application standalone on mach-http's server runner, with
+  built-in providers and a bounded drain on SIGTERM or SIGINT. See
+  [`doc/serve.md`](doc/serve.md).
 - `lifecycle` owns application startup, readiness, drain, and shutdown. It
   preserves the primary failure while exposing any later shutdown cleanup
   failure through `app.cleanup_failure`.
 - `realtime` covers streaming responses, server-sent events, and WebSockets over
   one bounded queue with explicit backpressure, heartbeat, and close policy.
 
-## Demo
+## Hosting
 
-[`demo/`](demo/) is a small but complete application: a JSON route, a typed path
-parameter, a decoded query string, a raw request body, a CSRF-protected form, a
-session cookie, middleware, and an observer, hosted by hedge across several
-workers beside a static file and a health check. Its README explains how a
-Laurel application is hosted, since Laurel owns no listener of its own, and
-states what one application shared by every worker must guarantee.
+An application is written once, against the providers its host supplies, and
+never names its host.
+
+- **Standalone.** `laurel.serve` runs it on mach-http's HTTP/1.1 server runner,
+  behind any proxy that terminates TLS. The host supplies a task runner on its
+  own thread, configuration and secrets from the environment, and telemetry on
+  stderr, each replaceable, and drives the lifecycle through the server's
+  start, ready, drain and stop hooks. SIGTERM or SIGINT drains it to a bounded
+  deadline. [`demo/standalone/`](demo/standalone/) is a complete example, and
+  [`doc/serve.md`](doc/serve.md) the contract.
+
+  ```mach
+  var host: serve.Host;
+  serve.init(?host, serve.options_default());
+  my_app.assemble(?state, serve.providers(?host));
+  serve.run(?host, ?state.application, serve.config_default(address));
+  ```
+
+- **Inside a server.** hedge hosts it in process, beside static files and
+  proxied upstreams, through a binding that feeds laurel's providers from the
+  server's facilities. [`demo/`](demo/) is an application hosted by hedge across
+  several workers beside a static file and a health check. Its README states
+  what one application shared by every worker must guarantee.
+
+The same `assemble` also runs in process under `laurel.testing`, over the same
+providers, which is how [`demo/standalone/`](demo/standalone/) tests itself.
+
+Standalone mode has two current limits: WebSockets need upgrade support in the
+server runner (briar-systems/mach-http#191), and a long streamed response, such
+as server-sent events, is cut off at the runner's whole-exchange request
+deadline unless it is raised (briar-systems/mach-http#193).
 
 ## Benchmarks
 
@@ -62,7 +97,7 @@ side by side on performance and on ergonomics, including where Laurel loses.
 
 The manifest selects releases by version range, with the resolved release
 committed as a gitlink under `dep/`, and builds with mach 6: `mach-std` `^9.0`
-(v9.0.0), `mach-http` `^0.21` (v0.21.0) and `mach-crypto` `^0.24` (v0.24.0).
+(v9.0.0), `mach-http` `^0.23` (v0.23.0) and `mach-crypto` `^0.24` (v0.24.0).
 Build output uses Mach's default `out/` directory.
 
 ## Status

@@ -1,0 +1,67 @@
+# the example executable: laurel.serve hosts the application on its own
+#
+# the host is created first, because it owns the providers the application is
+# assembled over. then run serves until SIGTERM or SIGINT drains it
+
+use std.runtime;
+
+use laurel.serve;
+use standalone.app;
+use std.net.ip;
+use std.print;
+use std.process.env;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.view;
+
+fun port() u16 {
+    var text:  [16]u8;
+    val found: res[opt[usize], env.EnvError] = env.get("PORT", ?text[0], 16);
+    if (!(sel found.ok))      { ret 8080; }
+    if (!(sel found.ok.some)) { ret 8080; }
+    var value: u32   = 0;
+    var i:     usize = 0;
+    for (i < found.ok.some && i < 5) {
+        if (text[i] < '0' || text[i] > '9') { ret 8080; }
+        value = value * 10 + (text[i] - '0')::u32;
+        i     = i + 1;
+    }
+    if (value == 0 || value > 65535) { ret 8080; }
+    ret value::u16;
+}
+
+fun ready(ctx: ptr, endpoint: ip.Endpoint) {
+    print.printlnf("laurel-standalone: listening on port {}", endpoint.port::u64);
+}
+
+var state: app.State;
+var host:  serve.Host;
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    # configuration keys read STANDALONE_<KEY> and secrets STANDALONE_SECRET_<NAME>
+    var options: serve.Options = serve.options_default();
+    options.config_prefix = view.view("STANDALONE_", 11);
+    options.secret_prefix = view.view("STANDALONE_SECRET_", 18);
+    if (!serve.init(?host, options)) {
+        print.eprintln("laurel-standalone: the host could not be prepared");
+        ret 1;
+    }
+    if (!app.assemble(?state, serve.providers(?host))) {
+        print.eprintln("laurel-standalone: the application did not assemble");
+        ret 1;
+    }
+    var configured: serve.Config = serve.config_default(ip.endpoint(127, 0, 0, 1, port()));
+    configured.ready = ready;
+    val report: serve.Report = serve.run(?host, ?state.application, configured);
+    print.printlnf("laurel-standalone: served {}, abandoned {} at the drain deadline",
+        report.server.served, report.server.abandoned_exchanges);
+    if (report.failure != serve.FAILURE_NONE) {
+        print.eprintlnf("laurel-standalone: stopped with failure {}", report.failure::u64);
+        ret 1;
+    }
+    if (!app.release(?state) || !serve.destroy(?host)) { ret 1; }
+    print.println("laurel-standalone: stopped");
+    ret 0;
+}
