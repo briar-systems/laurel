@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-09-27
+
+### Added
+- `laurel.serve` runs an assembled application standalone on http's server runner, without an embedding host (#184). `serve.init` makes a `serve.Host` that owns the built-in providers, `serve.providers` hands them to the application as one `provider.Provider` entry, `serve.run` serves until a drain finishes and returns a `serve.Report`, and `serve.destroy` releases the host. Lifecycle runs through the server's hooks: start is `app.start`, ready is `app.poll_ready`, drain runs `app.drain` and the task provider's drain under one deadline, and stop runs `app.stop` then the task provider's stop. With `Config.signals`, SIGTERM or SIGINT (console close or service stop on windows) starts the bounded drain. A handler's deadline reaches the server as `Call.wake_at`, the context is released when the server settles the exchange, and a request the application cannot admit is answered 503. `doc/serve.md` states the contract and its current limits: no WebSockets until the runner supports upgrades (briar-systems/mach-http#191), and a long streamed response is cut off at the runner's whole-exchange request deadline unless it is raised (briar-systems/mach-http#193).
+- Host provider interfaces, each a context plus function-pointer record supplied through `provider.Set` under a fixed key, so the same application runs on any host and `app.Assembly` is unchanged (#184). `laurel.task` registers background tasks with a non-blocking `step`, an optional period and run timeout, single-flight `trigger`, leased snapshots with a two-phase `draft`/`commit` publish, and a bounded `drain` that reports abandoned runs. `laurel.config` reads a bounded value by key into caller storage. `laurel.secret` borrows a secret for the length of one call through a host-owned `Resolver` behind a public `Source`, since a record reaching a secret type cannot erase. `observability.Telemetry` emits application counters, gauges and events whose labels are checked against the existing `Vocabulary`. `doc/providers.md` documents all four.
+- `laurel.task.runner` is one thread-safe task provider for both hosts: `laurel.testing` steps it by hand with the caller's clock and `laurel.serve` drives it from its own thread (#184). `laurel.serve`'s other built-ins read configuration and secrets from the environment under configurable prefixes and write one telemetry line per signal to stderr, and an application replaces any of them by listing its own provider for the key first.
+- `demo/standalone` is one application hosted by `laurel.serve` and tested in process under `laurel.testing` with the same assembly. CI builds it and runs its test on the primary leg (#184).
+
+### Changed
+- **Breaking.** Dependencies: http `^0.23` at v0.23.0 (was `^0.21` at v0.21.0), for the server runner, `Handler.settle`, `Call.wake_at` and the runner's framing of unframed responses (#184). Resolution is flat, so a consumer must move to http 0.23 with it. std and crypto are unchanged.
+- demo/ and doc/bench/laurel/ build on mach 6.2.1 through hedge 0.12.0 and are CI subprojects again, and CI seeds mach v6.2.1 (#179). They override hedge 0.12.0's `=0.21.0` http pin by `ref = "tag/v0.23.0"` until they move to graft (#184).
+
+### Fixed
+- `src/router.mach` drops an unused `std.types.option.opt` import, which mach 6.2.1 warns on (#186).
+
 ## [0.19.0] - 2026-09-26
 
 ### Changed
