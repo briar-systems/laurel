@@ -4,7 +4,8 @@
 runner (`http.server.server`), with no other server in front of it but
 whatever proxy terminates TLS. It is one host among several: the same
 application runs in process under `laurel.testing`, and inside hedge through a
-binding such as graft. The application never names its host.
+binding such as [graft](https://github.com/briar-systems/graft). The
+application never names its host.
 
 ## Running
 
@@ -27,7 +28,7 @@ assembled over (see [providers](providers.md)). `run` takes an assembled
 application that has not started, serves it on the calling thread until a
 drain finishes, and returns once the server, the application and its tasks have
 stopped. `serve.shutdown(host)` begins the same drain a signal does, from any
-thread. [`demo/standalone`](../demo/standalone) is a complete example.
+thread. [`demo/`](../demo) is a complete example.
 
 `serve.Config` carries the server's own configuration (`server`, an
 `http.server.server.Config`: address, connection and exchange bounds, buffer
@@ -124,4 +125,4 @@ heartbeat.
 ## Current limits
 
 - HTTP/1.1 only, plaintext. TLS, HTTP/2 and HTTP/3 are for a proxy in front, or
-  for hosting inside hedge.
+  for hosting inside hedge through [graft](https://github.com/briar-systems/graft).

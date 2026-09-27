@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 SERVERS = [
-    ("laurel", "Laurel + hedge", "single threaded"),
+    ("laurel", "Laurel on laurel.serve", "single threaded"),
     ("go1", "Go net/http", "GOMAXPROCS=1"),
     ("axum1", "axum", "tokio current_thread"),
     ("gon", "Go net/http", "all cores"),
@@ -143,7 +143,6 @@ def main():
     parser.add_argument("--oha", required=True)
     parser.add_argument("--mach", required=True)
     parser.add_argument("--laurel", required=True)
-    parser.add_argument("--hedge", required=True)
     parser.add_argument("--go", required=True)
     parser.add_argument("--rustc", required=True)
     args = parser.parse_args()
@@ -170,7 +169,6 @@ def main():
     )
     out.write("| mach | {} |\n".format(args.mach))
     out.write("| laurel | {} |\n".format(args.laurel))
-    out.write("| hedge | {} |\n".format(args.hedge))
     out.write("| go | {} |\n".format(args.go))
     out.write("| rustc | {} |\n".format(args.rustc))
     out.write("| oha | {} |\n".format(args.oha))
@@ -179,7 +177,7 @@ def main():
 
     out.write("## Like for like: one thread each\n\n")
     out.write(
-        "Hedge's serve loop is single threaded, so this is the comparison that\n"
+        "laurel.serve runs one thread, so this is the comparison that\n"
         "measures the same machine doing the same work. Go runs with\n"
         "`GOMAXPROCS=1` and axum on tokio's current-thread runtime.\n\n"
     )
@@ -191,7 +189,7 @@ def main():
     out.write("## What parallelism buys the baselines\n\n")
     out.write(
         "The same Go and Rust programs with every core available. Laurel has no\n"
-        "row here: hedge serves from one thread, so there is nothing to widen.\n\n"
+        "row here: laurel.serve runs one thread, so there is nothing to widen.\n\n"
     )
     for key, title, description in ROUTES:
         out.write("### {} — {}\n\n".format(title, description))

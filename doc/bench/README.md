@@ -4,12 +4,11 @@ A reusable harness that measures the same three-route service implemented three
 ways, so that Laurel's runtime cost can be seen next to two mature stacks rather
 than quoted on its own.
 
-- **Laurel**, hosted by [hedge](https://github.com/briar-systems/hedge)
+- **Laurel**, run standalone by `laurel.serve`
 - **Go**, `net/http` with the standard library router
 - **Rust**, `axum` pinned in `Cargo.toml`
 
-Read [`COMPARISON.md`](COMPARISON.md) for what the numbers mean and what writing
-each version is like. Measured results are in [`results/`](results/).
+Each run writes its measured results to `results/`.
 
 ## The three routes
 
@@ -52,9 +51,8 @@ duration.
 - five server variants: Laurel, Go and axum each restricted to one thread, plus
   Go and axum with every core available
 
-The Laurel server runs hedge with one worker (`server.workers = 1` in
-`laurel/hedge.toml`), so the like-for-like table restricts the baselines to one
-thread too: Go with `GOMAXPROCS=1`, axum on tokio's
+`laurel.serve` serves every connection from the calling thread, so the
+like-for-like table restricts the baselines to one thread too: Go with `GOMAXPROCS=1`, axum on tokio's
 current-thread runtime. The all-core table is reported separately, because a
 reader choosing a stack needs to know the ceiling as well as the per-thread cost.
 
@@ -90,16 +88,16 @@ fast. Correcting the pool brought the figure to a consistent 10,015.
 | `run.sh` | builds, starts, measures, writes the report |
 | `parse.py` | one oha JSON report to one result line |
 | `report.py` | result lines to the results markdown |
-| `laurel/` | the Laurel implementation, hosted through `hedge.service.laurel` |
+| `laurel/` | the Laurel implementation, run by `laurel.serve` |
 | `go/` | the Go implementation |
 | `axum/` | the Rust implementation |
-| `results/` | committed measured results |
+| `results/` | measured results, one file per run |
 
 ## Reading the results honestly
 
-Every Laurel number is Laurel **and** hedge. The harness does not attribute the
-difference between the framework and the server underneath it, and hedge's
-HTTP/1.1 path is young. A separate in-process harness would be needed to say how
+Every Laurel number is Laurel **and** mach-http's server runner underneath
+`laurel.serve`. The harness does not attribute the difference between the
+framework and the server, and the runner's HTTP/1.1 path is young. A separate in-process harness would be needed to say how
 much of the gap belongs to which layer, and it does not exist yet.
 
 The numbers are loopback request-path measurements on one machine, with the load
