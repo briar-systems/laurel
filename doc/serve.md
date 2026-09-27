@@ -79,15 +79,49 @@ answered 503.
 Request identifiers are rendered by the host: 32 hex digits, the process start
 time then a counter, cut to the application's `max_request_id_bytes`.
 
+Each request's context carries a waker (`context.waker`) that wakes the
+exchange on the server from any thread. A streamed response whose source
+returned pending is pulled again once it is woken.
+
+## Timeouts
+
+The timeouts are the server's, in `Config.server`. A streamed response, such
+as server-sent events or a slow download, is bounded by its progress, not by a
+deadline over the whole exchange:
+
+| field | bounds |
+|---|---|
+| `response_timeout_ns` | from the end of the request body to the response's first accepted write, and from each write the client accepts to the next (30s by default) |
+| `tunnel_timeout_ns` | a WebSocket, from its handoff and from each read or write that moves bytes (60s by default) |
+| `connection.request_timeout_ns` | an optional absolute cap over a whole exchange, off by default |
+
+The request head, request body and idle keep-alive timeouts are as the server
+documents them.
+
+## WebSockets
+
+A handler asks for a WebSocket with `realtime.upgrade` and responds (see
+[output](output.md#sessions)). `run` negotiates and commits the 101 once the
+middleware has run, or answers 400 when the handshake is invalid. Once the 101
+is written and the request has settled, and laurel's terminal request event is
+out, the server hands the connection to `run`'s tunnel owner, which pumps its
+bytes through the session: what the client sent with the upgrade request first,
+then each read, with each write the session queued. The request's scratch,
+arena included, stays with the connection until the session ends, so the
+session and anything else the handler allocated there live as long.
+`TUNNEL_BUFFER_BYTES` for reads and again for writes are taken from that arena
+at the handoff, so `request_arena_bytes` must leave room for them beside the
+session. A connection upgraded without a session, or tunnelled with CONNECT, is
+closed.
+
+A drain signals `SIGNAL_DRAIN` to every open session, then closes it with 1001
+unless it closed itself. A session whose peer answers the close ends cleanly. One
+still open at `drain_timeout_ns` is cut, its end callback runs, and it is counted
+in `Report.server.abandoned_tunnels`. `Report.server.tunnels` counts handoffs. A
+session idle past `tunnel_timeout_ns` is cut too, so a quiet one needs a
+heartbeat.
+
 ## Current limits
 
-- **No WebSockets.** The runner does not hand an upgraded connection to a
-  handler yet (briar-systems/mach-http#191), so `realtime` WebSocket routes do
-  not work under `laurel.serve`. Server-sent events and other streamed
-  responses do, within the next limit.
-- **Long streaming responses need a raised deadline.** The runner bounds a
-  whole exchange, request and response, by `connection.request_timeout_ns`
-  (briar-systems/mach-http#193), so a server-sent event stream or a slow
-  download is cut off at it. Raise it for an application that streams.
 - HTTP/1.1 only, plaintext. TLS, HTTP/2 and HTTP/3 are for a proxy in front, or
   for hosting inside hedge.

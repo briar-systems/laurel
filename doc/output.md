@@ -124,12 +124,22 @@ returns `SEND_NOT_DUE` without queuing anything. An interval of zero disables
 heartbeats. `realtime.stream_observe` records an unrelated send so a busy stream
 does not also emit heartbeats.
 
+A streamed body whose source returns pending is settled when the host pulls it
+again, and the host has to be told when that is worthwhile.
+`context.waker(request_context)` returns the request's `context.Waker`, a value
+the host supplies that any thread may keep and pass to `context.wake`. A
+producer on another thread publishes, then wakes, and the source produces on the
+host's next pull. A waker kept past its request names a generation the host has
+moved on from and wakes nothing. Under a host that supplies none it is empty and
+`context.wake` returns false.
+
 ### WebSockets
 
 Negotiation and framing come from `mach-http`. `realtime.negotiate` forwards to
 `http.websocket.negotiation.server`, which validates the HTTP/1.1 upgrade or the
 HTTP/2 and HTTP/3 extended CONNECT and commits the response. Laurel adds no
-handshake logic of its own.
+handshake logic of its own. It is a host primitive: a handler never commits its
+own response, so a handler asks for the upgrade instead (see Sessions below).
 
 `realtime.Socket` owns one `http.websocket.Encoder` and one
 `http.websocket.Decoder` and no transport. Outbound frames are encoded into the
@@ -144,3 +154,42 @@ range, and below 5000. A close reason is bounded by
 `Policy.max_close_reason_bytes`, never exceeds 123 bytes, and must be valid
 UTF-8. Sending a close marks the channel closing and refuses every later send;
 receiving the peer's close completes the handshake and marks it closed.
+
+### Sessions
+
+A `realtime.Session` is a WebSocket a host runs after the upgrade, over a
+`Socket` it opens. The handler initializes one with `realtime.init_session`, in
+storage that outlives the exchange (the request allocator's does), with a
+callback for what it hears, a callback for its end, a policy, decoder limits and
+the outbound queue. It asks for the upgrade with
+`realtime.upgrade(request_context, session, protocol)` and responds without a
+body. The host negotiates and commits the 101 with `realtime.accept_upgrade`
+once the middleware has run, and answers 400 when the handshake is invalid.
+
+The session hears `realtime.Incoming` signals:
+
+| signal | when |
+|---|---|
+| `SIGNAL_OPEN` | the connection is handed over and the session may send |
+| `SIGNAL_MESSAGE` | a fragment of an inbound message, `final` on its last one, borrowed for the call |
+| `SIGNAL_WAKE` | the session's waker was called, or the instant it asked for with `session_wake_at` came |
+| `SIGNAL_DRAIN` | the host drains; a 1001 close follows unless the session closes first |
+| `SIGNAL_CLOSE` | the peer's close arrived, with its code (1005 when it named none) |
+
+A callback that returns false fails the session, which closes with 1011. It
+sends with `realtime.session_send` and `realtime.session_close`, from the
+host's thread. Another thread that has something to send keeps
+`realtime.session_waker(session)`, publishes, and wakes it, and the session
+sends on the `SIGNAL_WAKE` that follows. Pings are answered with pongs, a
+peer's close is returned with its code, and a protocol error closes with the
+code the decoder names, all without the application. A policy's
+`heartbeat_interval` pings a quiet peer. The end callback runs exactly once for
+an opened session, `clean` when the close handshake completed.
+
+A host runs a session through `realtime.session_open` with the connection's
+cancellation scope and a waker, `realtime.session_input` with each read,
+`realtime.session_output` into each write, `realtime.session_wake` when woken or
+at `realtime.session_next`, `realtime.session_drain` once when it drains, and
+`realtime.session_end` once when it is done: at `realtime.session_finished`, or
+when it cuts the connection. It reads while `realtime.session_reading` holds.
+`laurel.serve` is such a host (see [serve](serve.md)).

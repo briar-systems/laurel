@@ -10,14 +10,18 @@
 # see doc/providers.md and README.md
 
 use crypto.contracts;
+use http.core.body;
 use http.core.exchange;
 use http.core.field;
 use http.core.message;
 use http.core.method;
 use http.core.status;
 use http.core.target;
+use http.core.transport;
 use http_router: http.router.router;
 use hs:          http.server.server;
+use http.websocket;
+use http.websocket.negotiation;
 use laurel.app;
 use laurel.config;
 use laurel.context;
@@ -28,6 +32,7 @@ use laurel.middleware;
 use laurel.observability;
 use laurel.provider;
 use laurel.raw;
+use laurel.realtime;
 use laurel.render;
 use laurel.router;
 use laurel.secret;
@@ -77,6 +82,8 @@ pub val MAX_SECRET_BYTES: usize = 4096;
 pub val MAX_PREFIX_BYTES: usize = 64;
 # the request identifier laurel.serve renders for every request
 pub val REQUEST_ID_BYTES: usize = 32;
+# each of a websocket tunnel's read and write buffers, taken from its request arena
+pub val TUNNEL_BUFFER_BYTES: usize = 4096;
 
 val MAX_ENV_NAME_BYTES: usize = 192;
 val SIGNAL_POLL_MS:     i32   = 100;
@@ -184,9 +191,29 @@ pub rec Host {
     valid:         bool;
 }
 
+# the bytes between an upgraded connection and its websocket session. the
+# buffers come from the request arena, which the tunnel keeps
+rec Pump {
+    open:          bool;
+    reading:       *u8;
+    writing:       *u8;
+    input:         *u8;
+    input_length:  usize;
+    input_offset:  usize;
+    eof:           bool;
+    read_pending:  bool;
+    read_token:    transport.Token;
+    write_length:  usize;
+    write_offset:  usize;
+    write_pending: bool;
+    write_token:   transport.Token;
+    broken:        bool;
+    drained:       bool;
+}
+
 # one exchange's laurel state, at the head of the exchange's scratch. the
 # execution is laurel's cursor across suspensions, so it lives as long as the
-# exchange does
+# exchange does. a websocket the handler attached outlives it, in the tunnel
 rec RequestState {
     started:      bool;
     bound:        bool;
@@ -200,6 +227,8 @@ rec RequestState {
     identifier:   [32]u8;
     deadline:     time.Instant;
     has_deadline: bool;
+    upgrade:      *realtime.Session;
+    pump:         Pump;
 }
 
 # the environment resolver is secret welded through its callback type, so it
@@ -730,6 +759,13 @@ fun settle_outcome(state: *RequestState, call: *hs.Call) exchange.ServiceStatus 
     }
     val active: *exchange.Exchange = call.exchange;
     if (active.response.committed) { ret exchange.SERVICE_COMPLETE; }
+    # a websocket the handler asked for is negotiated and its 101 committed here
+    if (realtime.upgraded(?state.context) != nil) {
+        if (realtime.accept_upgrade(?state.context) != negotiation.NEGOTIATED) {
+            ret answer(call, status.BAD_REQUEST);
+        }
+        ret exchange.SERVICE_COMPLETE;
+    }
     if (active.response.body_kind == message.BODY_NONE
         && status.permits_content(active.request.method.kind, active.response.status)
         && field.find_first(?active.response.fields,
@@ -796,11 +832,21 @@ fun start_request(host: *Host, state: *RequestState, call: *hs.Call) exchange.Se
         if (!app.can_accept(application)) { ret answer(call, status.SERVICE_UNAVAILABLE); }
         ret exchange.SERVICE_FAILED;
     }
-    state.bound        = true;
+    state.bound = true;
+    context.attach_waker(?state.context, host_waker(call.waker));
     state.has_deadline = context.deadline(?state.context, ?state.deadline);
     state.outcome      = app.execute(application, ?state.execution,
         router.terminal_handler(?state.terminal), ?state.context);
     ret settle_outcome(state, call);
+}
+
+fun server_wake(ctx: ptr, slot: usize, generation: u64) bool {
+    ret hs.wake(hs.Waker{server: ctx::*hs.Server, index: slot, generation: generation});
+}
+
+fun host_waker(waker: hs.Waker) context.Waker {
+    ret context.Waker{ctx: waker.server::ptr, slot: waker.index, generation: waker.generation,
+        wake: server_wake};
 }
 
 fun bridge_serve(ctx: ptr, call: *hs.Call) exchange.ServiceStatus {
@@ -830,11 +876,167 @@ fun bridge_settle(ctx: ptr, call: *hs.Call) {
         state.outcome = app.abandon(host.application, ?state.execution, ?state.context);
     }
     val active: *exchange.Exchange = call.exchange;
+    # a websocket the handler attached runs in the tunnel once its 101 is out
+    if (active.completion.outcome == exchange.OUTCOME_OK && active.response.status == 101) {
+        state.upgrade = realtime.upgraded(?state.context);
+    }
     app.release_context(host.application, ?state.context, app.Termination{
         outcome: state.outcome, reason: cancel.reason(active.scope),
         status:  active.completion.status, transfer: active.completion, finished: now()
     });
     state.bound = false;
+}
+
+fun tunnel_state(tunnel: *hs.Tunnel) *RequestState {
+    if (tunnel == nil || tunnel.memory == nil || tunnel.memory_bytes < $size_of(RequestState)) { ret nil; }
+    ret tunnel.memory::*RequestState;
+}
+
+fun arena_bytes(state: *RequestState) *u8 {
+    val taken: res[*u8, A.Error] = A.allocate[u8](?state.allocator, TUNNEL_BUFFER_BYTES);
+    if (sel taken.err) { ret nil; }
+    ret taken.ok;
+}
+
+# the session takes the connection: its buffers, then OPEN, then what the client
+# sent past the upgrade request
+fun open_pump(state: *RequestState, tunnel: *hs.Tunnel, current: time.Instant) bool {
+    val pump: *Pump = ?state.pump;
+    pump.open    = true;
+    pump.reading = arena_bytes(state);
+    pump.writing = arena_bytes(state);
+    if (pump.reading == nil || pump.writing == nil
+        || !realtime.session_open(state.upgrade, tunnel.scope, host_waker(tunnel.waker), current)) {
+        ret false;
+    }
+    pump.input        = tunnel.input;
+    pump.input_length = tunnel.input_length;
+    pump.input_offset = 0;
+    ret true;
+}
+
+# every completion is settled with the transport before it is looked at
+fun settle_io(pump: *Pump, tunnel: *hs.Tunnel, completion: *transport.Completion) {
+    if (!transport.complete(tunnel.transport, completion)) {
+        pump.broken = true;
+        ret;
+    }
+    if (completion.kind == transport.READ && pump.read_pending
+        && transport.token_equal(completion.token, pump.read_token)) {
+        pump.read_pending = false;
+        if (completion.status != transport.IO_COMPLETE && completion.status != transport.IO_END) {
+            pump.broken = true;
+            ret;
+        }
+        pump.input        = pump.reading;
+        pump.input_length = completion.count;
+        pump.input_offset = 0;
+        pump.eof          = completion.status == transport.IO_END || completion.count == 0;
+        ret;
+    }
+    if (completion.kind == transport.WRITE && pump.write_pending
+        && transport.token_equal(completion.token, pump.write_token)) {
+        pump.write_pending = false;
+        if (completion.status != transport.IO_COMPLETE || completion.count == 0) {
+            pump.broken = true;
+            ret;
+        }
+        pump.write_offset = pump.write_offset + completion.count;
+        ret;
+    }
+    pump.broken = true;
+}
+
+# input into the session and frames out of it, until neither moves
+fun pump_bytes(pump: *Pump, session: *realtime.Session, tunnel: *hs.Tunnel, current: time.Instant) {
+    var moved: bool = true;
+    for (moved && !pump.broken) {
+        moved = false;
+        if (pump.input_offset < pump.input_length || pump.eof) {
+            var at: *u8 = nil;
+            if (pump.input_offset < pump.input_length) { at = ?pump.input[pump.input_offset]; }
+            val taken: usize = realtime.session_input(session, at,
+                pump.input_length - pump.input_offset, pump.eof, current);
+            if (taken != 0) { moved = true; }
+            pump.input_offset = pump.input_offset + taken;
+            pump.eof          = false;
+            if (pump.input_offset == pump.input_length) {
+                pump.input        = nil;
+                pump.input_length = 0;
+                pump.input_offset = 0;
+            }
+        }
+        if (!pump.write_pending && pump.write_offset == pump.write_length) {
+            pump.write_offset = 0;
+            pump.write_length = realtime.session_output(session, pump.writing, TUNNEL_BUFFER_BYTES,
+                current);
+            if (pump.write_length != 0) { moved = true; }
+        }
+    }
+    if (pump.broken) { ret; }
+    if (!pump.write_pending && pump.write_offset < pump.write_length) {
+        val written: res[transport.Token, io_error.Error] = transport.write(tunnel.transport,
+            tunnel.scope, ?pump.writing[pump.write_offset], pump.write_length - pump.write_offset, 0);
+        if (sel written.err) {
+            pump.broken = true;
+            ret;
+        }
+        pump.write_token   = written.ok;
+        pump.write_pending = true;
+    }
+    if (!pump.read_pending && pump.input_length == 0 && realtime.session_reading(session)) {
+        val read: res[transport.Token, io_error.Error] = transport.read(tunnel.transport, tunnel.scope,
+            pump.reading, TUNNEL_BUFFER_BYTES, 0);
+        if (sel read.err) {
+            pump.broken = true;
+            ret;
+        }
+        pump.read_token   = read.ok;
+        pump.read_pending = true;
+    }
+}
+
+# runs the websocket a handler attached. a connection upgraded without one, or
+# tunnelled with CONNECT, is closed
+fun tunnel_drive(ctx: ptr, tunnel: *hs.Tunnel, completion: *transport.Completion) hs.TunnelStatus {
+    val state: *RequestState = tunnel_state(tunnel);
+    if (state == nil || state.upgrade == nil) { ret hs.TUNNEL_FAILED; }
+    val pump:    *Pump             = ?state.pump;
+    val session: *realtime.Session = state.upgrade;
+    val current: time.Instant      = now();
+    if (!pump.open) {
+        if (!open_pump(state, tunnel, current)) { pump.broken = true; }
+    }
+    or (completion != nil) {
+        settle_io(pump, tunnel, completion);
+    }
+    or (!pump.broken) {
+        realtime.session_wake(session, current);
+    }
+    if (tunnel.draining && !pump.drained && !pump.broken) {
+        pump.drained = true;
+        realtime.session_drain(session, current);
+    }
+    pump_bytes(pump, session, tunnel, current);
+    if (pump.broken) {
+        if (pump.read_pending || pump.write_pending) { ret hs.TUNNEL_PENDING; }
+        realtime.session_end(session);
+        ret hs.TUNNEL_FAILED;
+    }
+    if (realtime.session_finished(session) && !pump.write_pending && !pump.read_pending
+        && pump.write_offset == pump.write_length) {
+        realtime.session_end(session);
+        ret hs.TUNNEL_DONE;
+    }
+    tunnel.wake_at = realtime.session_next(session);
+    ret hs.TUNNEL_PENDING;
+}
+
+# the server cut the tunnel: its timeout, a connection failure, or the drain deadline
+fun tunnel_abandon(ctx: ptr, tunnel: *hs.Tunnel) {
+    val state: *RequestState = tunnel_state(tunnel);
+    if (state == nil || state.upgrade == nil) { ret; }
+    realtime.session_end(state.upgrade);
 }
 
 fun invalid_report(host: *Host, failure: Failure) Report {
@@ -898,7 +1100,8 @@ pub fun run(host: *Host, application: *app.App, configured: Config) Report {
     host.has_failure = false;
     host.task_drain  = task.Drain{status: task.DRAIN_DONE, abandoned: 0};
     val handler: hs.Handler = hs.Handler{ctx: host::ptr, serve: bridge_serve,
-        abandon: bridge_abandon, settle: bridge_settle};
+        abandon: bridge_abandon, settle: bridge_settle,
+        tunnel:  hs.TunnelOwner{ctx: host::ptr, drive: tunnel_drive, abandon: tunnel_abandon}};
     val hooks: hs.Hooks = hs.Hooks{ctx: host::ptr, start: hook_start, ready: hook_ready,
         drain: hook_drain, stop: hook_stop};
     if (!hs.make(?host.server, server_config, handler, hooks, allocator)) {
@@ -942,9 +1145,9 @@ val ECHO_LIMIT: usize = 64;
 # publishes a snapshot, and the routes answer from per-request arena storage
 #[testing]
 rec Fixture {
-    routes:         [3]router.Route;
-    specifications: [3]http_router.Route;
-    compiled:       [3]http_router.CompiledRoute;
+    routes:         [5]router.Route;
+    specifications: [5]http_router.Route;
+    compiled:       [5]http_router.CompiledRoute;
     segments:       [8]http_router.Segment;
     matcher:        router.Router;
     stack:          middleware.Stack;
@@ -964,6 +1167,12 @@ rec Fixture {
     drains:         usize;
     stops:          usize;
     finished:       usize;
+    ws_opened:      usize;
+    ws_ended:       usize;
+    ws_clean:       usize;
+    published:      i64;
+    stream_ready:   i64;
+    stream_waker:   context.Waker;
     application:    app.App;
 }
 
@@ -1056,6 +1265,114 @@ fun echo_resume(ctx: ptr, request_context: *context.Context, work: ptr,
     ret echo_drive(request_context, raw.complete(?echo.body, token));
 }
 
+# a websocket that echoes each message, kept in the request arena the tunnel keeps
+#[testing]
+rec Echo {
+    session: realtime.Session;
+    queue:   [512]u8;
+}
+
+#[testing]
+fun echo_signal(ctx: ptr, session: *realtime.Session, incoming: realtime.Incoming) bool {
+    val fixture: *Fixture = ctx::*Fixture;
+    if (incoming.signal == realtime.SIGNAL_OPEN) { fixture.ws_opened = fixture.ws_opened + 1; }
+    if (incoming.signal == realtime.SIGNAL_MESSAGE) {
+        var frame: realtime.FrameKind = realtime.FRAME_TEXT;
+        if (incoming.binary) { frame = realtime.FRAME_BINARY; }
+        ret realtime.session_send(session, incoming.data, frame).status == realtime.SEND_OK;
+    }
+    ret true;
+}
+
+#[testing]
+fun echo_end(ctx: ptr, session: *realtime.Session, clean: bool) {
+    val fixture: *Fixture = ctx::*Fixture;
+    fixture.ws_ended = fixture.ws_ended + 1;
+    if (clean) { fixture.ws_clean = fixture.ws_clean + 1; }
+}
+
+#[testing]
+fun socket_open(ctx: ptr, request_context: *context.Context, work: *ptr) handler.Result {
+    @work = nil;
+    val allocated: res[*Echo, A.Error] = A.zallocate[Echo](request_context.alloc, 1);
+    if (sel allocated.err) { ret handler.fail(failure("socket storage")); }
+    val echo:   *Echo           = allocated.ok;
+    val policy: realtime.Policy = realtime.Policy{max_message_bytes: 256,
+        max_close_reason_bytes: realtime.MAX_CLOSE_REASON_BYTES, heartbeat_interval: 0,
+        close_code:             1000, allow_binary: true};
+    if (!realtime.init_session(?echo.session, ctx, echo_signal, echo_end, policy,
+        websocket.limits_default(), ?echo.queue[0], 512)
+        || !realtime.upgrade(request_context, ?echo.session, view.view(nil, 0))) {
+        ret handler.fail(failure("websocket upgrade"));
+    }
+    ret handler.respond();
+}
+
+#[testing]
+val EVENTS: i64 = 10;
+
+# an event stream fed from another thread: each event published there wakes the
+# host, which pulls it here
+#[testing]
+rec EventWork {
+    media:   render.Media;
+    stream:  render.Stream;
+    fixture: *Fixture;
+    sent:    i64;
+    token:   u64;
+}
+
+#[testing]
+fun events_produce(ctx: ptr, output: *u8, capacity: usize) render.Chunk {
+    val work:      *EventWork = ctx::*EventWork;
+    val published: i64        = atomic.load(?work.fixture.published);
+    if (work.sent == published) {
+        if (work.sent == EVENTS) { ret render.chunk_end(); }
+        work.token = work.token + 1;
+        ret render.chunk_pending(work.token);
+    }
+    if (capacity < 9) { ret render.chunk_failed(); }
+    memory.raw_copy(output, "data: ", 6);
+    output[6] = '0' + work.sent::u8;
+    output[7] = 10;
+    output[8] = 10;
+    work.sent = work.sent + 1;
+    ret render.chunk_data(9);
+}
+
+#[testing]
+fun events_resume(ctx: ptr, token: u64, output: *u8, capacity: usize) render.Chunk {
+    ret events_produce(ctx, output, capacity);
+}
+
+#[testing]
+fun events_settle(ctx: ptr, mode: body.Mode) bool {
+    ret true;
+}
+
+#[testing]
+fun events_show(ctx: ptr, request_context: *context.Context, work: *ptr) handler.Result {
+    @work = nil;
+    val fixture:   *Fixture                 = ctx::*Fixture;
+    val allocated: res[*EventWork, A.Error] = A.zallocate[EventWork](request_context.alloc, 1);
+    if (sel allocated.err) { ret handler.fail(failure("event storage")); }
+    val events:   *EventWork         = allocated.ok;
+    val response: *message.Response  = context.response(request_context);
+    val bound:    *exchange.Exchange = context.exchange_ref(request_context);
+    events.fixture = fixture;
+    if (!realtime.event_stream_media(?events.media)
+        || !render.init_stream(?events.stream, render.Source{ctx: events::ptr,
+        produce: events_produce, resume: events_resume, settle: events_settle}, 4096,
+        response.generation, bound.limits, ?response.trailers, context.cancellation(request_context))
+        || render.respond_with_limits(request_context, status.OK, ?events.media,
+        render.stream_body(?events.stream), bound.limits) != render.RESPOND_OK) {
+        ret handler.fail(failure("event stream"));
+    }
+    fixture.stream_waker = context.waker(request_context);
+    atomic.store(?fixture.stream_ready, 1);
+    ret handler.respond();
+}
+
 #[testing]
 fun missing(ctx: ptr, request_context: *context.Context, work: *ptr) handler.Result {
     @work = nil;
@@ -1134,10 +1451,17 @@ fun assemble(fixture: *Fixture, host: provider.Provider) bool {
     fixture.routes[1] = fixture_route(method.GET, "/tick", "tick.show", tick_show, nil, ctx);
     fixture.routes[2] = fixture_route(method.POST, "/echo", "echo.create", echo_create,
         echo_resume, ctx);
+    fixture.routes[3]    = fixture_route(method.GET, "/socket", "socket.open", socket_open, nil, ctx);
+    fixture.routes[4]    = fixture_route(method.GET, "/events", "events.show", events_show, nil, ctx);
+    fixture.ws_opened    = 0;
+    fixture.ws_ended     = 0;
+    fixture.ws_clean     = 0;
+    fixture.published    = 0;
+    fixture.stream_ready = 0;
     val storage: router.Storage = router.Storage{specifications: ?fixture.specifications[0],
-        specification_cap: 3, compiled_routes: ?fixture.compiled[0], compiled_route_cap: 3,
+        specification_cap: 5, compiled_routes: ?fixture.compiled[0], compiled_route_cap: 5,
         segments:          ?fixture.segments[0], segment_cap: 8};
-    if (router.compile(?fixture.matcher, ?fixture.routes[0], 3, storage,
+    if (router.compile(?fixture.matcher, ?fixture.routes[0], 5, storage,
         router.limits_default()).status != router.COMPILE_OK) { ret false; }
     fixture.stack    = middleware.Stack{items: nil, len: 0};
     fixture.items[0] = host;
@@ -1261,6 +1585,8 @@ fun terminate_self(host: *Host) bool {
 #[testing]
 rec Client {
     host:     *Host;
+    fixture:  *Fixture;
+    scenario: fun(*Client) i64;
     endpoint: ip.Endpoint;
     thread:   thread.Thread;
     spawned:  bool;
@@ -1297,6 +1623,104 @@ fun contains(buffer: *u8, length: usize, needle: str) bool {
         i = i + 1;
     }
     ret false;
+}
+
+# a client's view of one websocket: what it read and has not parsed yet
+#[testing]
+rec Wire {
+    stream: tcp.Stream;
+    buffer: [512]u8;
+    have:   usize;
+}
+
+#[testing]
+fun wire_fill(wire: *Wire) bool {
+    if (wire.have == 512) { ret false; }
+    val got: res[usize, io_error.Error] = tcp.stream_read(?wire.stream, ?wire.buffer[wire.have],
+        512 - wire.have);
+    if (sel got.err) { ret false; }
+    if (got.ok == 0) { ret false; }
+    wire.have = wire.have + got.ok;
+    ret true;
+}
+
+#[testing]
+fun wire_consume(wire: *Wire, count: usize) {
+    memory.raw_move((?wire.buffer[0])::ptr, ?wire.buffer[count], wire.have - count);
+    wire.have = wire.have - count;
+}
+
+# a masked client frame with a short payload
+#[testing]
+fun client_frame(output: *u8, opcode: u8, payload: *u8, length: usize) usize {
+    output[0] = 0x80 | opcode;
+    output[1] = 0x80 | length::u8;
+    var i: usize = 0;
+    for (i < 4) {
+        output[2 + i] = (i + 1)::u8;
+        i             = i + 1;
+    }
+    i = 0;
+    for (i < length) {
+        output[6 + i] = payload[i] ^ ((i % 4) + 1)::u8;
+        i             = i + 1;
+    }
+    ret 6 + length;
+}
+
+#[testing]
+fun send_bytes(stream: *tcp.Stream, bytes: *u8, length: usize) bool {
+    var offset: usize = 0;
+    for (offset < length) {
+        val sent: res[usize, io_error.Error] = tcp.stream_write(stream, ?bytes[offset], length - offset);
+        if (sel sent.err) { ret false; }
+        if (sent.ok == 0) { ret false; }
+        offset = offset + sent.ok;
+    }
+    ret true;
+}
+
+# opens a websocket to /socket, the first text message riding with the request
+# when there is one, and reads past the 101
+#[testing]
+fun ws_connect(client: *Client, wire: *Wire, first: str) bool {
+    wire.have = 0;
+    if (!connect(client, ?wire.stream)) { ret false; }
+    var request: [256]u8;
+    val head:    str   = "GET /socket HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+    var length:  usize = str_len(head);
+    memory.raw_copy(?request[0], head, length);
+    if (first != nil)                                   { length = length + client_frame(?request[length], 1, first, str_len(first)); }
+    if (!send_bytes(?wire.stream, ?request[0], length)) { ret false; }
+    for (!contains(?wire.buffer[0], wire.have, "\r\n\r\n")) {
+        if (!wire_fill(wire)) { ret false; }
+    }
+    if (!contains(?wire.buffer[0], wire.have, "HTTP/1.1 101")) {
+        os.write(os.stderr(), ?wire.buffer[0], wire.have);
+        ret false;
+    }
+    var end: usize = 0;
+    for (!memory.raw_equal(?wire.buffer[end], "\r\n\r\n", 4)) { end = end + 1; }
+    wire_consume(wire, end + 4);
+    ret true;
+}
+
+# the next unmasked server frame, which must be opcode with exactly payload
+#[testing]
+fun ws_expect(wire: *Wire, opcode: u8, payload: *u8, length: usize) bool {
+    for (wire.have < 2 + length) {
+        if (!wire_fill(wire)) { ret false; }
+    }
+    if (wire.buffer[0] != (0x80 | opcode) || wire.buffer[1] != length::u8
+        || (length != 0 && !memory.raw_equal(?wire.buffer[2], payload, length))) { ret false; }
+    wire_consume(wire, 2 + length);
+    ret true;
+}
+
+#[testing]
+fun ws_send(wire: *Wire, opcode: u8, payload: *u8, length: usize) bool {
+    var frame: [64]u8;
+    ret send_bytes(?wire.stream, ?frame[0], client_frame(?frame[0], opcode, payload, length));
 }
 
 # reads a fresh response until it holds needle, which ends it
@@ -1346,6 +1770,20 @@ fun scenario(client: *Client) i64 {
         attempts = attempts + 1;
     }
     if (!ticked) { ret 4; }
+    # a websocket echoes, answers a ping, then closes cleanly from the client
+    var code: [2]u8;
+    code[0] = 0x03;
+    code[1] = 0xe8;
+    var echoed: Wire;
+    if (!ws_connect(client, ?echoed, "hi") || !ws_expect(?echoed, 1, "hi", 2)
+        || !ws_send(?echoed, 2, "yo", 2) || !ws_expect(?echoed, 2, "yo", 2)
+        || !ws_send(?echoed, 9, "p", 1) || !ws_expect(?echoed, 10, "p", 1)
+        || !ws_send(?echoed, 8, ?code[0], 2) || !ws_expect(?echoed, 8, ?code[0], 2)
+        || !closed(?echoed.stream)) { ret 20; }
+    tcp.stream_close(?echoed.stream);
+    # another stays open into the drain
+    var open: Wire;
+    if (!ws_connect(client, ?open, nil)) { ret 21; }
     # a request is in flight, its body half sent, when the signal arrives
     var busy: tcp.Stream;
     if (!connect(client, ?busy)
@@ -1356,15 +1794,57 @@ fun scenario(client: *Client) i64 {
     # the drain answers it, closes the idle connection, then closes this one
     if (!send(?busy, "cde") || !receive(?busy, "\r\n\r\nabcde")) { ret 7; }
     if (!closed(?idle) || !closed(?busy))                        { ret 8; }
+    # the open websocket is closed with 1001, answers, and is shut
+    var going: [2]u8;
+    going[0] = 0x03;
+    going[1] = 0xe9;
+    if (!ws_expect(?open, 8, ?going[0], 2) || !ws_send(?open, 8, ?going[0], 2)
+        || !closed(?open.stream)) { ret 9; }
     tcp.stream_close(?idle);
     tcp.stream_close(?busy);
+    tcp.stream_close(?open.stream);
+    ret 0;
+}
+
+# the stream's events are published from this thread, one each 100ms, after the
+# stream's head is in
+#[testing]
+fun event_scenario(client: *Client) i64 {
+    var stream: tcp.Stream;
+    if (!connect(client, ?stream) || !send(?stream, "GET /events HTTP/1.1\r\nHost: x\r\n\r\n")) { ret 1; }
+    var waited: usize = 0;
+    for (atomic.load(?client.fixture.stream_ready) == 0) {
+        if (waited == 200) { ret 2; }
+        os.sleep(10000000);
+        waited = waited + 1;
+    }
+    var i: i64 = 0;
+    for (i < EVENTS) {
+        os.sleep(100000000);
+        atomic.fetch_add(?client.fixture.published, 1);
+        context.wake(client.fixture.stream_waker);
+        i = i + 1;
+    }
+    var buffer: [1024]u8;
+    var have:   usize = 0;
+    for (!contains(?buffer[0], have, "\r\n0\r\n\r\n")) {
+        if (have == 1024) { ret 3; }
+        val got: res[usize, io_error.Error] = tcp.stream_read(?stream, ?buffer[have], 1024 - have);
+        if (sel got.err) { ret 3; }
+        if (got.ok == 0) { ret 3; }
+        have = have + got.ok;
+    }
+    if (!contains(?buffer[0], have, "text/event-stream") || !contains(?buffer[0], have, "data: 0\n\n")
+        || !contains(?buffer[0], have, "data: 9\n\n")) { ret 4; }
+    tcp.stream_close(?stream);
+    shutdown(client.host);
     ret 0;
 }
 
 #[testing]
 fun client_main(argument: *u8) {
     val client: *Client = argument::*Client;
-    client.result = scenario(client);
+    client.result = client.scenario(client);
     # a failed scenario still ends the run
     if (client.result != 0) { shutdown(client.host); }
 }
@@ -1384,9 +1864,11 @@ test serve__sigterm_drains_a_request_in_flight {
     var fixture: Fixture;
     if (!assemble(?fixture, providers(?host))) { ret 2; }
     var client: Client;
-    client.host    = ?host;
-    client.spawned = false;
-    client.result  = -1;
+    client.host     = ?host;
+    client.fixture  = ?fixture;
+    client.scenario = scenario;
+    client.spawned  = false;
+    client.result   = -1;
     var configured: Config = config_default(ip.endpoint(127, 0, 0, 1, 0));
     configured.server.max_connections  = 4;
     configured.server.max_exchanges    = 4;
@@ -1401,10 +1883,45 @@ test serve__sigterm_drains_a_request_in_flight {
         || report.server.abandoned_connections != 0 || report.server.unsettled != 0
         || report.server.failed != 0 || report.tasks.status != task.DRAIN_DONE
         || report.tasks.abandoned != 0) { ret 3; }
+    # both websockets ran through the tunnel and ended with a clean close
+    if (report.server.tunnels != 2 || report.server.abandoned_tunnels != 0
+        || fixture.ws_opened != 2 || fixture.ws_ended != 2 || fixture.ws_clean != 2) { ret 6; }
     # every served request reached laurel's terminal event, and the lifecycle
     # drained once and stopped once
     if (fixture.finished::u64 != report.server.served || fixture.drains != 1 || fixture.stops != 1
         || !lifecycle.terminal(fixture.application.lifecycle)) { ret 4; }
+    if (!app.release(?fixture.application) || !destroy(?host)) { ret 5; }
+    ret 0;
+}
+
+# a stream that makes progress lives past its response timeout many times over,
+# since the runner no longer bounds the whole exchange
+test serve__an_event_stream_lives_while_it_makes_progress {
+    var host: Host;
+    host.valid = false;
+    if (!init(?host, options_default())) { ret 1; }
+    var fixture: Fixture;
+    if (!assemble(?fixture, providers(?host))) { ret 2; }
+    var client: Client;
+    client.host     = ?host;
+    client.fixture  = ?fixture;
+    client.scenario = event_scenario;
+    client.spawned  = false;
+    client.result   = -1;
+    var configured: Config = config_default(ip.endpoint(127, 0, 0, 1, 0));
+    if (configured.server.connection.request_timeout_ns != 0) { ret 3; }
+    configured.server.max_connections     = 4;
+    configured.server.max_exchanges       = 4;
+    configured.server.memory_bytes        = 8388608;
+    configured.server.response_timeout_ns = 300000000;
+    configured.signals                    = false;
+    configured.ready                      = client_ready;
+    configured.ready_ctx                  = (?client)::ptr;
+    val report: Report = run(?host, ?fixture.application, configured);
+    if (client.spawned)     { thread.join(?client.thread); }
+    if (client.result != 0) { ret 10 + client.result::i32; }
+    if (report.failure != FAILURE_NONE || report.server.timed_out != 0 || report.server.failed != 0
+        || report.server.served != 1) { ret 4; }
     if (!app.release(?fixture.application) || !destroy(?host)) { ret 5; }
     ret 0;
 }

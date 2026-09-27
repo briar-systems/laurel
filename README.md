@@ -81,10 +81,8 @@ never names its host.
 The same `assemble` also runs in process under `laurel.testing`, over the same
 providers, which is how [`demo/standalone/`](demo/standalone/) tests itself.
 
-Standalone mode has two current limits: WebSockets need upgrade support in the
-server runner (briar-systems/mach-http#191), and a long streamed response, such
-as server-sent events, is cut off at the runner's whole-exchange request
-deadline unless it is raised (briar-systems/mach-http#193).
+Standalone, `realtime` WebSocket sessions run over the server's tunnel, and a
+streamed response such as server-sent events lives as long as it makes progress.
 
 ## Benchmarks
 
@@ -97,7 +95,7 @@ side by side on performance and on ergonomics, including where Laurel loses.
 
 The manifest selects releases by version range, with the resolved release
 committed as a gitlink under `dep/`, and builds with mach 6: `mach-std` `^9.0`
-(v9.0.0), `mach-http` `^0.23` (v0.23.0) and `mach-crypto` `^0.24` (v0.24.0).
+(v9.0.0), `mach-http` `^0.24` (v0.24.0) and `mach-crypto` `^0.24` (v0.24.0).
 Build output uses Mach's default `out/` directory.
 
 ## Status
