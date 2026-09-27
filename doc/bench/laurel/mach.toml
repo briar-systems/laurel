@@ -59,6 +59,10 @@ path = "../../../"
 git = "https://github.com/briar-systems/hedge"
 version = "=0.12.0"
 
+# laurel needs http 0.23 for laurel.serve, and hedge 0.12.0 pins =0.21.0.
+# http 0.22 and 0.23 add the server runner, which hedge does not use, and fix
+# the h1 engine compatibly, so the root overrides hedge's pin until this
+# hedge-hosted build moves to graft
 [dep.http]
 git = "https://github.com/briar-systems/mach-http"
-version = "^0.21"
+ref = "tag/v0.23.0"
