@@ -54,4 +54,4 @@ path = "../../"
 
 [dep.http]
 git = "https://github.com/briar-systems/mach-http"
-version = "^0.23"
+version = "^0.24"
