@@ -1,0 +1,586 @@
+# a deterministic in-process task provider driven by the caller's clock
+
+use crypto.contracts;
+use laurel.secret;
+use laurel.task;
+use std.chrono.duration;
+use std.chrono.time;
+use std.crypto.ct;
+use std.sync.cancel;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.view;
+
+val NO_SLOT: usize = 18446744073709551615;
+
+rec Entry {
+    used:       bool;
+    generation: u32;
+    spec:       task.Spec;
+    queued:     bool;
+    cause:      task.Cause;
+    running:    bool;
+    scheduled:  bool;
+    due:        time.Instant;
+    scope:      cancel.Scope;
+    scope_live: bool;
+    run:        task.Run;
+    runs:       u64;
+    current:    usize;
+    drafting:   usize;
+    published:  u64;
+    refs:       [8]u32;
+    lens:       [8]usize;
+    sequences:  [8]u64;
+    report:     task.Report;
+}
+
+# caller-owned runner state; nothing runs until poll
+pub rec Runner {
+    entries:  [16]Entry;
+    root:     cancel.Scope;
+    secrets:  secret.Source;
+    provider: task.Provider;
+    draining: bool;
+    deadline: opt[time.Instant];
+    stopped:  bool;
+    valid:    bool;
+}
+
+fun runner_of(context: ptr) *Runner {
+    val runner: *Runner = context::*Runner;
+    if (runner == nil || !runner.valid || runner.stopped) { ret nil; }
+    ret runner;
+}
+
+fun entry_of(runner: *Runner, handle: task.Handle) *Entry {
+    if (runner == nil || handle.generation == 0 || handle.slot::usize >= task.MAX_TASKS) {
+        ret nil;
+    }
+    val entry: *Entry = ?runner.entries[handle.slot::usize];
+    if (!entry.used || entry.generation != handle.generation) { ret nil; }
+    ret entry;
+}
+
+fun live_run(runner: *Runner, run: *task.Run) *Entry {
+    if (run == nil) { ret nil; }
+    val entry: *Entry = entry_of(runner, run.task);
+    if (entry == nil || !entry.running || run != ?entry.run || run.sequence != entry.runs) {
+        ret nil;
+    }
+    ret entry;
+}
+
+fun slot_data(entry: *Entry, slot: usize) *u8 {
+    ret ?entry.spec.slots[slot * entry.spec.slot_bytes];
+}
+
+fun register_task(context: ptr, spec: *task.Spec, output: *task.Handle) task.Status {
+    val runner: *Runner = runner_of(context);
+    if (runner == nil || !task.spec_valid(spec) || output == nil) { ret task.STATUS_INVALID; }
+    if (runner.draining)                                          { ret task.STATUS_DRAINING; }
+    var i: usize = 0;
+    for (i < task.MAX_TASKS) {
+        val entry: *Entry = ?runner.entries[i];
+        if (!entry.used && entry.generation != 4294967295) {
+            entry.generation       = entry.generation + 1;
+            entry.used             = true;
+            entry.spec             = @spec;
+            entry.queued           = false;
+            entry.cause            = task.CAUSE_PERIOD;
+            entry.running          = false;
+            entry.scheduled        = false;
+            entry.scope_live       = false;
+            entry.runs             = 0;
+            entry.current          = NO_SLOT;
+            entry.drafting         = NO_SLOT;
+            entry.published        = 0;
+            entry.report.runs      = 0;
+            entry.report.failures  = 0;
+            entry.report.abandoned = 0;
+            entry.report.last      = task.OUTCOME_NONE;
+            entry.report.error_len = 0;
+            var slot: usize = 0;
+            for (slot < task.MAX_SNAPSHOT_SLOTS) {
+                entry.refs[slot]      = 0;
+                entry.lens[slot]      = 0;
+                entry.sequences[slot] = 0;
+                slot                  = slot + 1;
+            }
+            @output = task.Handle{slot: i::u32, generation: entry.generation};
+            ret task.STATUS_OK;
+        }
+        i = i + 1;
+    }
+    ret task.STATUS_FULL;
+}
+
+fun trigger_task(context: ptr, handle: task.Handle) task.Status {
+    val runner: *Runner = runner_of(context);
+    val entry:  *Entry  = entry_of(runner, handle);
+    if (entry == nil)    { ret task.STATUS_INVALID; }
+    if (runner.draining) { ret task.STATUS_DRAINING; }
+    entry.cause = task.CAUSE_TRIGGER;
+    if (entry.queued) { ret task.STATUS_COALESCED; }
+    entry.queued = true;
+    ret task.STATUS_OK;
+}
+
+fun read_task(context: ptr, handle: task.Handle, output: *task.Lease) task.Status {
+    val entry: *Entry = entry_of(runner_of(context), handle);
+    if (entry == nil || output == nil) { ret task.STATUS_INVALID; }
+    if (entry.current == NO_SLOT)      { ret task.STATUS_EMPTY; }
+    val slot: usize = entry.current;
+    if (entry.refs[slot] == 4294967295) { ret task.STATUS_FULL; }
+    entry.refs[slot] = entry.refs[slot] + 1;
+    @output          = task.Lease{task: handle, slot: slot::u32, sequence: entry.sequences[slot],
+        data: slot_data(entry, slot), len: entry.lens[slot]};
+    ret task.STATUS_OK;
+}
+
+fun release_task(context: ptr, lease: *task.Lease) task.Status {
+    if (lease == nil) { ret task.STATUS_INVALID; }
+    val entry: *Entry = entry_of(runner_of(context), lease.task);
+    if (entry == nil || lease.slot::usize >= entry.spec.slot_count) { ret task.STATUS_INVALID; }
+    val slot: usize = lease.slot::usize;
+    if (entry.refs[slot] == 0 || entry.sequences[slot] != lease.sequence) {
+        ret task.STATUS_INVALID;
+    }
+    entry.refs[slot] = entry.refs[slot] - 1;
+    lease.data       = nil;
+    lease.len        = 0;
+    ret task.STATUS_OK;
+}
+
+fun draft_task(context: ptr, run: *task.Run, output: *task.Draft) task.Status {
+    val entry: *Entry = live_run(runner_of(context), run);
+    if (entry == nil || output == nil || entry.spec.slot_count == 0) { ret task.STATUS_INVALID; }
+    if (entry.drafting != NO_SLOT)                                   { ret task.STATUS_BUSY; }
+    var slot: usize = 0;
+    for (slot < entry.spec.slot_count) {
+        if (slot != entry.current && entry.refs[slot] == 0) {
+            entry.drafting = slot;
+            @output        = task.Draft{task: run.task, slot: slot::u32, sequence: run.sequence,
+                data: slot_data(entry, slot), capacity: entry.spec.slot_bytes};
+            ret task.STATUS_OK;
+        }
+        slot = slot + 1;
+    }
+    ret task.STATUS_FULL;
+}
+
+fun draft_matches(entry: *Entry, run: *task.Run, pending: *task.Draft) bool {
+    ret entry != nil && pending != nil && entry.drafting != NO_SLOT
+        && pending.slot::usize == entry.drafting && pending.sequence == run.sequence
+        && pending.task.slot == run.task.slot && pending.task.generation == run.task.generation;
+}
+
+fun commit_task(context: ptr, run: *task.Run, pending: *task.Draft, len: usize) task.Status {
+    val entry: *Entry = live_run(runner_of(context), run);
+    if (!draft_matches(entry, run, pending) || len > entry.spec.slot_bytes) {
+        ret task.STATUS_INVALID;
+    }
+    val slot: usize = entry.drafting;
+    entry.published       = entry.published + 1;
+    entry.lens[slot]      = len;
+    entry.sequences[slot] = entry.published;
+    entry.current         = slot;
+    entry.drafting        = NO_SLOT;
+    pending.data          = nil;
+    pending.capacity      = 0;
+    ret task.STATUS_OK;
+}
+
+fun discard_task(context: ptr, run: *task.Run, pending: *task.Draft) task.Status {
+    val entry: *Entry = live_run(runner_of(context), run);
+    if (!draft_matches(entry, run, pending)) { ret task.STATUS_INVALID; }
+    entry.drafting   = NO_SLOT;
+    pending.data     = nil;
+    pending.capacity = 0;
+    ret task.STATUS_OK;
+}
+
+fun report_task(context: ptr, handle: task.Handle, output: *task.Report) task.Status {
+    val entry: *Entry = entry_of(runner_of(context), handle);
+    if (entry == nil || output == nil) { ret task.STATUS_INVALID; }
+    entry.report.running   = entry.running;
+    entry.report.queued    = entry.queued;
+    entry.report.published = entry.published;
+    @output                = entry.report;
+    ret task.STATUS_OK;
+}
+
+fun running_count(runner: *Runner) usize {
+    var count: usize = 0;
+    var i:     usize = 0;
+    for (i < task.MAX_TASKS) {
+        if (runner.entries[i].used && runner.entries[i].running) { count = count + 1; }
+        i = i + 1;
+    }
+    ret count;
+}
+
+fun abandoned_count(runner: *Runner) usize {
+    var count: usize = 0;
+    var i:     usize = 0;
+    for (i < task.MAX_TASKS) {
+        if (runner.entries[i].used) {
+            count = count + runner.entries[i].report.abandoned::usize;
+        }
+        i = i + 1;
+    }
+    ret count;
+}
+
+fun same_deadline(a: opt[time.Instant], b: opt[time.Instant]) bool {
+    if (sel a.none) { ret sel b.none; }
+    ret sel b.some && time.instant_equal(a.some, b.some);
+}
+
+# the first call cancels every run and drops queued ones; runs still in flight
+# at the deadline are abandoned by poll
+fun drain_tasks(context: ptr, deadline: opt[time.Instant]) task.Drain {
+    val runner: *Runner = runner_of(context);
+    if (runner == nil) { ret task.Drain{status: task.DRAIN_INVALID, abandoned: 0}; }
+    if (!runner.draining) {
+        runner.draining = true;
+        runner.deadline = deadline;
+        cancel.cancel(?runner.root);
+        var i: usize = 0;
+        for (i < task.MAX_TASKS) {
+            runner.entries[i].queued = false;
+            i                        = i + 1;
+        }
+    }
+    or (!same_deadline(runner.deadline, deadline)) {
+        ret task.Drain{status: task.DRAIN_INVALID, abandoned: 0};
+    }
+    if (running_count(runner) > 0) {
+        ret task.Drain{status: task.DRAIN_PENDING, abandoned: abandoned_count(runner)};
+    }
+    ret task.Drain{status: task.DRAIN_DONE, abandoned: abandoned_count(runner)};
+}
+
+fun leased(runner: *Runner) bool {
+    var i: usize = 0;
+    for (i < task.MAX_TASKS) {
+        if (runner.entries[i].used) {
+            var slot: usize = 0;
+            for (slot < task.MAX_SNAPSHOT_SLOTS) {
+                if (runner.entries[i].refs[slot] != 0) { ret true; }
+                slot = slot + 1;
+            }
+        }
+        i = i + 1;
+    }
+    ret false;
+}
+
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}
+
+fun close_scope(entry: *Entry) {
+    if (entry.scope_live && operation_ok(cancel.destroy(?entry.scope))) {
+        entry.scope_live = false;
+    }
+}
+
+# refused until drain is done and every lease is released
+fun stop_tasks(context: ptr) task.Status {
+    val runner: *Runner = runner_of(context);
+    if (runner == nil)                                                   { ret task.STATUS_INVALID; }
+    if (!runner.draining || running_count(runner) > 0 || leased(runner)) { ret task.STATUS_BUSY; }
+    var i: usize = 0;
+    for (i < task.MAX_TASKS) {
+        close_scope(?runner.entries[i]);
+        if (runner.entries[i].scope_live) { ret task.STATUS_BUSY; }
+        i = i + 1;
+    }
+    runner.stopped = true;
+    ret task.STATUS_OK;
+}
+
+pub fun init(runner: *Runner, secrets: secret.Source) bool {
+    if (runner == nil || runner.valid)                                           { ret false; }
+    if (!operation_ok(cancel.make_root(?runner.root, opt[time.Instant].none{}))) { ret false; }
+    var i: usize = 0;
+    for (i < task.MAX_TASKS) {
+        runner.entries[i].used       = false;
+        runner.entries[i].generation = 0;
+        runner.entries[i].running    = false;
+        runner.entries[i].scope_live = false;
+        i                            = i + 1;
+    }
+    runner.secrets  = secrets;
+    runner.provider = task.Provider{ctx: runner::ptr, register: register_task,
+        trigger: trigger_task, read: read_task, release: release_task, draft: draft_task,
+        commit:  commit_task, discard: discard_task, report: report_task, drain: drain_tasks,
+        stop:    stop_tasks};
+    runner.draining = false;
+    runner.deadline = opt[time.Instant].none{};
+    runner.stopped  = false;
+    runner.valid    = true;
+    ret true;
+}
+
+pub fun provider(runner: *Runner) *task.Provider {
+    if (runner == nil || !runner.valid) { ret nil; }
+    ret ?runner.provider;
+}
+
+fun copy_error(entry: *Entry, error: view.View) {
+    var len: usize = error.len;
+    if (len > task.MAX_ERROR_BYTES) { len = task.MAX_ERROR_BYTES; }
+    if (error.data == nil)          { len = 0; }
+    var i: usize = 0;
+    for (i < len) {
+        entry.report.error[i] = error.data[i];
+        i                     = i + 1;
+    }
+    entry.report.error_len = len;
+}
+
+fun finish_run(entry: *Entry, outcome: task.Outcome, now: time.Instant) {
+    entry.running     = false;
+    entry.drafting    = NO_SLOT;
+    entry.report.last = outcome;
+    if (outcome == task.OUTCOME_FAILED)    { entry.report.failures = entry.report.failures + 1; }
+    if (outcome == task.OUTCOME_ABANDONED) { entry.report.abandoned = entry.report.abandoned + 1; }
+    if (outcome != task.OUTCOME_FAILED)    { entry.report.error_len = 0; }
+    if (outcome == task.OUTCOME_ABANDONED) { cancel.timeout(?entry.scope); }
+    close_scope(entry);
+    if (sel entry.spec.period.some) {
+        entry.due = time.instant_add(now, entry.spec.period.some);
+    }
+}
+
+fun start_run(runner: *Runner, index: usize, entry: *Entry, now: time.Instant) bool {
+    var deadline: opt[time.Instant] = opt[time.Instant].none{};
+    if (sel entry.spec.run_timeout.some) {
+        deadline = opt[time.Instant].some{time.instant_add(now, entry.spec.run_timeout.some)};
+    }
+    close_scope(entry);
+    if (entry.scope_live)                                                       { ret false; }
+    if (!operation_ok(cancel.make_child(?entry.scope, ?runner.root, deadline))) { ret false; }
+    entry.scope_live  = true;
+    entry.runs        = entry.runs + 1;
+    entry.report.runs = entry.report.runs + 1;
+    entry.run         = task.Run{task: task.Handle{slot: index::u32, generation: entry.generation},
+        provider: ?runner.provider, scope: ?entry.scope, deadline: deadline, cause: entry.cause,
+        sequence: entry.runs, secrets: runner.secrets};
+    entry.queued  = false;
+    entry.cause   = task.CAUSE_PERIOD;
+    entry.running = true;
+    ret true;
+}
+
+fun step_run(entry: *Entry, now: time.Instant) {
+    cancel.expire(?entry.scope, now);
+    val result: res[task.StepStatus, view.View] = entry.spec.step(entry.spec.state, ?entry.run);
+    if (sel result.err) {
+        copy_error(entry, result.err);
+        finish_run(entry, task.OUTCOME_FAILED, now);
+        ret;
+    }
+    val status: task.StepStatus = result.ok;
+    if (status == task.STEP_DONE) {
+        finish_run(entry, task.OUTCOME_COMPLETED, now);
+        ret;
+    }
+    if (status != task.STEP_PENDING) {
+        copy_error(entry, view.view("invalid step result", 19));
+        finish_run(entry, task.OUTCOME_FAILED, now);
+    }
+}
+
+fun past(deadline: opt[time.Instant], now: time.Instant) bool {
+    ret (sel deadline.some) && !time.instant_before(now, deadline.some);
+}
+
+# one pass at instant now: schedules due periods, starts queued runs, and
+# steps each running task once. returns the number of steps taken.
+pub fun poll(runner: *Runner, now: time.Instant) usize {
+    if (runner == nil || !runner.valid || runner.stopped) { ret 0; }
+    var steps: usize = 0;
+    var i:     usize = 0;
+    for (i < task.MAX_TASKS) {
+        val entry: *Entry = ?runner.entries[i];
+        if (entry.used) {
+            if (!entry.scheduled) {
+                if (sel entry.spec.period.some) {
+                    entry.scheduled = true;
+                    entry.due       = time.instant_add(now, entry.spec.period.some);
+                }
+            }
+            if (!runner.draining && !entry.running && entry.scheduled
+                && !time.instant_before(now, entry.due)) { entry.queued = true; }
+            if (!runner.draining && !entry.running && entry.queued) {
+                start_run(runner, i, entry, now);
+            }
+            if (entry.running) {
+                if (runner.draining && past(runner.deadline, now)) {
+                    finish_run(entry, task.OUTCOME_ABANDONED, now);
+                }
+                or {
+                    step_run(entry, now);
+                    steps = steps + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    ret steps;
+}
+
+# releases the runner's scopes once stop has succeeded
+pub fun destroy(runner: *Runner) bool {
+    if (runner == nil || !runner.valid || !runner.stopped) { ret false; }
+    if (!operation_ok(cancel.destroy(?runner.root)))       { ret false; }
+    runner.valid = false;
+    ret true;
+}
+
+#[testing]
+var test_token: [5]^u8;
+
+#[testing]
+fun test_resolve(context: ptr, name: view.View, use: secret.UseFun, use_ctx: ptr) secret.Status {
+    if (name.len != 5 || name.data[0] != 't') { ret secret.BORROW_MISSING; }
+    var scratch: [5]^u8;
+    var i:       usize = 0;
+    for (i < 5) {
+        scratch[i] = test_token[i];
+        i          = i + 1;
+    }
+    val used: bool = use(use_ctx, contracts.SecretBytes{data: ?scratch[0], len: 5});
+    ct.zeroize(?scratch[0], 5);
+    if (!used) { ret secret.BORROW_REFUSED; }
+    ret secret.BORROW_OK;
+}
+
+# public task state: the secret's name, never the secret
+#[testing]
+rec Catalog {
+    secret_name: view.View;
+    borrowed:    usize;
+    published:   task.Status;
+    hang:        bool;
+    cancelled:   bool;
+    body:        [5]u8;
+}
+
+#[testing]
+fun use_token(context: ptr, token: contracts.SecretBytes) bool {
+    val state: *Catalog = context::*Catalog;
+    if (token.len != 5) { ret false; }
+    state.borrowed = state.borrowed + 1;
+    ret true;
+}
+
+#[testing]
+fun refresh(context: ptr, run: *task.Run) res[task.StepStatus, view.View] {
+    val state: *Catalog = context::*Catalog;
+    if (state.hang) {
+        val reason: cancel.Reason = cancel.reason(run.scope);
+        if (sel reason.cancelled) { state.cancelled = true; }
+        ret res[task.StepStatus, view.View].ok{task.STEP_PENDING};
+    }
+    if (secret.borrow(run.secrets, state.secret_name, use_token, context) != secret.BORROW_OK) {
+        ret res[task.StepStatus, view.View].err{view.view("token unavailable", 17)};
+    }
+    state.body[4]   = '0' + run.sequence::u8;
+    state.published = task.publish(run, view.view(?state.body[0], 5));
+    ret res[task.StepStatus, view.View].ok{task.STEP_DONE};
+}
+
+#[testing]
+fun at(sec: i64) time.Instant {
+    ret time.Instant{sec: sec, nsec: 0};
+}
+
+#[testing]
+fun reads(provider: *task.Provider, handle: task.Handle, lease: *task.Lease, digit: u8) bool {
+    if (task.read(provider, handle, lease) != task.STATUS_OK) { ret false; }
+    val bytes: view.View = task.lease_view(lease);
+    ret bytes.len == 5 && bytes.data[0] == 'r' && bytes.data[4] == digit;
+}
+
+# the #305 hardest case: a periodic job borrowing a secret that drains on shutdown
+test runner__periodic_secret_job_drains {
+    test_token[0] = 's';
+    test_token[1] = '3';
+    test_token[2] = 'c';
+    test_token[3] = 'r';
+    test_token[4] = 't';
+    var resolver: secret.Resolver = secret.Resolver{ctx: nil, borrow: test_resolve};
+    var source:   secret.Source;
+    if (!secret.register(?resolver, ?source)) { ret 1; }
+    var runner: Runner;
+    runner.valid = false;
+    if (!init(?runner, source)) { ret 1; }
+    val tasks: *task.Provider = provider(?runner);
+    var state: Catalog;
+    state.secret_name = view.view("token", 5);
+    state.borrowed    = 0;
+    state.published   = 0;
+    state.hang        = false;
+    state.cancelled   = false;
+    state.body[0]     = 'r';
+    state.body[1]     = 'u';
+    state.body[2]     = 'n';
+    state.body[3]     = '-';
+    var slots: [2][5]u8;
+    var spec:  task.Spec = task.Spec{name: view.view("catalog", 7), state: (?state)::ptr,
+        step:        refresh, period: opt[duration.Duration].some{5 * duration.SECOND},
+        run_timeout: opt[duration.Duration].some{duration.SECOND}, slots: ?slots[0][0],
+        slot_bytes:  5, slot_count: 2};
+    var handle: task.Handle;
+    if (task.register(tasks, ?spec, ?handle) != task.STATUS_OK) { ret 2; }
+    var first: task.Lease;
+    if (task.read(tasks, handle, ?first) != task.STATUS_EMPTY) { ret 3; }
+    if (poll(?runner, at(0)) != 0)                             { ret 4; }
+    if (task.trigger(tasks, handle) != task.STATUS_OK
+        || task.trigger(tasks, handle) != task.STATUS_COALESCED) { ret 5; }
+    if (poll(?runner, at(1)) != 1 || state.borrowed != 1 || state.published != task.STATUS_OK
+        || !reads(tasks, handle, ?first, '1')) { ret 6; }
+    if (poll(?runner, at(5)) != 0 || poll(?runner, at(6)) != 1) { ret 7; }
+    var second: task.Lease;
+    if (!reads(tasks, handle, ?second, '2')) { ret 8; }
+    var check: task.Lease;
+    if (poll(?runner, at(11)) != 1 || state.published != task.STATUS_FULL
+        || !reads(tasks, handle, ?check, '2') || task.release(tasks, ?check) != task.STATUS_OK) {
+        ret 9;
+    }
+    if (task.release(tasks, ?first) != task.STATUS_OK) { ret 10; }
+    state.hang = true;
+    if (task.trigger(tasks, handle) != task.STATUS_OK || poll(?runner, at(12)) != 1) { ret 11; }
+    if (task.trigger(tasks, handle) != task.STATUS_OK
+        || task.trigger(tasks, handle) != task.STATUS_COALESCED) { ret 12; }
+    val deadline: opt[time.Instant] = opt[time.Instant].some{at(14)};
+    if (task.drain(tasks, deadline).status != task.DRAIN_PENDING
+        || task.trigger(tasks, handle) != task.STATUS_DRAINING) { ret 13; }
+    if (poll(?runner, at(13)) != 1 || !state.cancelled
+        || task.drain(tasks, deadline).status != task.DRAIN_PENDING) { ret 14; }
+    if (poll(?runner, at(14)) != 0) { ret 15; }
+    val drained: task.Drain = task.drain(tasks, deadline);
+    if (drained.status != task.DRAIN_DONE || drained.abandoned != 1) { ret 16; }
+    var report: task.Report;
+    if (task.report(tasks, handle, ?report) != task.STATUS_OK || report.runs != 4
+        || report.abandoned != 1 || report.last != task.OUTCOME_ABANDONED || report.queued
+        || report.running || report.published != 2) { ret 17; }
+    if (task.stop(tasks) != task.STATUS_BUSY) { ret 18; }
+    if (task.release(tasks, ?second) != task.STATUS_OK
+        || task.release(tasks, ?second) != task.STATUS_INVALID) { ret 19; }
+    var third: task.Lease;
+    if (!reads(tasks, handle, ?third, '2') || task.release(tasks, ?third) != task.STATUS_OK) {
+        ret 20;
+    }
+    if (task.stop(tasks) != task.STATUS_OK || task.read(tasks, handle, ?third) != task.STATUS_INVALID
+        || !destroy(?runner) || !secret.unregister(source)) { ret 21; }
+    ret 0;
+}
