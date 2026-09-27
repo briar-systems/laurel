@@ -8,6 +8,7 @@ use http.core.method;
 use http.core.target;
 use http.websocket;
 use http.websocket.negotiation;
+use laurel.context;
 use laurel.render;
 use std.chrono.duration;
 use std.chrono.time;
@@ -719,6 +720,8 @@ pub fun stream_channel(stream: *Stream) Channel {
         close: stream_close_entry};
 }
 
+# validates the upgrade or extended CONNECT and commits the response. a host
+# primitive: accept_upgrade calls it, since a handler never commits
 pub fun negotiate(exchange_value: *exchange.Exchange, extended_protocol: view.View,
     selected_protocol: view.View, accept: *u8,
     accept_capacity: usize) negotiation.Handshake {
@@ -936,6 +939,356 @@ pub fun socket_channel(socket: *Socket) Channel {
     }
     ret Channel{ctx: socket::ptr, kind: KIND_WEBSOCKET, send: socket_send_entry,
         close: socket_close_entry};
+}
+
+pub def Signal: u8;
+
+# the connection is handed over and the session may send
+pub val SIGNAL_OPEN: Signal = 1;
+# a fragment of an inbound message arrived
+pub val SIGNAL_MESSAGE: Signal = 2;
+# the session was woken, or the instant it asked for came
+pub val SIGNAL_WAKE: Signal = 3;
+# the host drains: a close with 1001 follows unless the session closes first
+pub val SIGNAL_DRAIN: Signal = 4;
+# the peer's close arrived, and the host answers it
+pub val SIGNAL_CLOSE: Signal = 5;
+
+# what a session hears from its host
+# ---
+# data:       the message fragment, borrowed for the call
+# binary:     the fragment's message is binary
+# final:      the fragment ends its message
+# close_code: the peer's close code, 1005 when it named none
+# now:        the host's monotonic clock
+pub rec Incoming {
+    signal:     Signal;
+    data:       view.View;
+    binary:     bool;
+    final:      bool;
+    close_code: u16;
+    now:        time.Instant;
+}
+
+# false fails the session: it closes with 1011
+pub def SessionFun: fun(ptr, *Session, Incoming) bool;
+# called once for an opened session when the host is done with it, clean when
+# the close handshake completed
+pub def SessionEndFun: fun(ptr, *Session, bool);
+
+# a websocket a host runs once the upgrade is on the wire. the handler
+# initializes a session in storage that outlives the exchange (the request
+# allocator's does), asks for it with upgrade, and responds. the host negotiates
+# and commits the 101 with accept_upgrade, opens the session at the handoff,
+# pumps the connection's bytes through session_input and session_output, and
+# ends it once. pings are answered and a peer's close is returned without the
+# application
+pub rec Session {
+    ctx:         ptr;
+    on_signal:   SessionFun;
+    on_end:      SessionEndFun;
+    policy:      Policy;
+    limits:      websocket.Limits;
+    bytes:       *u8;
+    capacity:    usize;
+    protocol:    view.View;
+    accept:      [32]u8;
+    socket:      Socket;
+    control:     [125]u8;
+    waker:       context.Waker;
+    wake_at:     opt[time.Instant];
+    pong:        [125]u8;
+    pong_length: usize;
+    pong_owed:   bool;
+    close_owed:  u16;
+    draining:    bool;
+    broken:      bool;
+    opened:      bool;
+    ended:       bool;
+    initialized: bool;
+}
+
+# bytes is the outbound frame queue, at least a largest message and its header
+pub fun init_session(session: *Session, ctx: ptr, on_signal: SessionFun, on_end: SessionEndFun,
+    policy: Policy, limits: websocket.Limits, bytes: *u8, capacity: usize) bool {
+    if (session == nil || session.initialized || on_signal == nil || on_end == nil
+        || !policy_valid(policy, KIND_WEBSOCKET) || bytes == nil
+        || capacity < policy.max_message_bytes + MAX_FRAME_HEADER_BYTES
+        || policy.max_message_bytes::u64 > limits.max_frame_bytes) { ret false; }
+    session.ctx                = ctx;
+    session.on_signal          = on_signal;
+    session.on_end             = on_end;
+    session.policy             = policy;
+    session.limits             = limits;
+    session.bytes              = bytes;
+    session.capacity           = capacity;
+    session.protocol           = view.view(nil, 0);
+    session.socket.initialized = false;
+    session.waker              = context.no_waker();
+    session.wake_at            = opt[time.Instant].none{};
+    session.pong_length        = 0;
+    session.pong_owed          = false;
+    session.close_owed         = 0;
+    session.draining           = false;
+    session.broken             = false;
+    session.opened             = false;
+    session.ended              = false;
+    session.initialized        = true;
+    ret true;
+}
+
+# asks the host to switch the request to a websocket run by session, speaking
+# protocol when it is not empty (one the client offered, borrowed until the
+# host negotiates). the handler then responds without committing: the host
+# negotiates and commits the 101 once the middleware has run
+pub fun upgrade(request_context: *context.Context, session: *Session, protocol: view.View) bool {
+    if (!context.active(request_context) || session == nil || !session.initialized
+        || session.opened || request_context.upgrade != nil || !view_valid(protocol)
+        || context.response(request_context).committed) { ret false; }
+    session.protocol        = protocol;
+    request_context.upgrade = session::ptr;
+    ret true;
+}
+
+# the host's side, once the request's execution responded with an upgrade
+# asked for: it is negotiated and the 101 committed. anything but NEGOTIATED
+# leaves the request without a session, for the host to answer 400
+pub fun accept_upgrade(request_context: *context.Context) negotiation.Status {
+    val session: *Session           = upgraded(request_context);
+    val bound:   *exchange.Exchange = context.exchange_ref(request_context);
+    if (session == nil || bound == nil) { ret negotiation.INVALID_EXCHANGE; }
+    var extended: view.View = view.view(nil, 0);
+    if (bound.request.metadata.version.wire != message.WIRE_H1) { extended = view.view("websocket", 9); }
+    val handshake: negotiation.Handshake = negotiate(bound, extended, session.protocol,
+        ?session.accept[0], 32);
+    if (handshake.status != negotiation.NEGOTIATED) { request_context.upgrade = nil; }
+    ret handshake.status;
+}
+
+# the session a request's handler attached, for its host. nil when none
+pub fun upgraded(request_context: *context.Context) *Session {
+    if (request_context == nil || !request_context.bound) { ret nil; }
+    ret request_context.upgrade::*Session;
+}
+
+fun incoming(signal: Signal, now: time.Instant) Incoming {
+    ret Incoming{signal: signal, data: view.view(nil, 0), binary: false, final: false,
+        close_code: 0, now: now};
+}
+
+fun deliver(session: *Session, event: Incoming) bool {
+    ret session.on_signal(session.ctx, session, event);
+}
+
+# a control frame the session owes is queued ahead of anything else it sends
+fun flush_owed(session: *Session) bool {
+    val socket: *Socket = ?session.socket;
+    if (session.pong_owed) {
+        if (socket.close_sent) { session.pong_owed = false; }
+        or {
+            val sent: Sent = socket_frame(socket, websocket.OPCODE_PONG, ?session.pong[0],
+                session.pong_length);
+            if (sent.status == SEND_BLOCKED) { ret false; }
+            session.pong_owed = false;
+        }
+    }
+    if (session.close_owed != 0) {
+        if (!socket.close_sent) {
+            var payload: [2]u8;
+            val length:  usize = websocket.close_payload(session.close_owed, nil, 0, ?payload[0], 2);
+            val sent:    Sent  = socket_frame(socket, websocket.OPCODE_CLOSE, ?payload[0], length);
+            if (sent.status == SEND_BLOCKED) { ret false; }
+            if (sent.status == SEND_OK)      { socket.sent_close_code = session.close_owed; }
+        }
+        session.close_owed = 0;
+    }
+    ret true;
+}
+
+fun owe_close(session: *Session, code: u16) {
+    if (session.socket.close_sent || session.close_owed != 0) { ret; }
+    session.close_owed = code;
+    flush_owed(session);
+}
+
+# the host's side: the connection is the session's now. scope is what its
+# sends observe, and waker wakes the host from any thread
+pub fun session_open(session: *Session, scope: *cancel.Scope, waker: context.Waker, now: time.Instant) bool {
+    if (session == nil || !session.initialized || session.opened
+        || !init_socket(?session.socket, session.policy, session.bytes, session.capacity,
+        ?session.control[0], CONTROL_SCRATCH_BYTES, session.limits, scope, now)) { ret false; }
+    session.waker  = waker;
+    session.opened = true;
+    if (!deliver(session, incoming(SIGNAL_OPEN, now))) { owe_close(session, 1011); }
+    ret true;
+}
+
+# feeds bytes the peer sent, and returns how many were taken. fewer than length
+# when a control reply is waiting on queue space: session_output frees it
+pub fun session_input(session: *Session, input: *u8, length: usize, eof: bool,
+    now: time.Instant) usize {
+    if (session == nil || !session.opened || session.ended) { ret length; }
+    val socket: *Socket = ?session.socket;
+    var offset: usize   = 0;
+    for (true) {
+        if (!flush_owed(session))                    { ret offset; }
+        if (session.broken || socket.close_received) { ret length; }
+        if (offset == length && !eof)                { ret offset; }
+        var at: *u8 = nil;
+        if (offset < length) { at = ?input[offset]; }
+        val decoded: websocket.Event = socket_feed(socket, at, length - offset, eof);
+        offset = offset + decoded.consumed;
+        if (decoded.kind == websocket.EVENT_DATA) {
+            var event: Incoming = incoming(SIGNAL_MESSAGE, now);
+            event.data   = view.view(decoded.data, decoded.data_length);
+            event.binary = decoded.opcode == websocket.OPCODE_BINARY;
+            event.final  = decoded.message_final;
+            val kept: bool = deliver(session, event);
+            socket_release(socket);
+            if (!kept) { owe_close(session, 1011); }
+        }
+        or (decoded.kind == websocket.EVENT_PING) {
+            memory.raw_copy(?session.pong[0], decoded.data, decoded.data_length);
+            session.pong_length = decoded.data_length;
+            session.pong_owed   = true;
+            socket_release(socket);
+        }
+        or (decoded.kind == websocket.EVENT_PONG) {
+            socket_release(socket);
+        }
+        or (decoded.kind == websocket.EVENT_CLOSE) {
+            var event: Incoming = incoming(SIGNAL_CLOSE, now);
+            event.close_code = decoded.close_code;
+            if (event.close_code == 0) { event.close_code = 1005; }
+            deliver(session, event);
+            socket_release(socket);
+            var reply: u16 = event.close_code;
+            if (!close_code_sendable(reply)) { reply = 1000; }
+            owe_close(session, reply);
+            flush_owed(session);
+            ret length;
+        }
+        or (decoded.kind == websocket.EVENT_ERROR) {
+            session.broken = true;
+            if (decoded.reply_close && close_code_sendable(decoded.close_code)) {
+                owe_close(session, decoded.close_code);
+            }
+            ret length;
+        }
+        or (eof) {
+            session.broken = true;
+            ret length;
+        }
+        or {
+            ret offset;
+        }
+    }
+    ret offset;
+}
+
+# moves queued frames into output, and returns how many bytes it wrote
+pub fun session_output(session: *Session, output: *u8, capacity: usize, now: time.Instant) usize {
+    if (session == nil || !session.opened || session.ended) { ret 0; }
+    flush_owed(session);
+    val count: usize = queue_take(?session.socket.queue, output, capacity);
+    if (count != 0) { socket_observe(?session.socket, now); }
+    ret count;
+}
+
+# the host was woken or reached session_next: a heartbeat that is due, then WAKE
+pub fun session_wake(session: *Session, now: time.Instant) {
+    if (session == nil || !session.opened || session.ended || session.broken
+        || session.socket.state != STATE_OPEN) { ret; }
+    var due: bool = false;
+    if (sel session.wake_at.some)                      { due = !time.instant_before(now, session.wake_at.some); }
+    if (due)                                           { session.wake_at = opt[time.Instant].none{}; }
+    if (session.policy.heartbeat_interval != 0)        { socket_heartbeat(?session.socket, now); }
+    if (!deliver(session, incoming(SIGNAL_WAKE, now))) { owe_close(session, 1011); }
+}
+
+# the host drains: DRAIN, then a 1001 close unless the session closed already
+pub fun session_drain(session: *Session, now: time.Instant) {
+    if (session == nil || !session.opened || session.ended || session.draining) { ret; }
+    session.draining = true;
+    if (session.broken || session.socket.close_sent) { ret; }
+    if (!deliver(session, incoming(SIGNAL_DRAIN, now))) {
+        owe_close(session, 1011);
+        ret;
+    }
+    owe_close(session, 1001);
+}
+
+# whether the host should read more from the peer
+pub fun session_reading(session: *Session) bool {
+    ret session != nil && session.opened && !session.ended && !session.broken
+        && !session.socket.close_received;
+}
+
+# the close handshake is over, or the peer broke off, and nothing is left to send
+pub fun session_finished(session: *Session) bool {
+    if (session == nil || !session.opened) { ret false; }
+    val socket: *Socket = ?session.socket;
+    ret (session.broken || (socket.close_sent && socket.close_received))
+        && !session.pong_owed && session.close_owed == 0 && queued(?socket.queue) == 0;
+}
+
+# the next instant the host should call session_wake at: the session's own
+# wake_at or its next heartbeat, whichever is sooner
+pub fun session_next(session: *Session) opt[time.Instant] {
+    if (session == nil || !session.opened || session.ended || session.broken
+        || session.socket.state != STATE_OPEN) { ret opt[time.Instant].none{}; }
+    var found: bool         = false;
+    var at:    time.Instant = time.Instant{sec: 0, nsec: 0};
+    if (sel session.wake_at.some) {
+        found = true;
+        at    = session.wake_at.some;
+    }
+    val interval: duration.Duration = session.policy.heartbeat_interval;
+    if (interval != 0) {
+        val beat: time.Instant = time.instant_add(session.socket.last_send, interval);
+        if (!found || time.instant_before(beat, at)) {
+            found = true;
+            at    = beat;
+        }
+    }
+    if (!found) { ret opt[time.Instant].none{}; }
+    ret opt[time.Instant].some{at};
+}
+
+# the host is done with an opened session: on_end runs, exactly once
+pub fun session_end(session: *Session) {
+    if (session == nil || !session.opened || session.ended) { ret; }
+    session.ended = true;
+    val clean: bool = !session.broken && session.socket.close_sent && session.socket.close_received;
+    session.on_end(session.ctx, session, clean);
+}
+
+pub fun session_send(session: *Session, payload: view.View, frame: FrameKind) Sent {
+    if (session == nil || !session.opened || session.ended) { ret refuse(SEND_INVALID); }
+    ret socket_send(?session.socket, payload, frame);
+}
+
+pub fun session_close(session: *Session, code: u16, reason: view.View) Sent {
+    if (session == nil || !session.opened || session.ended) { ret refuse(SEND_INVALID); }
+    ret socket_close(?session.socket, code, reason);
+}
+
+pub fun session_channel(session: *Session) Channel {
+    if (session == nil || !session.opened) { ret Channel{ctx: nil, kind: 0, send: nil, close: nil}; }
+    ret socket_channel(?session.socket);
+}
+
+# wakes the session's host from any thread: it is then signalled WAKE
+pub fun session_waker(session: *Session) context.Waker {
+    if (session == nil || !session.opened) { ret context.no_waker(); }
+    ret session.waker;
+}
+
+# asks for WAKE at a monotonic instant, replacing an earlier request
+pub fun session_wake_at(session: *Session, at: time.Instant) bool {
+    if (session == nil || !session.opened || session.ended || !valid_instant(at)) { ret false; }
+    session.wake_at = opt[time.Instant].some{at};
+    ret true;
 }
 
 #[testing]
