@@ -25,15 +25,3 @@
 [submodule "doc/bench/laurel/dep/http"]
 	path = doc/bench/laurel/dep/http
 	url = https://github.com/briar-systems/mach-http
-[submodule "doc/bench/laurel/dep/tls"]
-	path = doc/bench/laurel/dep/tls
-	url = https://github.com/briar-systems/mach-tls
-[submodule "doc/bench/laurel/dep/quic"]
-	path = doc/bench/laurel/dep/quic
-	url = https://github.com/briar-systems/mach-quic
-[submodule "doc/bench/laurel/dep/acme"]
-	path = doc/bench/laurel/dep/acme
-	url = https://github.com/briar-systems/mach-acme
-[submodule "doc/bench/laurel/dep/hedge"]
-	path = doc/bench/laurel/dep/hedge
-	url = https://github.com/briar-systems/hedge

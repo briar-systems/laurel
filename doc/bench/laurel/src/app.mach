@@ -61,7 +61,7 @@ pub rec Application {
 
 # the observer is counted, never printed: a benchmark that logs per request
 # measures the logger
-# every hedge worker calls into the one application, so the counts are atomic
+# a host may call the application from several threads, so the counts are atomic
 pub rec Counters {
     started:  i64;
     finished: i64;
@@ -224,40 +224,7 @@ pub fun assemble(bench: *Application, limits: message.Limits) bool {
     ret app.assemble(?bench.application, assembly);
 }
 
-pub fun start(bench: *Application) bool {
-    if (app.start(?bench.application).status != lifecycle.TRANSITION_OK) {
-        ret false;
-    }
-    var polls: usize = 0;
-    for (polls < 64) {
-        val ready: lifecycle.Transition = app.poll_ready(?bench.application);
-        if (ready.status == lifecycle.TRANSITION_OK) {
-            ret app.can_accept(?bench.application);
-        }
-        if (ready.status != lifecycle.TRANSITION_PENDING) { ret false; }
-        polls = polls + 1;
-    }
-    ret false;
-}
-
-pub fun shutdown(bench: *Application) bool {
-    var drained: bool  = false;
-    var polls:   usize = 0;
-    for (polls < 64 && !drained) {
-        val moved: lifecycle.Transition =
-            app.drain(?bench.application, opt[time.Instant].none{});
-        drained = moved.status == lifecycle.TRANSITION_OK;
-        if (moved.status != lifecycle.TRANSITION_PENDING && !drained) { ret false; }
-        polls = polls + 1;
-    }
-    var stopped: bool = false;
-    polls = 0;
-    for (polls < 64 && !stopped) {
-        val moved: lifecycle.Transition = app.stop(?bench.application);
-        stopped = moved.status == lifecycle.TRANSITION_OK;
-        if (moved.status != lifecycle.TRANSITION_PENDING && !stopped) { ret false; }
-        polls = polls + 1;
-    }
-    if (!app.release(?bench.application)) { ret false; }
-    ret lifecycle.destroy(?bench.controller);
+# once the host has stopped it
+pub fun release(bench: *Application) bool {
+    ret app.release(?bench.application) && lifecycle.destroy(?bench.controller);
 }

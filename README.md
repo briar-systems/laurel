@@ -87,9 +87,8 @@ streamed response such as server-sent events lives as long as it makes progress.
 ## Benchmarks
 
 [`doc/bench/`](doc/bench/) measures the same three-route service written in
-Laurel, in Go on `net/http`, and in Rust on axum, and publishes the measured
-results. [`doc/bench/COMPARISON.md`](doc/bench/COMPARISON.md) sets the three
-side by side on performance and on ergonomics, including where Laurel loses.
+Laurel, in Go on `net/http`, and in Rust on axum, and writes the measured
+results side by side.
 
 ## Local dependencies
 
