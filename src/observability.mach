@@ -140,6 +140,32 @@ pub rec Observer {
     error:  ErrorFun;
 }
 
+pub def SignalKind: u8;
+
+pub val SIGNAL_COUNTER: SignalKind = 1;
+pub val SIGNAL_GAUGE:   SignalKind = 2;
+pub val SIGNAL_EVENT:   SignalKind = 3;
+
+# one application signal, outside any request: a counter increment, a gauge
+# reading, or a discrete event, labelled from the same closed vocabulary
+pub rec Signal {
+    kind:       SignalKind;
+    name:       Term;
+    value:      i64;
+    labels:     [8]Label;
+    label_len:  usize;
+    vocabulary: *Vocabulary;
+    valid:      bool;
+}
+
+pub def EmitFun: fun(ptr, *Signal);
+
+# the host-supplied sink for application signals
+pub rec Telemetry {
+    ctx:  ptr;
+    emit: EmitFun;
+}
+
 # exactly one start and exactly one terminal event are emitted per request
 pub rec Recorder {
     observer:    Observer;
@@ -439,11 +465,10 @@ pub fun set_route(recorder: *Recorder, name: view.View) RecordStatus {
 }
 
 # a label name outside the vocabulary is refused, so cardinality stays fixed
-pub fun set_label(recorder: *Recorder, name: view.View, value: view.View) RecordStatus {
-    if (!recorder_ready(recorder))              { ret RECORD_INVALID; }
-    if (!recorder.started || recorder.terminal) { ret RECORD_STATE; }
-    if (!label_name_valid(name))                { ret RECORD_INVALID; }
-    val spec: *LabelSpec = find_spec(recorder.vocabulary, name);
+fun put_label(labels: *Label, length: *usize, vocabulary: *Vocabulary, name: view.View,
+    value: view.View) RecordStatus {
+    if (!label_name_valid(name)) { ret RECORD_INVALID; }
+    val spec: *LabelSpec = find_spec(vocabulary, name);
     if (spec == nil) { ret RECORD_UNKNOWN; }
     if (value.len == 0 || value.len > spec.max_value_bytes || !printable(value)) {
         ret RECORD_VALUE;
@@ -457,19 +482,79 @@ pub fun set_label(recorder: *Recorder, name: view.View, value: view.View) Record
         }
         if (!permitted) { ret RECORD_VALUE; }
     }
-    var slot: usize = recorder.event.label_len;
+    var slot: usize = @length;
     var i:    usize = 0;
-    for (i < recorder.event.label_len) {
-        if (terms_equal(?recorder.event.labels[i].name, name)) { slot = i; }
+    for (i < @length) {
+        if (terms_equal(?labels[i].name, name)) { slot = i; }
         i = i + 1;
     }
-    if (slot == recorder.event.label_len) {
-        if (recorder.event.label_len >= recorder.vocabulary.len) { ret RECORD_LIMIT; }
-        if (!term(?recorder.event.labels[slot].name, name))      { ret RECORD_INVALID; }
-        recorder.event.label_len = recorder.event.label_len + 1;
+    if (slot == @length) {
+        if (@length >= vocabulary.len)       { ret RECORD_LIMIT; }
+        if (!term(?labels[slot].name, name)) { ret RECORD_INVALID; }
+        @length = @length + 1;
     }
-    if (!term(?recorder.event.labels[slot].value, value)) { ret RECORD_INVALID; }
-    recorder.event.labels[slot].populated = true;
+    if (!term(?labels[slot].value, value)) { ret RECORD_INVALID; }
+    labels[slot].populated = true;
+    ret RECORD_OK;
+}
+
+pub fun set_label(recorder: *Recorder, name: view.View, value: view.View) RecordStatus {
+    if (!recorder_ready(recorder))              { ret RECORD_INVALID; }
+    if (!recorder.started || recorder.terminal) { ret RECORD_STATE; }
+    ret put_label(?recorder.event.labels[0], ?recorder.event.label_len, recorder.vocabulary,
+        name, value);
+}
+
+# the provider.Set key under which a host supplies a *Telemetry
+pub fun telemetry_key() view.View {
+    ret view.view("laurel.telemetry", 16);
+}
+
+pub fun telemetry_valid(telemetry: *Telemetry) bool {
+    ret telemetry != nil && telemetry.emit != nil;
+}
+
+# a counter reports a non-negative increment; gauges and events carry any value
+pub fun init_signal(signal: *Signal, vocabulary: *Vocabulary, kind: SignalKind,
+    name: view.View, value: i64) RecordStatus {
+    if (signal == nil || !vocabulary_valid(vocabulary) || !label_name_valid(name)
+        || (kind != SIGNAL_COUNTER && kind != SIGNAL_GAUGE && kind != SIGNAL_EVENT)) {
+        ret RECORD_INVALID;
+    }
+    if (kind == SIGNAL_COUNTER && value < 0) { ret RECORD_VALUE; }
+    signal.kind       = kind;
+    signal.value      = value;
+    signal.label_len  = 0;
+    signal.vocabulary = vocabulary;
+    signal.valid      = false;
+    if (!term(?signal.name, name)) { ret RECORD_INVALID; }
+    signal.valid = true;
+    ret RECORD_OK;
+}
+
+pub fun signal_label(signal: *Signal, name: view.View, value: view.View) RecordStatus {
+    if (signal == nil || !signal.valid) { ret RECORD_INVALID; }
+    ret put_label(?signal.labels[0], ?signal.label_len, signal.vocabulary, name, value);
+}
+
+pub fun signal_name(signal: *Signal) view.View {
+    if (signal == nil || !signal.valid) { ret view.view(nil, 0); }
+    ret term_view(?signal.name);
+}
+
+pub fun signal_label_value(signal: *Signal, name: view.View) view.View {
+    if (signal == nil || !signal.valid) { ret view.view(nil, 0); }
+    var i: usize = 0;
+    for (i < signal.label_len) {
+        if (terms_equal(?signal.labels[i].name, name)) { ret term_view(?signal.labels[i].value); }
+        i = i + 1;
+    }
+    ret view.view(nil, 0);
+}
+
+pub fun emit(telemetry: *Telemetry, signal: *Signal) RecordStatus {
+    if (!telemetry_valid(telemetry) || signal == nil || !signal.valid) { ret RECORD_INVALID; }
+    telemetry.emit(telemetry.ctx, signal);
     ret RECORD_OK;
 }
 
@@ -926,5 +1011,47 @@ test fields__size_policies {
         ret 9;
     }
     if (!operation_ok(cancel.destroy(?wide.scope)) || !release_fixture(?state)) { ret 10; }
+    ret 0;
+}
+
+#[testing]
+rec SignalSink {
+    emitted: usize;
+    kind:    SignalKind;
+    value:   i64;
+    tenant:  bool;
+}
+
+#[testing]
+fun sink_emit(ctx: ptr, signal: *Signal) {
+    val state: *SignalSink = ctx::*SignalSink;
+    state.emitted = state.emitted + 1;
+    state.kind    = signal.kind;
+    state.value   = signal.value;
+    state.tenant  = same(signal_label_value(signal, view.view("tenant", 6)), view.view("acme", 4))
+        && same(signal_name(signal), view.view("refresh_runs", 12));
+}
+
+test telemetry__vocabulary_bound_signals {
+    var values:     [2]Term;
+    var specs:      [2]LabelSpec;
+    var vocabulary: Vocabulary;
+    if (!build_vocabulary(?vocabulary, ?specs[0], ?values[0])) { ret 1; }
+    var state:     SignalSink = SignalSink{emitted: 0, kind: 0, value: 0, tenant: false};
+    var telemetry: Telemetry  = Telemetry{ctx: (?state)::ptr, emit: sink_emit};
+    var signal:    Signal;
+    if (init_signal(?signal, ?vocabulary, SIGNAL_COUNTER, view.view("refresh_runs", 12), -1)
+        != RECORD_VALUE) { ret 2; }
+    if (init_signal(?signal, ?vocabulary, SIGNAL_COUNTER, view.view("Refresh", 7), 1)
+        != RECORD_INVALID) { ret 3; }
+    if (init_signal(?signal, ?vocabulary, SIGNAL_COUNTER, view.view("refresh_runs", 12), 1)
+        != RECORD_OK) { ret 4; }
+    if (signal_label(?signal, view.view("region", 6), view.view("eu", 2)) != RECORD_UNKNOWN
+        || signal_label(?signal, view.view("verb", 4), view.view("put", 3)) != RECORD_VALUE
+        || signal_label(?signal, view.view("tenant", 6), view.view("acme", 4)) != RECORD_OK) {
+        ret 5;
+    }
+    if (emit(?telemetry, ?signal) != RECORD_OK || state.emitted != 1
+        || state.kind != SIGNAL_COUNTER || state.value != 1 || !state.tenant) { ret 6; }
     ret 0;
 }
