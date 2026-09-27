@@ -6,7 +6,7 @@ The application foundation is implemented. Applications assemble caller-owned pr
 
 Production scope includes typed handlers, middleware, secure sessions and cookies, forms, streamed uploads, rendering, service providers, application lifecycle, structured failures, observability, in-process tests, streaming responses, server-sent events, and WebSockets. Database clients, template engines, queues, and identity systems remain replaceable providers rather than mandatory framework subsystems.
 
-The framework has no global application registry, hidden allocator, mandatory template language, mandatory persistence layer, or server-specific connection state. Its one piece of process-wide state is a bounded module-private table inside `security.csrf` that maps an opaque handle to a caller-owned key ring, which is what keeps key material off every public type. See [`doc/security.md`](doc/security.md).
+The framework has no global application registry, hidden allocator, mandatory template language, mandatory persistence layer, or server-specific connection state. Its only process-wide state is two bounded module-private tables, one inside `security.csrf` that maps an opaque handle to a caller-owned key ring and one inside `secret` that maps an opaque source to a host-owned secret resolver. They are what keep key material off every public type. See [`doc/security.md`](doc/security.md) and [`doc/providers.md`](doc/providers.md).
 
 ## Boundaries
 
@@ -36,6 +36,12 @@ The framework has no global application registry, hidden allocator, mandatory te
   client, across every wire version the HTTP dependency exposes.
 - `cookie` defines bounded request and response cookie storage.
 - `provider` injects application services without a global container.
+- `task`, `config`, and `secret` define the facilities a host supplies:
+  background tasks with single-flight triggers, snapshots read without waiting,
+  and a bounded drain; read-only configuration; and secrets borrowed for one
+  call through a public source. `observability.Telemetry` carries application
+  signals outside a request. `testing.tasks` is an in-process task provider.
+  See [`doc/providers.md`](doc/providers.md).
 - `lifecycle` owns application startup, readiness, drain, and shutdown. It
   preserves the primary failure while exposing any later shutdown cleanup
   failure through `app.cleanup_failure`.
