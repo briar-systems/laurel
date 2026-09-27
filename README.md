@@ -62,7 +62,7 @@ never names its host.
   own thread, configuration and secrets from the environment, and telemetry on
   stderr, each replaceable, and drives the lifecycle through the server's
   start, ready, drain and stop hooks. SIGTERM or SIGINT drains it to a bounded
-  deadline. [`demo/standalone/`](demo/standalone/) is a complete example, and
+  deadline. [`demo/`](demo/) is a complete example, and
   [`doc/serve.md`](doc/serve.md) the contract.
 
   ```mach
@@ -72,14 +72,14 @@ never names its host.
   serve.run(?host, ?state.application, serve.config_default(address));
   ```
 
-- **Inside a server.** hedge hosts it in process, beside static files and
-  proxied upstreams, through a binding that feeds laurel's providers from the
-  server's facilities. [`demo/`](demo/) is an application hosted by hedge across
-  several workers beside a static file and a health check. Its README states
-  what one application shared by every worker must guarantee.
+- **Inside a server.** A binding hosts it in process and feeds laurel's
+  providers from the server's facilities. laurel knows nothing of the server.
+  [graft](https://github.com/briar-systems/graft) is the reference binding, for
+  hedge, and its `example/` is an application hosted across several workers
+  beside a static file and a health check.
 
 The same `assemble` also runs in process under `laurel.testing`, over the same
-providers, which is how [`demo/standalone/`](demo/standalone/) tests itself.
+providers, which is how [`demo/`](demo/) tests itself.
 
 Standalone, `realtime` WebSocket sessions run over the server's tunnel, and a
 streamed response such as server-sent events lives as long as it makes progress.
