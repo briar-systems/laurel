@@ -25,3 +25,4 @@ fwd laurel.lifecycle;
 fwd laurel.realtime;
 fwd laurel.secret;
 fwd laurel.config;
+fwd laurel.task;
