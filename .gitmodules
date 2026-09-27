@@ -16,18 +16,6 @@
 [submodule "demo/dep/http"]
 	path = demo/dep/http
 	url = https://github.com/briar-systems/mach-http
-[submodule "demo/dep/tls"]
-	path = demo/dep/tls
-	url = https://github.com/briar-systems/mach-tls
-[submodule "demo/dep/quic"]
-	path = demo/dep/quic
-	url = https://github.com/briar-systems/mach-quic
-[submodule "demo/dep/acme"]
-	path = demo/dep/acme
-	url = https://github.com/briar-systems/mach-acme
-[submodule "demo/dep/hedge"]
-	path = demo/dep/hedge
-	url = https://github.com/briar-systems/hedge
 [submodule "doc/bench/laurel/dep/std"]
 	path = doc/bench/laurel/dep/std
 	url = https://github.com/briar-systems/mach-std
@@ -37,24 +25,3 @@
 [submodule "doc/bench/laurel/dep/http"]
 	path = doc/bench/laurel/dep/http
 	url = https://github.com/briar-systems/mach-http
-[submodule "doc/bench/laurel/dep/tls"]
-	path = doc/bench/laurel/dep/tls
-	url = https://github.com/briar-systems/mach-tls
-[submodule "doc/bench/laurel/dep/quic"]
-	path = doc/bench/laurel/dep/quic
-	url = https://github.com/briar-systems/mach-quic
-[submodule "doc/bench/laurel/dep/acme"]
-	path = doc/bench/laurel/dep/acme
-	url = https://github.com/briar-systems/mach-acme
-[submodule "doc/bench/laurel/dep/hedge"]
-	path = doc/bench/laurel/dep/hedge
-	url = https://github.com/briar-systems/hedge
-[submodule "demo/standalone/dep/std"]
-	path = demo/standalone/dep/std
-	url = https://github.com/briar-systems/mach-std
-[submodule "demo/standalone/dep/http"]
-	path = demo/standalone/dep/http
-	url = https://github.com/briar-systems/mach-http
-[submodule "demo/standalone/dep/crypto"]
-	path = demo/standalone/dep/crypto
-	url = https://github.com/briar-systems/mach-crypto

@@ -113,8 +113,7 @@ start_server() {
     shift 2
     case "$name" in
         laurel)
-            sed "s|127.0.0.1:8081|127.0.0.1:$port|" laurel/hedge.toml > "$work/laurel-$port.toml"
-            "$laurel_bin" "$work/laurel-$port.toml" >"$work/$name.log" 2>&1 &
+            BENCH_PORT="$port" "$laurel_bin" >"$work/$name.log" 2>&1 &
             ;;
         go1)
             GOMAXPROCS=1 BENCH_ADDR="127.0.0.1:$port" ./go/go-bench >"$work/$name.log" 2>&1 &
@@ -173,7 +172,7 @@ warmup() {
 }
 
 servers=(
-    "laurel|$PORT_LAUREL|Laurel + hedge (single threaded)"
+    "laurel|$PORT_LAUREL|Laurel on laurel.serve (single threaded)"
     "go1|$PORT_GO1|Go net/http (GOMAXPROCS=1)"
     "axum1|$PORT_AXUM1|axum (tokio current_thread)"
     "gon|$PORT_GON|Go net/http (all cores)"
@@ -228,16 +227,8 @@ GO_VERSION="$( { go version 2>/dev/null || true; } | head -n 1 )"
 [ -n "$GO_VERSION" ] || GO_VERSION="unknown"
 RUSTC_VERSION="$( { rustc --version 2>/dev/null || true; } | head -n 1 )"
 [ -n "$RUSTC_VERSION" ] || RUSTC_VERSION="unknown"
-dep_ref() {
-    awk -v want="[dep.$1]" '
-        $0 == want { found = 1; next }
-        found && /^ref[ \t]*=/ { gsub(/[",]/, "", $3); print $3; exit }
-        found && /^\[/ { exit }
-    ' laurel/mach.toml
-}
 # the server builds laurel from this working tree, so its version is the commit
 LAUREL_VERSION="working tree at $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-HEDGE_VERSION="$(dep_ref hedge)"
 
 python3 report.py \
     --results "$results" \
@@ -247,7 +238,6 @@ python3 report.py \
     --oha "$oha_version" \
     --mach "$MACH_VERSION" \
     --laurel "$LAUREL_VERSION" \
-    --hedge "$HEDGE_VERSION" \
     --go "$GO_VERSION" \
     --rustc "$RUSTC_VERSION" \
     > "$report"

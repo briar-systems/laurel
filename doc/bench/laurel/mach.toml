@@ -44,25 +44,14 @@ targets = ["*"]
 link = []
 need = []
 
-# std and http are imported directly. mach resolves one of each for the whole
-# build, so these ranges admit the exact releases hedge selects.
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
 version = "^9.0"
 
-# the laurel this benchmark lives in, so it measures the working tree. the path
-# overrides the laurel release hedge itself selects.
+# the laurel this benchmark lives in, so it measures the working tree
 [dep.laurel]
 path = "../../../"
 
-[dep.hedge]
-git = "https://github.com/briar-systems/hedge"
-version = "=0.12.0"
-
-# laurel needs http 0.23 for laurel.serve, and hedge 0.12.0 pins =0.21.0.
-# http 0.22 and 0.23 add the server runner, which hedge does not use, and fix
-# the h1 engine compatibly, so the root overrides hedge's pin until this
-# hedge-hosted build moves to graft
 [dep.http]
 git = "https://github.com/briar-systems/mach-http"
-ref = "tag/v0.23.0"
+version = "^0.24"

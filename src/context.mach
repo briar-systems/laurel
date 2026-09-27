@@ -73,6 +73,18 @@ pub rec Params {
     generation: u64;
 }
 
+# wakes the host that runs a request, or the connection it upgraded, from any
+# thread. slot and generation name the target in the host's own terms, so a
+# waker kept past its request finds a newer generation and wakes nothing
+pub def WakeFun: fun(ptr, usize, u64) bool;
+
+pub rec Waker {
+    ctx:        ptr;
+    slot:       usize;
+    generation: u64;
+    wake:       WakeFun;
+}
+
 pub rec Context {
     exchange:          *exchange.Exchange;
     generation:        u64;
@@ -87,6 +99,8 @@ pub rec Context {
     principal_state:   PrincipalState;
     recorder:          ptr;
     session:           ptr;
+    upgrade:           ptr;
+    waker:             Waker;
     request_id:        view.View;
     request_id_limit:  usize;
     execution_state:   ptr;
@@ -147,6 +161,30 @@ fun exchange_matches(context: *Context) bool {
     ret true;
 }
 
+pub fun no_waker() Waker {
+    ret Waker{ctx: nil, slot: 0, generation: 0, wake: nil};
+}
+
+# false when the waker is empty or its target is gone
+pub fun wake(waker: Waker) bool {
+    if (waker.wake == nil) { ret false; }
+    ret waker.wake(waker.ctx, waker.slot, waker.generation);
+}
+
+# the host names how to wake this request, once it is bound
+pub fun attach_waker(context: *Context, waker: Waker) bool {
+    if (!active(context) || waker.wake == nil) { ret false; }
+    context.waker = waker;
+    ret true;
+}
+
+# how to wake this request's host from any thread, such as a streamed response
+# body whose source returned pending. empty under a host that supplies none
+pub fun waker(context: *Context) Waker {
+    if (!active(context)) { ret no_waker(); }
+    ret context.waker;
+}
+
 fun clear(context: *Context) {
     context.exchange          = nil;
     context.generation        = 0;
@@ -161,6 +199,8 @@ fun clear(context: *Context) {
     context.principal_state   = PRINCIPAL_NONE;
     context.recorder          = nil;
     context.session           = nil;
+    context.upgrade           = nil;
+    context.waker             = no_waker();
     context.request_id        = view.view(nil, 0);
     context.request_id_limit  = 0;
     context.execution_state   = nil;
@@ -203,6 +243,8 @@ pub fun bind(context: *Context, exchange_ptr: *exchange.Exchange, params: Params
     context.principal_state   = PRINCIPAL_NONE;
     context.recorder          = nil;
     context.session           = nil;
+    context.upgrade           = nil;
+    context.waker             = no_waker();
     context.request_id        = request_id;
     context.request_id_limit  = request_id_limit;
     context.execution_state   = nil;

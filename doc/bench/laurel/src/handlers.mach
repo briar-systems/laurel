@@ -26,7 +26,7 @@ val FORM_FIELDS:     usize = 4;
 val FORM_BYTES:      usize = 512;
 val FORM_READ_BYTES: usize = 256;
 
-# one application serves every hedge worker, so the count is atomic
+# a host may call the application from several threads, so the count is atomic
 pub rec State {
     requests: i64;
 }
@@ -174,10 +174,10 @@ pub fun echo(ctx: ptr, request_context: *context.Context,
 
 # POST /submit
 #
-# hedge enters a service at the request headers, before any body byte has been
-# read, so the first poll of the body usually suspends. the handler leaves the
-# chain with the pending token and is resumed with exactly that read settled,
-# and everything it needs across the suspension lives in this record.
+# the server enters the application at the request headers, before any body
+# byte has been read, so the first poll of the body usually suspends. the
+# handler leaves the chain with the pending token and is resumed with exactly
+# that read settled, and everything it needs across the suspension lives in this record.
 rec FormWork {
     fields:  [FORM_FIELDS]form.Field;
     bytes:   [FORM_BYTES]u8;

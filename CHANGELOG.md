@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-27
+
+### Added
+- WebSockets under `laurel.serve`, through http 0.24's tunnel (#191). `realtime.Session` is a websocket a host runs after the upgrade. A handler initializes one with `realtime.init_session`, asks for the upgrade with `realtime.upgrade(request_context, session, protocol)` and responds without committing, and the host negotiates and commits the 101 with `realtime.accept_upgrade` once the middleware has run, answering 400 when that fails. The session hears `SIGNAL_OPEN`, `SIGNAL_MESSAGE`, `SIGNAL_WAKE`, `SIGNAL_DRAIN` and `SIGNAL_CLOSE`, sends with `session_send` and `session_close`, and its end callback runs once. Pings, a peer's close and protocol errors are answered without the application. The host side is `session_open`, `session_input`, `session_output`, `session_wake`, `session_next`, `session_drain`, `session_reading`, `session_finished` and `session_end`, so any host can run a session, not just `laurel.serve`. `serve.run` installs the tunnel, which feeds the session from two `serve.TUNNEL_BUFFER_BYTES` buffers taken from the request arena and follows a drain with `SIGNAL_DRAIN` and a 1001 close. A cut tunnel ends its session, and a connection upgraded without a session, or a CONNECT, is closed. graft and `laurel.testing` do not run sessions yet: under them a handler's `realtime.upgrade` is accepted but nothing commits the 101.
+- Wakers (#191). `context.Waker` is a value the host supplies with each request, attached with `context.attach_waker`, read with `context.waker` and fired with `context.wake`. A streamed response whose source returned pending is pulled again only when the host is woken, so an application under `laurel.serve` can now feed a long response, such as a `text/event-stream`, from another thread. The waker names its target by slot and generation, so one kept past its request wakes nothing.
+- `response_timeout_ns` and `tunnel_timeout_ns` are exposed in `serve.Config.server` with the other server timeouts, and `doc/serve.md` documents them in a timeout table. The default config has no whole-request cap, so a stream lives as long as it makes progress (#191).
+
+### Changed
+- **Breaking.** Dependencies: http `^0.24` at v0.24.0 (was `^0.23` at v0.23.0), for the tunnel and the progress deadline (#191). Resolution is flat, so a consumer must move to http 0.24 with it. std and crypto are unchanged.
+- `realtime.negotiate` is documented as a host primitive. laurel treats a response committed during the middleware chain as a cancelled request, so a handler asks for the upgrade instead (#191).
+- The hedge-hosted demo and every hedge dependency are removed, since graft's `example/` carries it now (#193). The standalone demo, hosted by `laurel.serve`, moves up to `demo/`, keeping project id `standalone` and artifact `laurel-standalone`. The bench server `doc/bench/laurel` runs on `laurel.serve` on one thread with `http ^0.24` and no hedge, tls, quic or acme pins, and `run.sh` and `report.py` drop the hedge config. README and `doc/serve.md` point at graft for hosting inside hedge. CI builds and tests `demo` and builds `doc/bench/laurel`.
+
+### Removed
+- `doc/bench/COMPARISON.md` and `doc/bench/results/2026-09-05-D00.md`, which measured laurel hosted on hedge and are not numbers laurel can reproduce. A fresh `run.sh` run writes new results (#193).
+
 ## [0.20.0] - 2026-09-27
 
 ### Added
