@@ -27,3 +27,4 @@ fwd laurel.secret;
 fwd laurel.config;
 fwd laurel.task;
 fwd laurel.task.runner;
+fwd laurel.serve;

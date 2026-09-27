@@ -1,0 +1,1410 @@
+# run a laurel application standalone on mach-http's HTTP/1.1 server runner
+#
+# a Host is the process's host for one application. it owns the built-in
+# providers (a task runner on its own thread, configuration and secrets from the
+# environment, telemetry to stderr), which the application reaches through the
+# ordinary provider set, and `run` serves the application on
+# `http.server.server` until SIGTERM or SIGINT drains it. every request is bound,
+# executed, resumed and released through the same `app` calls any host makes, so
+# the application code is the same under `run` and under `laurel.testing`.
+# see doc/providers.md and README.md
+
+use crypto.contracts;
+use http.core.exchange;
+use http.core.field;
+use http.core.message;
+use http.core.method;
+use http.core.status;
+use http.core.target;
+use http_router: http.router.router;
+use hs:          http.server.server;
+use laurel.app;
+use laurel.config;
+use laurel.context;
+use laurel.error;
+use laurel.handler;
+use laurel.lifecycle;
+use laurel.middleware;
+use laurel.observability;
+use laurel.provider;
+use laurel.raw;
+use laurel.render;
+use laurel.router;
+use laurel.secret;
+use laurel.security;
+use laurel.task;
+use laurel.task.runner;
+use laurel.testing;
+use A:               std.allocator;
+use fixed_allocator: std.allocator.fixed;
+use std.allocator.page;
+use std.chrono.duration;
+use std.chrono.time;
+use std.crypto.ct;
+use io_error: std.io.error;
+use std.memory;
+use std.net.ip;
+use std.net.tcp;
+use std.process.env;
+use std.process.events;
+use std.sync.atomic;
+use std.sync.cancel;
+use std.sync.condition;
+use std.sync.mutex;
+use std.sync.thread;
+use std.system.os;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_len;
+use std.types.view;
+
+$if ($mach.build.os == $mach.os.linux) {
+    use std.system.os.linux;
+}
+$or ($mach.build.os == $mach.os.darwin) {
+    use std.system.os.darwin.libsystem;
+}
+
+# the longest secret the environment resolver hands out
+pub val MAX_SECRET_BYTES: usize = 4096;
+# the longest environment variable prefix
+pub val MAX_PREFIX_BYTES: usize = 64;
+# the request identifier laurel.serve renders for every request
+pub val REQUEST_ID_BYTES: usize = 32;
+
+val MAX_ENV_NAME_BYTES: usize = 192;
+val SIGNAL_POLL_MS:     i32   = 100;
+val ALIGN:              usize = 16;
+
+pub def Failure: u8;
+pub val FAILURE_NONE: Failure = 0;
+# the configuration, the host or the application was not in a state to serve
+pub val FAILURE_INVALID: Failure = 1;
+# the server could not be made from the configuration
+pub val FAILURE_SERVER: Failure = 2;
+# the task thread, the signal thread, or the process's signal source failed
+pub val FAILURE_HOST: Failure = 3;
+# the application's lifecycle failed; Report.lifecycle says where
+pub val FAILURE_APPLICATION: Failure = 4;
+# the server ended with a failure of its own; Report.server.failure says which
+pub val FAILURE_SERVING: Failure = 5;
+
+# the built-in providers
+# ---
+# config_prefix:    configuration key `a.b-c` reads environment variable
+#                   `<prefix>A_B_C`
+# secret_prefix:    secret `name` reads environment variable `<prefix>NAME`
+# telemetry:        write application signals to stderr, one line each; false
+#                   drops them
+# step_interval_ns: how soon a task step that returned PENDING is stepped again
+pub rec Options {
+    config_prefix:    view.View;
+    secret_prefix:    view.View;
+    telemetry:        bool;
+    step_interval_ns: u64;
+}
+
+pub def ReadyFun: fun(ptr, ip.Endpoint);
+
+# what run serves and how
+# ---
+# server:              mach-http's server configuration. drain_timeout_ns bounds
+#                      the drain a signal starts, and request_memory_bytes is
+#                      derived from request_arena_bytes
+# request_arena_bytes: each request's allocator, for routing and handlers
+# signals:             SIGTERM and SIGINT (and a console close or service stop
+#                      on windows) begin the drain
+# allocator:           the server's records and buffers, nil for pages
+# ready:               called with the bound address once the application is
+#                      ready and the server accepts, may be nil
+pub rec Config {
+    server:              hs.Config;
+    request_arena_bytes: usize;
+    signals:             bool;
+    allocator:           *A.Allocator;
+    ready:               ReadyFun;
+    ready_ctx:           ptr;
+}
+
+# what run did
+# ---
+# failure:   why run ended early or failed, FAILURE_NONE after a clean drain
+# server:    the server's own report
+# lifecycle: the application transition that failed, when failure says so
+# tasks:     the task provider's drain: abandoned counts runs cut off at the deadline
+pub rec Report {
+    failure:   Failure;
+    server:    hs.Report;
+    lifecycle: lifecycle.Transition;
+    tasks:     task.Drain;
+}
+
+# the process's host for one application. caller-owned, and it must not move
+# once init has run
+pub rec Host {
+    options:       Options;
+    runner:        runner.Runner;
+    config:        config.Provider;
+    secrets:       secret.Source;
+    resolver_slot: usize;
+    telemetry:     observability.Telemetry;
+    entry:         provider.Provider;
+    lock:          mutex.Mutex;
+    wake:          condition.Condition;
+    woken:         bool;
+    exiting:       bool;
+    task_thread:   thread.Thread;
+    task_live:     bool;
+    signal_source: events.Source;
+    signal_thread: thread.Thread;
+    signal_live:   bool;
+    finished:      i64;
+    server:        hs.Server;
+    server_made:   bool;
+    pages:         A.Allocator;
+    application:   *app.App;
+    configured:    Config;
+    tasks:         *task.Provider;
+    deadline:      time.Instant;
+    draining:      bool;
+    drained:       bool;
+    task_drain:    task.Drain;
+    failed:        lifecycle.Transition;
+    has_failure:   bool;
+    endpoint:      ip.Endpoint;
+    id_prefix:     u64;
+    id_counter:    u64;
+    running:       bool;
+    valid:         bool;
+}
+
+# one exchange's laurel state, at the head of the exchange's scratch. the
+# execution is laurel's cursor across suspensions, so it lives as long as the
+# exchange does
+rec RequestState {
+    started:      bool;
+    bound:        bool;
+    terminal:     router.Terminal;
+    context:      context.Context;
+    recorder:     observability.Recorder;
+    execution:    middleware.Execution;
+    outcome:      middleware.Outcome;
+    allocator:    A.Allocator;
+    arena:        fixed_allocator.FixedState;
+    identifier:   [32]u8;
+    deadline:     time.Instant;
+    has_deadline: bool;
+}
+
+# the environment resolver is secret welded through its callback type, so it
+# never lives in a Host. each host registers one slot of this table
+var resolvers:      [8]secret.Resolver;
+var resolver_used:  [8]bool;
+var resolver_lock:  mutex.Mutex = 0;
+var resolver_hosts: [8]*Host;
+
+pub fun options_default() Options {
+    ret Options{config_prefix: view.view(nil, 0), secret_prefix: view.view(nil, 0),
+        telemetry: true, step_interval_ns: 10000000};
+}
+
+pub fun config_default(address: ip.Endpoint) Config {
+    ret Config{server: hs.config_default(address), request_arena_bytes: 16384, signals: true,
+        allocator: nil, ready: nil, ready_ctx: nil};
+}
+
+fun now() time.Instant {
+    val clock: time.InstantClock = time.instant();
+    if (sel clock.err) { ret time.Instant{sec: 0, nsec: 0}; }
+    ret clock.ok;
+}
+
+fun prefix_valid(prefix: view.View) bool {
+    if (prefix.len == 0)                                     { ret true; }
+    if (prefix.data == nil || prefix.len > MAX_PREFIX_BYTES) { ret false; }
+    var i: usize = 0;
+    for (i < prefix.len) {
+        val byte: u8 = prefix.data[i];
+        if (!((byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9') || byte == '_')) {
+            ret false;
+        }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun options_valid(options: Options) bool {
+    ret prefix_valid(options.config_prefix) && prefix_valid(options.secret_prefix)
+        && options.step_interval_ns != 0 && options.step_interval_ns <= 0x7fffffffffffffff;
+}
+
+# the environment variable for a key or name: the prefix, then the name with
+# letters upper cased and every other byte but a digit as `_`
+fun env_name(prefix: view.View, name: view.View, output: *u8) usize {
+    if (prefix.len + name.len >= MAX_ENV_NAME_BYTES) { ret 0; }
+    var i: usize = 0;
+    for (i < prefix.len) {
+        output[i] = prefix.data[i];
+        i         = i + 1;
+    }
+    var j: usize = 0;
+    for (j < name.len) {
+        var byte: u8 = name.data[j];
+        if (byte >= 'a' && byte <= 'z')                                      { byte = byte - 32; }
+        or (!((byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9'))) { byte = '_'; }
+        output[i + j] = byte;
+        j             = j + 1;
+    }
+    output[i + j] = 0;
+    ret i + j;
+}
+
+fun name_byte_equal(a: u8, b: u8) bool {
+    $if ($mach.build.os == $mach.os.windows) {
+        var left:  u8 = a;
+        var right: u8 = b;
+        if (left >= 'a' && left <= 'z')   { left = left - 32; }
+        if (right >= 'a' && right <= 'z') { right = right - 32; }
+        ret left == right;
+    }
+    $or {
+        ret a == b;
+    }
+}
+
+# the value of an environment variable, read in place from the environment the
+# process started with. nil data when it is unset
+fun lookup(name: *u8, length: usize) view.View {
+    val entries: **u8 = env.environ();
+    if (entries == nil || length == 0) { ret view.view(nil, 0); }
+    var i: usize = 0;
+    for (entries[i] != nil) {
+        val entry: *u8   = entries[i];
+        var k:     usize = 0;
+        for (k < length && entry[k] != 0 && name_byte_equal(entry[k], name[k])) { k = k + 1; }
+        if (k == length && entry[k] == '=') {
+            val value: *u8   = ?entry[k + 1];
+            var size:  usize = 0;
+            for (value[size] != 0) { size = size + 1; }
+            ret view.view(value, size);
+        }
+        i = i + 1;
+    }
+    ret view.view(nil, 0);
+}
+
+fun env_config_read(ctx: ptr, key: view.View, output: *u8, capacity: usize) config.Read {
+    val host:   *Host = ctx::*Host;
+    var name:   [192]u8;
+    val length: usize = env_name(host.options.config_prefix, key, ?name[0]);
+    if (length == 0) { ret config.Read{status: config.READ_INVALID, len: 0}; }
+    val value: view.View = lookup(?name[0], length);
+    if (value.data == nil)    { ret config.Read{status: config.READ_MISSING, len: 0}; }
+    if (value.len > capacity) { ret config.Read{status: config.READ_TOO_LARGE, len: value.len}; }
+    if (value.len > 0)        { memory.raw_copy(output, value.data, value.len); }
+    ret config.Read{status: config.READ_FOUND, len: value.len};
+}
+
+fun resolver_host(slot: usize) *Host {
+    mutex.lock(?resolver_lock);
+    var host: *Host = nil;
+    if (slot < secret.MAX_RESOLVERS && resolver_used[slot]) { host = resolver_hosts[slot]; }
+    mutex.unlock(?resolver_lock);
+    ret host;
+}
+
+# the secret is copied into welded scratch for the call, and wiped after
+fun env_borrow(ctx: ptr, name: view.View, use: secret.UseFun, use_ctx: ptr) secret.Status {
+    val host: *Host = resolver_host(ctx::usize);
+    if (host == nil) { ret secret.BORROW_INVALID; }
+    var variable: [192]u8;
+    val length:   usize = env_name(host.options.secret_prefix, name, ?variable[0]);
+    if (length == 0) { ret secret.BORROW_INVALID; }
+    val value: view.View = lookup(?variable[0], length);
+    if (value.data == nil)            { ret secret.BORROW_MISSING; }
+    if (value.len > MAX_SECRET_BYTES) { ret secret.BORROW_REFUSED; }
+    var scratch: [4096]^u8;
+    var i:       usize = 0;
+    for (i < value.len) {
+        scratch[i] = value.data[i];
+        i          = i + 1;
+    }
+    val used: bool = use(use_ctx, contracts.SecretBytes{data: ?scratch[0], len: value.len});
+    ct.zeroize(?scratch[0], MAX_SECRET_BYTES);
+    if (!used) { ret secret.BORROW_REFUSED; }
+    ret secret.BORROW_OK;
+}
+
+fun register_resolver(host: *Host) bool {
+    mutex.lock(?resolver_lock);
+    var slot: usize = 0;
+    for (slot < secret.MAX_RESOLVERS && resolver_used[slot]) { slot = slot + 1; }
+    if (slot == secret.MAX_RESOLVERS) {
+        mutex.unlock(?resolver_lock);
+        ret false;
+    }
+    resolver_used[slot]  = true;
+    resolver_hosts[slot] = host;
+    resolvers[slot]      = secret.Resolver{ctx: slot::ptr, borrow: env_borrow};
+    mutex.unlock(?resolver_lock);
+    if (!secret.register(?resolvers[slot], ?host.secrets)) {
+        mutex.lock(?resolver_lock);
+        resolver_used[slot]  = false;
+        resolver_hosts[slot] = nil;
+        mutex.unlock(?resolver_lock);
+        ret false;
+    }
+    host.resolver_slot = slot;
+    ret true;
+}
+
+fun unregister_resolver(host: *Host) bool {
+    if (!secret.unregister(host.secrets)) { ret false; }
+    mutex.lock(?resolver_lock);
+    resolver_used[host.resolver_slot]  = false;
+    resolver_hosts[host.resolver_slot] = nil;
+    mutex.unlock(?resolver_lock);
+    ret true;
+}
+
+fun append(line: *u8, capacity: usize, length: usize, bytes: *u8, count: usize) usize {
+    if (length + count > capacity) { ret length; }
+    if (count > 0)                 { memory.raw_copy(?line[length], bytes, count); }
+    ret length + count;
+}
+
+fun append_text(line: *u8, capacity: usize, length: usize, text: str) usize {
+    ret append(line, capacity, length, text, str_len(text));
+}
+
+fun append_i64(line: *u8, capacity: usize, length: usize, value: i64) usize {
+    var digits: [24]u8;
+    var count:  usize = 0;
+    var rest:   u64   = value::u64;
+    if (value < 0) { rest = (0 - value)::u64; }
+    for (count == 0 || rest != 0) {
+        digits[23 - count] = '0' + (rest % 10)::u8;
+        rest               = rest / 10;
+        count              = count + 1;
+    }
+    if (value < 0) {
+        digits[23 - count] = '-';
+        count              = count + 1;
+    }
+    ret append(line, capacity, length, ?digits[24 - count], count);
+}
+
+# one line per signal, written with one call so lines from threads never interleave
+fun stderr_emit(ctx: ptr, signal: *observability.Signal) {
+    if (signal == nil || !signal.valid) { ret; }
+    var line:   [1024]u8;
+    var length: usize = append_text(?line[0], 1024, 0, "telemetry ");
+    if (signal.kind == observability.SIGNAL_COUNTER) { length = append_text(?line[0], 1024, length, "counter "); }
+    or (signal.kind == observability.SIGNAL_GAUGE)   { length = append_text(?line[0], 1024, length, "gauge "); }
+    or                                               { length = append_text(?line[0], 1024, length, "event "); }
+    length = append(?line[0], 1024, length, ?signal.name.bytes[0], signal.name.len);
+    length = append_text(?line[0], 1024, length, " ");
+    length = append_i64(?line[0], 1024, length, signal.value);
+    var i: usize = 0;
+    for (i < signal.label_len) {
+        val label: *observability.Label = ?signal.labels[i];
+        length = append_text(?line[0], 1024, length, " ");
+        length = append(?line[0], 1024, length, ?label.name.bytes[0], label.name.len);
+        length = append_text(?line[0], 1024, length, "=");
+        length = append(?line[0], 1024, length, ?label.value.bytes[0], label.value.len);
+        i      = i + 1;
+    }
+    length = append_text(?line[0], 1024, length, "\n");
+    os.write(os.stderr(), ?line[0], length);
+}
+
+fun discard_emit(ctx: ptr, signal: *observability.Signal) {}
+
+fun key_equal(a: view.View, b: view.View) bool {
+    ret a.len == b.len && a.data != nil && b.data != nil && memory.raw_equal(a.data, b.data, a.len);
+}
+
+# the built-in providers under their keys; any other key is not the host's
+fun resolve_builtin(ctx: ptr, key: view.View) res[ptr, view.View] {
+    val host: *Host = ctx::*Host;
+    if (key_equal(key, task.key())) {
+        ret res[ptr, view.View].ok{runner.provider(?host.runner)::ptr};
+    }
+    if (key_equal(key, config.key())) { ret res[ptr, view.View].ok{(?host.config)::ptr}; }
+    if (key_equal(key, secret.key())) { ret res[ptr, view.View].ok{(?host.secrets)::ptr}; }
+    if (key_equal(key, observability.telemetry_key())) {
+        ret res[ptr, view.View].ok{(?host.telemetry)::ptr};
+    }
+    ret res[ptr, view.View].ok{nil};
+}
+
+fun wake_tasks(ctx: ptr) {
+    val host: *Host = ctx::*Host;
+    mutex.lock(?host.lock);
+    host.woken = true;
+    condition.signal(?host.wake);
+    mutex.unlock(?host.lock);
+}
+
+fun hex(value: u64, output: *u8) {
+    var i: usize = 0;
+    for (i < 16) {
+        val nibble: u8 = ((value >> ((15 - i) * 4)::u64) & 0x0f)::u8;
+        if (nibble < 10) { output[i] = '0' + nibble; }
+        or               { output[i] = 'a' + nibble - 10; }
+        i = i + 1;
+    }
+}
+
+# prepares the built-in providers. nothing runs until run
+pub fun init(host: *Host, options: Options) bool {
+    if (host == nil || host.valid || !options_valid(options)) { ret false; }
+    host.options      = options;
+    host.runner.valid = false;
+    host.lock         = mutex.make();
+    host.wake         = condition.make();
+    host.woken        = false;
+    host.exiting      = false;
+    host.task_live    = false;
+    host.signal_live  = false;
+    host.finished     = 0;
+    host.server_made  = false;
+    host.application  = nil;
+    host.running      = false;
+    host.id_counter   = 0;
+    host.id_prefix    = 0;
+    val wall: time.Clock = time.now();
+    if (sel wall.ok) { host.id_prefix = (wall.ok.sec::u64 * 1000000000) + wall.ok.nsec::u64; }
+    host.config    = config.Provider{ctx: host::ptr, read: env_config_read};
+    host.telemetry = observability.Telemetry{ctx: host::ptr, emit: discard_emit};
+    if (options.telemetry) { host.telemetry.emit = stderr_emit; }
+    host.entry = provider.Provider{ctx: host::ptr, resolve: resolve_builtin};
+    if (!register_resolver(host)) { ret false; }
+    if (!runner.init(?host.runner, host.secrets)) {
+        unregister_resolver(host);
+        ret false;
+    }
+    runner.on_wake(?host.runner, wake_tasks, host::ptr);
+    host.valid = true;
+    ret true;
+}
+
+# the built-in providers as one provider.Set entry. an application that
+# supplies its own task runner, configuration, secrets or telemetry lists its
+# provider before this one, and the first provider that owns a key wins
+pub fun providers(host: *Host) provider.Provider {
+    if (host == nil || !host.valid) { ret provider.Provider{ctx: nil, resolve: nil}; }
+    ret host.entry;
+}
+
+pub fun task_runner(host: *Host) *runner.Runner {
+    if (host == nil || !host.valid) { ret nil; }
+    ret ?host.runner;
+}
+
+# begins the drain from any thread, the same drain a signal begins
+pub fun shutdown(host: *Host) bool {
+    if (host == nil || !host.valid || !host.server_made) { ret false; }
+    ret hs.shutdown(?host.server);
+}
+
+fun task_main(argument: *u8) {
+    val host: *Host = argument::*Host;
+    val pace: u64   = host.options.step_interval_ns;
+    mutex.lock(?host.lock);
+    for (!host.exiting) {
+        host.woken = false;
+        mutex.unlock(?host.lock);
+        runner.poll(?host.runner, now());
+        val current: time.Instant      = now();
+        val due:     opt[time.Instant] = runner.next_due(?host.runner, current);
+        var timed:   bool              = false;
+        var until:   time.Instant      = current;
+        if (sel due.some) {
+            timed = true;
+            until = due.some;
+        }
+        # a run in flight is stepped again after the pacing interval
+        if (timed && !time.instant_before(current, until)) {
+            until = time.instant_add(current, pace::i64);
+        }
+        mutex.lock(?host.lock);
+        if (!host.woken && !host.exiting) {
+            if (timed) { condition.wait_until(?host.wake, ?host.lock, until); }
+            or         { condition.wait(?host.wake, ?host.lock); }
+        }
+    }
+    mutex.unlock(?host.lock);
+}
+
+fun stop_event(kind: events.Kind) bool {
+    ret kind == events.TERMINATE || kind == events.INTERRUPT || kind == events.CONSOLE_CLOSE
+        || kind == events.SERVICE_STOP;
+}
+
+# signals begin the drain; the thread ends once run has finished serving
+fun signal_main(argument: *u8) {
+    val host: *Host = argument::*Host;
+    for (atomic.load(?host.finished) == 0) {
+        events.wait(?host.signal_source, SIGNAL_POLL_MS);
+        for (true) {
+            val next: res[opt[events.Event], io_error.Error] = events.next(?host.signal_source);
+            if (sel next.err)                  { brk; }
+            if (sel next.ok.none)              { brk; }
+            if (stop_event(next.ok.some.kind)) { hs.shutdown(?host.server); }
+        }
+    }
+}
+
+fun thread_ok(outcome: thread.Operation) bool {
+    ret sel outcome.ok;
+}
+
+fun events_ok(outcome: err[io_error.Error]) bool {
+    ret sel outcome.ok;
+}
+
+fun start_threads(host: *Host) bool {
+    mutex.lock(?host.lock);
+    host.exiting = false;
+    mutex.unlock(?host.lock);
+    atomic.store(?host.finished, 0);
+    if (!thread_ok(thread.spawn_with(task_main, host::*u8, ?host.task_thread))) { ret false; }
+    host.task_live = true;
+    if (!host.configured.signals)                     { ret true; }
+    if (!events_ok(events.make(?host.signal_source))) { ret false; }
+    if (!thread_ok(thread.spawn_with(signal_main, host::*u8, ?host.signal_thread))) {
+        events.close(?host.signal_source);
+        ret false;
+    }
+    host.signal_live = true;
+    ret true;
+}
+
+fun stop_threads(host: *Host) {
+    atomic.store(?host.finished, 1);
+    if (host.signal_live) {
+        thread.join(?host.signal_thread);
+        events.close(?host.signal_source);
+        host.signal_live = false;
+    }
+    if (host.task_live) {
+        mutex.lock(?host.lock);
+        host.exiting = true;
+        condition.signal(?host.wake);
+        mutex.unlock(?host.lock);
+        thread.join(?host.task_thread);
+        host.task_live = false;
+    }
+}
+
+fun record_failure(host: *Host, transition: lifecycle.Transition) {
+    if (host.has_failure) { ret; }
+    host.failed      = transition;
+    host.has_failure = true;
+}
+
+fun hook_status(host: *Host, transition: lifecycle.Transition) hs.HookStatus {
+    if (transition.status == lifecycle.TRANSITION_OK)      { ret hs.HOOK_DONE; }
+    if (transition.status == lifecycle.TRANSITION_PENDING) { ret hs.HOOK_PENDING; }
+    record_failure(host, transition);
+    ret hs.HOOK_FAILED;
+}
+
+fun hook_start(ctx: ptr) hs.HookStatus {
+    val host: *Host = ctx::*Host;
+    ret hook_status(host, app.start(host.application));
+}
+
+fun hook_ready(ctx: ptr, endpoint: ip.Endpoint) hs.HookStatus {
+    val host:   *Host         = ctx::*Host;
+    val result: hs.HookStatus = hook_status(host, app.poll_ready(host.application));
+    if (result == hs.HOOK_DONE) {
+        host.endpoint = endpoint;
+        if (host.configured.ready != nil) { host.configured.ready(host.configured.ready_ctx, endpoint); }
+    }
+    ret result;
+}
+
+# the task provider the application runs on drains beside the application
+fun drain_tasks(host: *Host) bool {
+    if (host.tasks == nil) { ret true; }
+    host.task_drain = task.drain(host.tasks, opt[time.Instant].some{host.deadline});
+    ret host.task_drain.status == task.DRAIN_DONE;
+}
+
+fun hook_drain(ctx: ptr, deadline: time.Instant) hs.HookStatus {
+    val host: *Host = ctx::*Host;
+    if (!host.draining) {
+        host.draining = true;
+        host.deadline = deadline;
+    }
+    val tasks_done: bool = drain_tasks(host);
+    if (host.drained) {
+        if (tasks_done) { ret hs.HOOK_DONE; }
+        ret hs.HOOK_PENDING;
+    }
+    val result: hs.HookStatus = hook_status(host,
+        app.drain(host.application, opt[time.Instant].some{host.deadline}));
+    if (result == hs.HOOK_DONE) {
+        host.drained = true;
+        if (!tasks_done) { ret hs.HOOK_PENDING; }
+    }
+    ret result;
+}
+
+# a stop that ran every component's stop still answers the failure before it,
+# which was already recorded, so it is done
+fun stop_application(host: *Host) hs.HookStatus {
+    val application: *app.App             = host.application;
+    val result:      lifecycle.Transition = app.stop(application);
+    if (result.status == lifecycle.TRANSITION_FAILED && lifecycle.terminal(application.lifecycle)) {
+        record_failure(host, result);
+        val cleanup: lifecycle.Transition = app.cleanup_failure(application);
+        if (cleanup.status != lifecycle.TRANSITION_OK) { record_failure(host, cleanup); }
+        ret hs.HOOK_DONE;
+    }
+    ret hook_status(host, result);
+}
+
+fun stop_tasks(host: *Host) bool {
+    if (host.tasks == nil) { ret true; }
+    if (!host.draining) {
+        host.draining = true;
+        host.deadline = now();
+    }
+    drain_tasks(host);
+    val stopped: task.Status = task.stop(host.tasks);
+    ret stopped == task.STATUS_OK || stopped == task.STATUS_INVALID;
+}
+
+fun hook_stop(ctx: ptr, report: *hs.Report) hs.HookStatus {
+    val host: *Host = ctx::*Host;
+    if (!lifecycle.terminal(host.application.lifecycle)) {
+        val stopped: hs.HookStatus = stop_application(host);
+        if (stopped != hs.HOOK_DONE) { ret stopped; }
+    }
+    if (!stop_tasks(host)) { ret hs.HOOK_PENDING; }
+    ret hs.HOOK_DONE;
+}
+
+fun request_state(call: *hs.Call) *RequestState {
+    if (call == nil || call.memory == nil || call.memory_bytes < $size_of(RequestState)) { ret nil; }
+    ret call.memory::*RequestState;
+}
+
+fun arena_offset() usize {
+    ret ($size_of(RequestState) + ALIGN - 1) / ALIGN * ALIGN;
+}
+
+# answers without the application: a bodyless status with its framing
+fun answer(call: *hs.Call, code: status.Status) exchange.ServiceStatus {
+    val active: *exchange.Exchange = call.exchange;
+    if (message.set_status(active.response, code) != message.RESPONSE_OK
+        || message.add_field(active.response, field.Field{
+        name:  view.view(field.CONTENT_LENGTH, str_len(field.CONTENT_LENGTH)),
+        value: view.view("0", 1), sensitive: false
+    }) != field.ADD_OK
+        || exchange.commit(active, active.limits) != message.RESPONSE_OK) {
+        ret exchange.SERVICE_FAILED;
+    }
+    ret exchange.SERVICE_COMPLETE;
+}
+
+# a rendered error is a complete response; an unmapped one is the server's 500
+fun settle_outcome(state: *RequestState, call: *hs.Call) exchange.ServiceStatus {
+    val outcome: middleware.Outcome = state.outcome;
+    if (outcome.status == middleware.EXECUTION_PENDING) {
+        if (state.has_deadline) { call.wake_at = opt[time.Instant].some{state.deadline}; }
+        ret exchange.SERVICE_PENDING;
+    }
+    if (outcome.status != middleware.EXECUTION_RESPOND
+        && outcome.status != middleware.EXECUTION_ERROR_RENDERED) {
+        ret exchange.SERVICE_FAILED;
+    }
+    val active: *exchange.Exchange = call.exchange;
+    if (active.response.committed) { ret exchange.SERVICE_COMPLETE; }
+    if (active.response.body_kind == message.BODY_NONE
+        && status.permits_content(active.request.method.kind, active.response.status)
+        && field.find_first(?active.response.fields,
+        view.view(field.CONTENT_LENGTH, str_len(field.CONTENT_LENGTH))) == nil
+        && message.add_field(active.response, field.Field{
+        name:  view.view(field.CONTENT_LENGTH, str_len(field.CONTENT_LENGTH)),
+        value: view.view("0", 1), sensitive: false
+    }) != field.ADD_OK) {
+        ret exchange.SERVICE_FAILED;
+    }
+    if (exchange.commit(active, active.limits) != message.RESPONSE_OK) { ret exchange.SERVICE_FAILED; }
+    ret exchange.SERVICE_COMPLETE;
+}
+
+# re-enter the suspended step, and only it. a handler past its deadline is timed
+# out through the exchange scope it observes, so the step abandons instead
+fun resume_request(host: *Host, state: *RequestState, call: *hs.Call) exchange.ServiceStatus {
+    if (!state.bound || !middleware.suspended(?state.execution)) { ret exchange.SERVICE_FAILED; }
+    if (state.has_deadline && !time.instant_before(now(), state.deadline)) {
+        cancel.timeout(call.exchange.scope);
+    }
+    state.outcome = app.resume(host.application, ?state.execution, ?state.context);
+    ret settle_outcome(state, call);
+}
+
+fun fixed_ok(outcome: err[A.Error]) bool {
+    ret sel outcome.ok;
+}
+
+fun request_id(host: *Host, state: *RequestState) view.View {
+    host.id_counter = host.id_counter + 1;
+    hex(host.id_prefix, ?state.identifier[0]);
+    hex(host.id_counter, ?state.identifier[16]);
+    var length: usize = REQUEST_ID_BYTES;
+    val limit:  usize = host.application.config.limits.max_request_id_bytes;
+    if (limit < length) { length = limit; }
+    ret view.view(?state.identifier[REQUEST_ID_BYTES - length], length);
+}
+
+fun start_request(host: *Host, state: *RequestState, call: *hs.Call) exchange.ServiceStatus {
+    val application: *app.App           = host.application;
+    val active:      *exchange.Exchange = call.exchange;
+    state.started = true;
+    if (!app.can_accept(application)) { ret answer(call, status.SERVICE_UNAVAILABLE); }
+    val offset: usize = arena_offset();
+    if (call.memory_bytes <= offset
+        || !fixed_ok(fixed_allocator.make(?state.allocator, ?state.arena, ?call.memory[offset],
+        call.memory_bytes - offset))) {
+        ret exchange.SERVICE_FAILED;
+    }
+    state.terminal = router.terminal(application.router, application.fallback,
+        router.dispatch(application.router, active.request, ?state.allocator));
+    var params:     context.Params = context.Params{items: nil, len: 0, generation: active.generation};
+    var route_name: view.View      = view.view(nil, 0);
+    if (state.terminal.matched.status == router.DISPATCH_MATCH) {
+        params = state.terminal.matched.params;
+        val name: str = application.router.routes[state.terminal.matched.route].name;
+        if (name != nil) { route_name = view.view(name, str_len(name)); }
+    }
+    if (!app.bind_context(application, ?state.context, ?state.recorder, app.Admission{
+        exchange:   active, params: params, allocator: ?state.allocator,
+        request_id: request_id(host, state), route_name: route_name, started: now()
+    })) {
+        if (!app.can_accept(application)) { ret answer(call, status.SERVICE_UNAVAILABLE); }
+        ret exchange.SERVICE_FAILED;
+    }
+    state.bound        = true;
+    state.has_deadline = context.deadline(?state.context, ?state.deadline);
+    state.outcome      = app.execute(application, ?state.execution,
+        router.terminal_handler(?state.terminal), ?state.context);
+    ret settle_outcome(state, call);
+}
+
+fun bridge_serve(ctx: ptr, call: *hs.Call) exchange.ServiceStatus {
+    val host:  *Host         = ctx::*Host;
+    val state: *RequestState = request_state(call);
+    if (state == nil)  { ret exchange.SERVICE_FAILED; }
+    if (state.started) { ret resume_request(host, state, call); }
+    ret start_request(host, state, call);
+}
+
+# the exchange is going away while a step holds it: every middleware exit half
+# that is owed runs now
+fun bridge_abandon(ctx: ptr, call: *hs.Call) {
+    val host:  *Host         = ctx::*Host;
+    val state: *RequestState = request_state(call);
+    if (state == nil || !state.bound || !middleware.suspended(?state.execution)) { ret; }
+    state.outcome = app.abandon(host.application, ?state.execution, ?state.context);
+}
+
+# the exchange is terminal and its completion final: laurel releases the context
+# and emits the request's terminal event
+fun bridge_settle(ctx: ptr, call: *hs.Call) {
+    val host:  *Host         = ctx::*Host;
+    val state: *RequestState = request_state(call);
+    if (state == nil || !state.bound) { ret; }
+    if (middleware.suspended(?state.execution)) {
+        state.outcome = app.abandon(host.application, ?state.execution, ?state.context);
+    }
+    val active: *exchange.Exchange = call.exchange;
+    app.release_context(host.application, ?state.context, app.Termination{
+        outcome: state.outcome, reason: cancel.reason(active.scope),
+        status:  active.completion.status, transfer: active.completion, finished: now()
+    });
+    state.bound = false;
+}
+
+fun invalid_report(host: *Host, failure: Failure) Report {
+    var report: Report;
+    memory.raw_zero((?report)::*u8, $size_of(Report));
+    report.failure = failure;
+    if (host != nil && host.has_failure) { report.lifecycle = host.failed; }
+    ret report;
+}
+
+fun finish_report(host: *Host, served: hs.Report) Report {
+    var report: Report;
+    memory.raw_zero((?report)::*u8, $size_of(Report));
+    report.server = served;
+    report.tasks  = host.task_drain;
+    if (host.has_failure) {
+        report.failure   = FAILURE_APPLICATION;
+        report.lifecycle = host.failed;
+    }
+    or (served.failure != hs.FAILURE_NONE) {
+        report.failure = FAILURE_SERVING;
+    }
+    ret report;
+}
+
+# a start the server abandoned never reaches its stop hook, so the application
+# and the tasks are stopped here, bounded by the stop timeout
+fun settle_after(host: *Host) {
+    val limit: time.Instant = time.instant_add(now(), host.configured.server.stop_timeout_ns::i64);
+    for (!lifecycle.terminal(host.application.lifecycle) && time.instant_before(now(), limit)) {
+        if (stop_application(host) == hs.HOOK_FAILED) { brk; }
+        os.sleep(host.configured.server.hook_poll_ns::i64);
+    }
+    for (!stop_tasks(host) && time.instant_before(now(), limit)) {
+        os.sleep(host.configured.server.hook_poll_ns::i64);
+    }
+}
+
+# serves the application until a signal or shutdown drains it, and returns once
+# the server, the application and its tasks have stopped. the application must
+# be assembled and not yet started
+pub fun run(host: *Host, application: *app.App, configured: Config) Report {
+    if (host == nil || !host.valid || host.running || application == nil || !application.valid
+        || application.lifecycle.state != lifecycle.ASSEMBLED || configured.request_arena_bytes == 0) {
+        ret invalid_report(host, FAILURE_INVALID);
+    }
+    var server_config: hs.Config = configured.server;
+    server_config.request_memory_bytes = arena_offset() + configured.request_arena_bytes;
+    if (!hs.config_valid(server_config)) { ret invalid_report(host, FAILURE_INVALID); }
+    var allocator: *A.Allocator = configured.allocator;
+    if (allocator == nil) {
+        if (!fixed_ok(page.make(?host.pages))) { ret invalid_report(host, FAILURE_SERVER); }
+        allocator = ?host.pages;
+    }
+    host.running     = true;
+    host.application = application;
+    host.configured  = configured;
+    host.tasks       = task.resolve(application.providers);
+    host.draining    = false;
+    host.drained     = false;
+    host.has_failure = false;
+    host.task_drain  = task.Drain{status: task.DRAIN_DONE, abandoned: 0};
+    val handler: hs.Handler = hs.Handler{ctx: host::ptr, serve: bridge_serve,
+        abandon: bridge_abandon, settle: bridge_settle};
+    val hooks: hs.Hooks = hs.Hooks{ctx: host::ptr, start: hook_start, ready: hook_ready,
+        drain: hook_drain, stop: hook_stop};
+    if (!hs.make(?host.server, server_config, handler, hooks, allocator)) {
+        host.running = false;
+        ret invalid_report(host, FAILURE_SERVER);
+    }
+    host.server_made = true;
+    if (!start_threads(host)) {
+        stop_threads(host);
+        hs.destroy(?host.server);
+        host.server_made = false;
+        host.running     = false;
+        ret invalid_report(host, FAILURE_HOST);
+    }
+    val served: hs.Report = hs.serve(?host.server);
+    if (served.failure == hs.FAILURE_START || served.failure == hs.FAILURE_STATE) { settle_after(host); }
+    stop_threads(host);
+    hs.destroy(?host.server);
+    host.server_made = false;
+    host.running     = false;
+    ret finish_report(host, served);
+}
+
+# releases the built-in providers. the task runner is drained and stopped if
+# run never did it
+pub fun destroy(host: *Host) bool {
+    if (host == nil || !host.valid || host.running) { ret false; }
+    val tasks: *task.Provider = runner.provider(?host.runner);
+    task.drain(tasks, opt[time.Instant].some{now()});
+    task.stop(tasks);
+    if (!runner.destroy(?host.runner) || !unregister_resolver(host)) { ret false; }
+    host.valid = false;
+    ret true;
+}
+
+#[testing]
+val ECHO_LIMIT: usize = 64;
+
+# one application, assembled the same way for laurel.serve and laurel.testing.
+# a lifecycle service registers a task at start and triggers it, the task
+# publishes a snapshot, and the routes answer from per-request arena storage
+#[testing]
+rec Fixture {
+    routes:         [3]router.Route;
+    specifications: [3]http_router.Route;
+    compiled:       [3]http_router.CompiledRoute;
+    segments:       [8]http_router.Segment;
+    matcher:        router.Router;
+    stack:          middleware.Stack;
+    items:          [1]provider.Provider;
+    providers:      provider.Set;
+    services:       [1]lifecycle.Lifecycle;
+    controller:     lifecycle.Controller;
+    headers:        security.HeadersPolicy;
+    errors:         error.Default;
+    vocabulary:     observability.Vocabulary;
+    observer:       observability.Observer;
+    tasks:          *task.Provider;
+    tick:           task.Handle;
+    ticks:          u64;
+    slots:          [2][8]u8;
+    spec:           task.Spec;
+    drains:         usize;
+    stops:          usize;
+    finished:       usize;
+    application:    app.App;
+}
+
+#[testing]
+rec Reply {
+    media: render.Media;
+    fixed: render.Fixed;
+    bytes: [64]u8;
+}
+
+#[testing]
+rec EchoWork {
+    buffer: [64]u8;
+    body:   raw.Body;
+}
+
+#[testing]
+fun failure(detail: str) error.AppError {
+    ret error.make(error.INTERNAL, 500, "internal server error", detail, false);
+}
+
+#[testing]
+fun reply(request_context: *context.Context, content: view.View) handler.Result {
+    val allocated: res[*Reply, A.Error] = A.zallocate[Reply](request_context.alloc, 1);
+    if (sel allocated.err) { ret handler.fail(failure("reply storage")); }
+    val holder: *Reply = allocated.ok;
+    if (content.len > 64) { ret handler.fail(failure("reply storage")); }
+    if (content.len > 0)  { memory.raw_copy(?holder.bytes[0], content.data, content.len); }
+    val response: *message.Response  = context.response(request_context);
+    val bound:    *exchange.Exchange = context.exchange_ref(request_context);
+    if (!render.text_plain(?holder.media)
+        || !render.init_fixed(?holder.fixed, view.view(?holder.bytes[0], content.len),
+        response.generation, bound.limits, ?response.trailers, context.cancellation(request_context))
+        || render.respond_with_limits(request_context, status.OK, ?holder.media,
+        render.fixed_body(?holder.fixed), bound.limits) != render.RESPOND_OK) {
+        ret handler.fail(failure("reply installation"));
+    }
+    ret handler.respond();
+}
+
+#[testing]
+fun hello_show(ctx: ptr, request_context: *context.Context, work: *ptr) handler.Result {
+    @work = nil;
+    ret reply(request_context, view.view("hello", 5));
+}
+
+# the task's latest snapshot, read without waiting on a run
+#[testing]
+fun tick_show(ctx: ptr, request_context: *context.Context, work: *ptr) handler.Result {
+    @work = nil;
+    val fixture: *Fixture = ctx::*Fixture;
+    var lease:   task.Lease;
+    if (task.read(fixture.tasks, fixture.tick, ?lease) != task.STATUS_OK) {
+        ret reply(request_context, view.view("empty", 5));
+    }
+    var copy:  [8]u8;
+    val bytes: view.View = task.lease_view(?lease);
+    memory.raw_copy(?copy[0], bytes.data, bytes.len);
+    val length: usize = bytes.len;
+    task.release(fixture.tasks, ?lease);
+    ret reply(request_context, view.view(?copy[0], length));
+}
+
+#[testing]
+fun echo_drive(request_context: *context.Context, current: raw.Operation) handler.Result {
+    if (current.status == raw.PENDING)  { ret handler.suspend(current.token); }
+    if (current.status != raw.COMPLETE) { ret handler.fail(current.app_error); }
+    ret reply(request_context, current.bytes);
+}
+
+# reads the whole body, suspending on the host until it arrives
+#[testing]
+fun echo_create(ctx: ptr, request_context: *context.Context, work: *ptr) handler.Result {
+    @work = nil;
+    val allocated: res[*EchoWork, A.Error] = A.zallocate[EchoWork](request_context.alloc, 1);
+    if (sel allocated.err) { ret handler.fail(failure("echo storage")); }
+    val echo: *EchoWork = allocated.ok;
+    @work = echo::ptr;
+    if (!raw.init(?echo.body, context.request(request_context).body, ?echo.buffer[0], ECHO_LIMIT)) {
+        ret handler.fail(failure("echo reader"));
+    }
+    ret echo_drive(request_context, raw.poll(?echo.body));
+}
+
+#[testing]
+fun echo_resume(ctx: ptr, request_context: *context.Context, work: ptr,
+    settlement: handler.Settlement, token: u64) handler.Result {
+    val echo: *EchoWork = work::*EchoWork;
+    if (settlement == handler.SETTLE_ABANDONED) { ret handler.respond(); }
+    ret echo_drive(request_context, raw.complete(?echo.body, token));
+}
+
+#[testing]
+fun missing(ctx: ptr, request_context: *context.Context, work: *ptr) handler.Result {
+    @work = nil;
+    ret handler.fail(error.make(error.NOT_FOUND, 404, "not found", "no route", false));
+}
+
+#[testing]
+fun tick_step(ctx: ptr, run: *task.Run) res[task.StepStatus, view.View] {
+    val fixture: *Fixture = ctx::*Fixture;
+    fixture.ticks = fixture.ticks + 1;
+    if (task.publish(run, view.view("tick", 4)) != task.STATUS_OK) {
+        ret res[task.StepStatus, view.View].err{view.view("publish refused", 15)};
+    }
+    ret res[task.StepStatus, view.View].ok{task.STEP_DONE};
+}
+
+#[testing]
+fun service_start(ctx: ptr) res[lifecycle.CallbackStatus, view.View] {
+    val fixture: *Fixture = ctx::*Fixture;
+    fixture.spec = task.Spec{name: view.view("tick", 4), state: ctx, step: tick_step,
+        period: opt[duration.Duration].none{}, run_timeout: opt[duration.Duration].none{},
+        slots:  ?fixture.slots[0][0], slot_bytes: 8, slot_count: 2};
+    if (task.register(fixture.tasks, ?fixture.spec, ?fixture.tick) != task.STATUS_OK
+        || task.trigger(fixture.tasks, fixture.tick) != task.STATUS_OK) {
+        ret res[lifecycle.CallbackStatus, view.View].err{view.view("task refused", 12)};
+    }
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
+}
+
+#[testing]
+fun service_ready(ctx: ptr) lifecycle.Readiness {
+    ret lifecycle.READY_NOW;
+}
+
+#[testing]
+fun service_drain(ctx: ptr, deadline: opt[time.Instant]) res[lifecycle.CallbackStatus, view.View] {
+    val fixture: *Fixture = ctx::*Fixture;
+    fixture.drains = fixture.drains + 1;
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
+}
+
+#[testing]
+fun service_stop(ctx: ptr) res[lifecycle.CallbackStatus, view.View] {
+    val fixture: *Fixture = ctx::*Fixture;
+    fixture.stops = fixture.stops + 1;
+    ret res[lifecycle.CallbackStatus, view.View].ok{lifecycle.CALLBACK_DONE};
+}
+
+#[testing]
+fun observe_start(ctx: ptr, event: *observability.RequestEvent) {}
+
+#[testing]
+fun observe_finish(ctx: ptr, event: *observability.RequestEvent) {
+    val fixture: *Fixture = ctx::*Fixture;
+    fixture.finished = fixture.finished + 1;
+}
+
+#[testing]
+fun observe_error(ctx: ptr, event: *observability.RequestEvent, app_error: error.AppError) {}
+
+#[testing]
+fun fixture_route(method_kind: method.Kind, pattern: str, name: str, call: handler.EnterFun,
+    resume: handler.ResumeFun, ctx: ptr) router.Route {
+    ret router.Route{method: router.exact_method(method.from_kind(method_kind)),
+        host:    router.any_host(), path: router.path(view.view(pattern, str_len(pattern))),
+        name:    name, parameters: nil, parameter_len: 0,
+        handler: handler.Handler{ctx: ctx, call: call, resume: resume}};
+}
+
+# the application code under test: everything the host supplies arrives as one
+# provider entry
+#[testing]
+fun assemble(fixture: *Fixture, host: provider.Provider) bool {
+    val ctx: ptr = fixture::ptr;
+    fixture.routes[0] = fixture_route(method.GET, "/hello", "hello.show", hello_show, nil, ctx);
+    fixture.routes[1] = fixture_route(method.GET, "/tick", "tick.show", tick_show, nil, ctx);
+    fixture.routes[2] = fixture_route(method.POST, "/echo", "echo.create", echo_create,
+        echo_resume, ctx);
+    val storage: router.Storage = router.Storage{specifications: ?fixture.specifications[0],
+        specification_cap: 3, compiled_routes: ?fixture.compiled[0], compiled_route_cap: 3,
+        segments:          ?fixture.segments[0], segment_cap: 8};
+    if (router.compile(?fixture.matcher, ?fixture.routes[0], 3, storage,
+        router.limits_default()).status != router.COMPILE_OK) { ret false; }
+    fixture.stack    = middleware.Stack{items: nil, len: 0};
+    fixture.items[0] = host;
+    if (!provider.init(?fixture.providers, ?fixture.items[0], 1, 1, 32)) { ret false; }
+    fixture.tasks = task.resolve(?fixture.providers);
+    if (fixture.tasks == nil) { ret false; }
+    fixture.services[0] = lifecycle.Lifecycle{ctx: ctx, start: service_start,
+        ready: service_ready, drain: service_drain, stop: service_stop};
+    if (!lifecycle.init(?fixture.controller, ?fixture.services[0], 1, 1)
+        || !security.secure_headers(?fixture.headers)
+        || !error.initialize_default(?fixture.errors, message.limits_default(), 512)
+        || !observability.init_vocabulary(?fixture.vocabulary, nil, 0)) { ret false; }
+    fixture.observer = observability.Observer{ctx: ctx, start: observe_start,
+        finish: observe_finish, error: observe_error};
+    ret app.assemble(?fixture.application, app.Assembly{
+        config: app.Config{limits: app.Limits{max_body_bytes: 65536, max_form_fields: 16,
+            max_upload_bytes:       65536, max_route_params: 4, max_request_id_bytes: 64,
+            max_active_requests:    8, max_middleware_depth: 4,
+            handler_timeout:        opt[duration.Duration].none{}, max_providers: 1,
+            max_provider_key_bytes: 32, max_background_services: 1},
+            trust_proxy:            false, panic_policy: middleware.PANIC_ABORT},
+        router:        ?fixture.matcher,
+        middleware:    ?fixture.stack,
+        fallback:      handler.Handler{ctx: ctx, call: missing, resume: nil},
+        errors:        error.default_mapper(?fixture.errors),
+        providers:     ?fixture.providers,
+        lifecycle:     ?fixture.controller,
+        sessions:      nil, security: ?fixture.headers, csrf: nil, origins: nil,
+        authenticator: nil, renderer: nil,
+        observer:      ?fixture.observer,
+        vocabulary:    ?fixture.vocabulary,
+        event_policy:  observability.policy_default(),
+        app_state:     nil,
+    });
+}
+
+#[testing]
+rec HarnessStorage {
+    response_fields:   [16]field.Field;
+    response_trailers: [8]field.Field;
+    informationals:    [4]message.Informational;
+    arena:             [16384]u8;
+    captured:          [256]u8;
+}
+
+#[testing]
+fun body_is(result: *testing.Result, text: str) bool {
+    val bytes: view.View = testing.response_body(result);
+    ret bytes.len == str_len(text) && memory.raw_equal(bytes.data, text, bytes.len);
+}
+
+# the same assemble, run in process by laurel.testing with the host's providers
+# and its task runner driven by hand
+test serve__application_runs_under_the_harness_unchanged {
+    var host: Host;
+    host.valid = false;
+    if (!init(?host, options_default())) { ret 1; }
+    var fixture: Fixture;
+    if (!assemble(?fixture, providers(?host))) { ret 2; }
+    var storage: HarnessStorage;
+    var harness: testing.Harness;
+    harness.initialized = false;
+    if (!testing.init(?harness, ?fixture.application, ?fixture.matcher, testing.Storage{
+        response_fields:   ?storage.response_fields[0], response_field_cap: 16,
+        response_trailers: ?storage.response_trailers[0], response_trailer_cap: 8,
+        informationals:    ?storage.informationals[0], informational_cap: 4,
+        arena:             ?storage.arena[0], arena_bytes: 16384,
+        captured:          ?storage.captured[0], captured_capacity: 256
+    },
+        message.limits_default(), testing.DEFAULT_BODY_POLLS)) { ret 3; }
+    if (testing.start(?harness).status != lifecycle.TRANSITION_OK
+        || testing.ready(?harness).status != lifecycle.TRANSITION_OK) { ret 4; }
+    runner.poll(task_runner(?host), time.Instant{sec: 1, nsec: 0});
+    var fields: [1]field.Field;
+    var none:   field.Fields = field.init(?fields[0], 1, message.limits_default().request_fields);
+    if (field.append(?none, field.Field{name: view.view("host", 4),
+        value: view.view("laurel.test", 11), sensitive: false}) != field.ADD_OK) { ret 5; }
+    var result: testing.Result;
+    var one:    testing.Request = testing.request(message.version_h1(1, 1), method.from_kind(method.GET),
+        target.origin(view.view("/hello", 6), view.view("/hello", 6), view.view(nil, 0)), none, view.view("r1", 2));
+    if (testing.invoke(?harness, one, ?result) != testing.INVOKE_OK || !body_is(?result, "hello")) {
+        ret 5;
+    }
+    one.target = target.origin(view.view("/tick", 5), view.view("/tick", 5), view.view(nil, 0));
+    if (testing.invoke(?harness, one, ?result) != testing.INVOKE_OK || !body_is(?result, "tick")) {
+        ret 6;
+    }
+    one = testing.request(message.version_h1(1, 1), method.from_kind(method.POST),
+        target.origin(view.view("/echo", 5), view.view("/echo", 5), view.view(nil, 0)), none, view.view("r2", 2));
+    one.body    = view.view("abcde", 5);
+    one.suspend = true;
+    if (testing.invoke(?harness, one, ?result) != testing.INVOKE_OK || !body_is(?result, "abcde")
+        || result.suspensions == 0) { ret 7; }
+    val deadline: opt[time.Instant] = opt[time.Instant].some{time.Instant{sec: 2, nsec: 0}};
+    if (testing.drain(?harness, deadline).status != lifecycle.TRANSITION_OK
+        || task.drain(fixture.tasks, deadline).status != task.DRAIN_DONE
+        || task.stop(fixture.tasks) != task.STATUS_OK
+        || testing.stop(?harness).status != lifecycle.TRANSITION_OK) { ret 8; }
+    if (!app.release(?fixture.application) || !destroy(?host)) { ret 9; }
+    ret 0;
+}
+
+# the process terminates itself the way an orchestrator would. windows has no
+# signal to raise at one process, so there the drain begins through shutdown,
+# the call the signal thread makes
+#[testing]
+fun terminate_self(host: *Host) bool {
+    $if ($mach.build.os == $mach.os.linux) {
+        var number: usize = 129;
+        $if ($mach.build.arch == $mach.arch.x86_64) { number = 62; }
+        ret linux.syscall2(number, os.getpid()::usize, 15) == 0;
+    }
+    $or ($mach.build.os == $mach.os.darwin) {
+        ret libsystem.raise(15) == 0;
+    }
+    $or {
+        ret shutdown(host);
+    }
+}
+
+#[testing]
+rec Client {
+    host:     *Host;
+    endpoint: ip.Endpoint;
+    thread:   thread.Thread;
+    spawned:  bool;
+    result:   i64;
+}
+
+#[testing]
+fun connect(client: *Client, stream: *tcp.Stream) bool {
+    val connected: res[tcp.Stream, io_error.Error] = tcp.connect(client.endpoint);
+    if (sel connected.err) { ret false; }
+    @stream = connected.ok;
+    ret events_ok(tcp.stream_set_read_timeout(stream, 10000));
+}
+
+#[testing]
+fun send(stream: *tcp.Stream, text: str) bool {
+    val length: usize = str_len(text);
+    var offset: usize = 0;
+    for (offset < length) {
+        val sent: res[usize, io_error.Error] = tcp.stream_write(stream, ?text[offset], length - offset);
+        if (sel sent.err) { ret false; }
+        if (sent.ok == 0) { ret false; }
+        offset = offset + sent.ok;
+    }
+    ret true;
+}
+
+#[testing]
+fun contains(buffer: *u8, length: usize, needle: str) bool {
+    val count: usize = str_len(needle);
+    var i:     usize = 0;
+    for (i + count <= length) {
+        if (memory.raw_equal(?buffer[i], needle, count)) { ret true; }
+        i = i + 1;
+    }
+    ret false;
+}
+
+# reads a fresh response until it holds needle, which ends it
+#[testing]
+fun receive(stream: *tcp.Stream, needle: str) bool {
+    var buffer: [1024]u8;
+    var have:   usize = 0;
+    for (!contains(?buffer[0], have, needle)) {
+        if (have == 1024) { ret false; }
+        val got: res[usize, io_error.Error] = tcp.stream_read(stream, ?buffer[have], 1024 - have);
+        if (sel got.err) { ret false; }
+        if (got.ok == 0) { ret false; }
+        have = have + got.ok;
+    }
+    ret true;
+}
+
+# true once the server closed the connection with nothing more sent
+#[testing]
+fun closed(stream: *tcp.Stream) bool {
+    var byte: [1]u8;
+    val got:  res[usize, io_error.Error] = tcp.stream_read(stream, ?byte[0], 1);
+    if (sel got.err) { ret got.err.kind != io_error.TIMEOUT && got.err.kind != io_error.WOULD_BLOCK; }
+    ret got.ok == 0;
+}
+
+#[testing]
+fun scenario(client: *Client) i64 {
+    var idle: tcp.Stream;
+    if (!connect(client, ?idle) || !send(?idle, "GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+        || !receive(?idle, "\r\n\r\nhello")) { ret 1; }
+    # the task runs on its own thread once the application starts
+    var attempts: usize = 0;
+    var ticked:   bool  = false;
+    for (!ticked && attempts < 100) {
+        if (!send(?idle, "GET /tick HTTP/1.1\r\nHost: x\r\n\r\n")) { ret 2; }
+        var buffer: [1024]u8;
+        var have:   usize = 0;
+        for (!contains(?buffer[0], have, "tick") && !contains(?buffer[0], have, "empty")) {
+            val got: res[usize, io_error.Error] = tcp.stream_read(?idle, ?buffer[have], 1024 - have);
+            if (sel got.err) { ret 3; }
+            if (got.ok == 0) { ret 3; }
+            have = have + got.ok;
+        }
+        ticked = contains(?buffer[0], have, "\r\n\r\ntick");
+        if (!ticked) { os.sleep(20000000); }
+        attempts = attempts + 1;
+    }
+    if (!ticked) { ret 4; }
+    # a request is in flight, its body half sent, when the signal arrives
+    var busy: tcp.Stream;
+    if (!connect(client, ?busy)
+        || !send(?busy, "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nab")) { ret 5; }
+    os.sleep(100000000);
+    if (!terminate_self(client.host)) { ret 6; }
+    os.sleep(200000000);
+    # the drain answers it, closes the idle connection, then closes this one
+    if (!send(?busy, "cde") || !receive(?busy, "\r\n\r\nabcde")) { ret 7; }
+    if (!closed(?idle) || !closed(?busy))                        { ret 8; }
+    tcp.stream_close(?idle);
+    tcp.stream_close(?busy);
+    ret 0;
+}
+
+#[testing]
+fun client_main(argument: *u8) {
+    val client: *Client = argument::*Client;
+    client.result = scenario(client);
+    # a failed scenario still ends the run
+    if (client.result != 0) { shutdown(client.host); }
+}
+
+#[testing]
+fun client_ready(ctx: ptr, endpoint: ip.Endpoint) {
+    val client: *Client = ctx::*Client;
+    client.endpoint = endpoint;
+    client.spawned  = thread_ok(thread.spawn_with(client_main, client::*u8, ?client.thread));
+}
+
+# serve on a real socket, answer, take SIGTERM with a request in flight, and drain
+test serve__sigterm_drains_a_request_in_flight {
+    var host: Host;
+    host.valid = false;
+    if (!init(?host, options_default())) { ret 1; }
+    var fixture: Fixture;
+    if (!assemble(?fixture, providers(?host))) { ret 2; }
+    var client: Client;
+    client.host    = ?host;
+    client.spawned = false;
+    client.result  = -1;
+    var configured: Config = config_default(ip.endpoint(127, 0, 0, 1, 0));
+    configured.server.max_connections  = 4;
+    configured.server.max_exchanges    = 4;
+    configured.server.memory_bytes     = 8388608;
+    configured.server.drain_timeout_ns = 5000000000;
+    configured.ready                   = client_ready;
+    configured.ready_ctx               = (?client)::ptr;
+    val report: Report = run(?host, ?fixture.application, configured);
+    if (client.spawned)     { thread.join(?client.thread); }
+    if (client.result != 0) { ret 10 + client.result::i32; }
+    if (report.failure != FAILURE_NONE || report.server.abandoned_exchanges != 0
+        || report.server.abandoned_connections != 0 || report.server.unsettled != 0
+        || report.server.failed != 0 || report.tasks.status != task.DRAIN_DONE
+        || report.tasks.abandoned != 0) { ret 3; }
+    # every served request reached laurel's terminal event, and the lifecycle
+    # drained once and stopped once
+    if (fixture.finished::u64 != report.server.served || fixture.drains != 1 || fixture.stops != 1
+        || !lifecycle.terminal(fixture.application.lifecycle)) { ret 4; }
+    if (!app.release(?fixture.application) || !destroy(?host)) { ret 5; }
+    ret 0;
+}
