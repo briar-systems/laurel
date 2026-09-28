@@ -1172,6 +1172,7 @@ rec Fixture {
     ws_clean:       usize;
     published:      i64;
     stream_ready:   i64;
+    stream_done:    i64;
     stream_waker:   context.Waker;
     application:    app.App;
 }
@@ -1308,11 +1309,18 @@ fun socket_open(ctx: ptr, request_context: *context.Context, work: *ptr) handler
     ret handler.respond();
 }
 
+# the event stream's response timeout, how many times over the stream outlives it,
+# and the pause before each event. the pause is the only gap between two writes
+# that is not scheduling, so a stall must eat the rest of the timeout to fail
 #[testing]
-val EVENTS: i64 = 10;
+val EVENT_TIMEOUT_NS: u64 = 300000000;
+#[testing]
+val EVENT_LIFETIMES:  i64 = 3;
+#[testing]
+val EVENT_PAUSE_NS:   u64 = 10000000;
 
 # an event stream fed from another thread: each event published there wakes the
-# host, which pulls it here
+# host, which pulls it here. it ends once that thread marks it done
 #[testing]
 rec EventWork {
     media:   render.Media;
@@ -1327,13 +1335,13 @@ fun events_produce(ctx: ptr, output: *u8, capacity: usize) render.Chunk {
     val work:      *EventWork = ctx::*EventWork;
     val published: i64        = atomic.load(?work.fixture.published);
     if (work.sent == published) {
-        if (work.sent == EVENTS) { ret render.chunk_end(); }
+        if (atomic.load(?work.fixture.stream_done) != 0) { ret render.chunk_end(); }
         work.token = work.token + 1;
         ret render.chunk_pending(work.token);
     }
     if (capacity < 9) { ret render.chunk_failed(); }
     memory.raw_copy(output, "data: ", 6);
-    output[6] = '0' + work.sent::u8;
+    output[6] = '0' + (work.sent % 10)::u8;
     output[7] = 10;
     output[8] = 10;
     work.sent = work.sent + 1;
@@ -1458,6 +1466,7 @@ fun assemble(fixture: *Fixture, host: provider.Provider) bool {
     fixture.ws_clean     = 0;
     fixture.published    = 0;
     fixture.stream_ready = 0;
+    fixture.stream_done  = 0;
     val storage: router.Storage = router.Storage{specifications: ?fixture.specifications[0],
         specification_cap: 5, compiled_routes: ?fixture.compiled[0], compiled_route_cap: 5,
         segments:          ?fixture.segments[0], segment_cap: 8};
@@ -1806,36 +1815,58 @@ fun scenario(client: *Client) i64 {
     ret 0;
 }
 
-# the stream's events are published from this thread, one each 100ms, after the
-# stream's head is in
+# reads until needle arrives, then drops everything through it
+#[testing]
+fun take_through(stream: *tcp.Stream, buffer: *u8, have: *usize, needle: str) bool {
+    val count: usize = str_len(needle);
+    for (true) {
+        var i: usize = 0;
+        for (i + count <= @have) {
+            if (memory.raw_equal(?buffer[i], needle, count)) {
+                memory.raw_move((?buffer[0])::ptr, ?buffer[i + count], @have - i - count);
+                @have = @have - i - count;
+                ret true;
+            }
+            i = i + 1;
+        }
+        if (@have == 1024) { ret false; }
+        val got: res[usize, io_error.Error] = tcp.stream_read(stream, ?buffer[@have], 1024 - @have);
+        if (sel got.err) { ret false; }
+        if (got.ok == 0) { ret false; }
+        @have = @have + got.ok;
+    }
+    ret false;
+}
+
+# each event is published from this thread once the one before it is on the wire,
+# until the stream has lived EVENT_LIFETIMES response timeouts. the first is
+# published before the request, so the stream opens with it and needs no wake, and
+# its arrival shows the handler has published the waker
 #[testing]
 fun event_scenario(client: *Client) i64 {
+    atomic.store(?client.fixture.published, 1);
     var stream: tcp.Stream;
     if (!connect(client, ?stream) || !send(?stream, "GET /events HTTP/1.1\r\nHost: x\r\n\r\n")) { ret 1; }
-    var waited: usize = 0;
-    for (atomic.load(?client.fixture.stream_ready) == 0) {
-        if (waited == 200) { ret 2; }
-        os.sleep(10000000);
-        waited = waited + 1;
-    }
-    var i: i64 = 0;
-    for (i < EVENTS) {
-        os.sleep(100000000);
-        atomic.fetch_add(?client.fixture.published, 1);
-        context.wake(client.fixture.stream_waker);
-        i = i + 1;
-    }
     var buffer: [1024]u8;
     var have:   usize = 0;
-    for (!contains(?buffer[0], have, "\r\n0\r\n\r\n")) {
-        if (have == 1024) { ret 3; }
-        val got: res[usize, io_error.Error] = tcp.stream_read(?stream, ?buffer[have], 1024 - have);
-        if (sel got.err) { ret 3; }
-        if (got.ok == 0) { ret 3; }
-        have = have + got.ok;
+    if (!take_through(?stream, ?buffer[0], ?have, "text/event-stream")) { ret 4; }
+    if (!take_through(?stream, ?buffer[0], ?have, "data: 0\n\n"))       { ret 3; }
+    if (atomic.load(?client.fixture.stream_ready) == 0)                 { ret 2; }
+    val until: time.Instant = time.instant_add(now(), EVENT_LIFETIMES * EVENT_TIMEOUT_NS::i64);
+    var sent:  i64          = 1;
+    var event: [10]u8;
+    memory.raw_copy(?event[0], "data: 0\n\n", 10);
+    for (time.instant_before(now(), until)) {
+        os.sleep(EVENT_PAUSE_NS::i64);
+        atomic.store(?client.fixture.published, sent + 1);
+        if (!context.wake(client.fixture.stream_waker)) { ret 5; }
+        event[6] = '0' + (sent % 10)::u8;
+        if (!take_through(?stream, ?buffer[0], ?have, (?event[0])::str)) { ret 3; }
+        sent = sent + 1;
     }
-    if (!contains(?buffer[0], have, "text/event-stream") || !contains(?buffer[0], have, "data: 0\n\n")
-        || !contains(?buffer[0], have, "data: 9\n\n")) { ret 4; }
+    atomic.store(?client.fixture.stream_done, 1);
+    if (!context.wake(client.fixture.stream_waker))                 { ret 5; }
+    if (!take_through(?stream, ?buffer[0], ?have, "\r\n0\r\n\r\n")) { ret 3; }
     tcp.stream_close(?stream);
     shutdown(client.host);
     ret 0;
@@ -1913,7 +1944,7 @@ test serve__an_event_stream_lives_while_it_makes_progress {
     configured.server.max_connections     = 4;
     configured.server.max_exchanges       = 4;
     configured.server.memory_bytes        = 8388608;
-    configured.server.response_timeout_ns = 300000000;
+    configured.server.response_timeout_ns = EVENT_TIMEOUT_NS;
     configured.signals                    = false;
     configured.ready                      = client_ready;
     configured.ready_ctx                  = (?client)::ptr;

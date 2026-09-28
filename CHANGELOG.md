@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-09-28
+
+### Changed
+- **Breaking.** Dependencies: std `^9.4` at v9.4.1, crypto `^0.26` at v0.26.0 and http `^0.25` at v0.25.1 (were `^9.3`, `^0.25` and v0.25.0), with `demo` and `doc/bench/laurel` following. Resolution is flat, so a consumer must move to the new std and crypto with it. std 9.4.1 maps a guard page below every linux thread stack, crypto 0.26 lets the system allocators own the only secret wipe and zeroing, and http 0.25.1 is fixes only. laurel's API is unchanged.
+- **Breaking.** Requires mach 6.5 (`mach = "^6.5"`), since http 0.25.1 does, and CI seeds mach v6.5.0. The 6.5 formatter is applied.
+- `router.bad_parameter`, the error every built-in decoder returns, answers `invalid parameter` where it answered `invalid route parameter`, since the same decoders serve path captures and `form.typed` query values. A route's own parameter declaration refused by `router.compile` keeps `invalid route parameter` (#169).
+
+### Fixed
+- The event stream test paces itself on the events it reads rather than a fixed sleep under the response timeout, so a slow runner no longer fails it (#201).
+
 ## [0.22.0] - 2026-09-27
 
 ### Changed

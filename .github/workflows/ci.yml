@@ -24,8 +24,8 @@ jobs:
     uses: briar-systems/.github/.github/workflows/mach-lib.yml@main
     with:
       heavy: ${{ inputs.heavy }}
-      # std 9 needs mach 6, ahead of the family pin
-      mach-version: v6.2.1
+      # http 0.25.1 requires mach 6.5
+      mach-version: v6.5.0
       # crypto links std's start code that requires PSTATE.DIT on aarch64
       dit: required
       # the demo and the bench server build this working tree through a path
