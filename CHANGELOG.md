@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-27
+
+### Changed
+- **Breaking.** Dependencies: std `^9.3` at v9.3.0, crypto `^0.25` at v0.25.0 and http `^0.25` at v0.25.0 (were `^9.0`, `^0.24` and `^0.24`), with `demo` and `doc/bench/laurel` following (#197). Resolution is flat, so a consumer must move to the new std, crypto and http with it. Under `laurel.serve` a closing connection now lingers, reading and discarding what the client still sends before it closes, with http's default `linger_timeout_ns` and `max_linger_bytes`. laurel builds no `h1.connection.Config` literal, so its API is unchanged.
+
 ## [0.21.0] - 2026-09-27
 
 ### Added
