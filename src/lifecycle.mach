@@ -333,7 +333,7 @@ rec TestService {
 }
 
 #[testing]
-var trace: [32]usize;
+var trace:     [32]usize;
 #[testing]
 var trace_len: usize;
 

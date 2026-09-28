@@ -1,6 +1,6 @@
 [project]
 id = "standalone"
-mach = "^6"
+mach = "^6.5"
 version = "0.1.0"
 src = "src"
 out = "out/{target.name}/{profile.name}"
@@ -46,7 +46,7 @@ need = []
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-version = "^9.3"
+version = "^9.4"
 
 # the laurel this example lives in, so it builds against the working tree
 [dep.laurel]
