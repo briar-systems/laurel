@@ -46,7 +46,7 @@ need = []
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-version = "^9.0"
+version = "^9.3"
 
 # the laurel this example lives in, so it builds against the working tree
 [dep.laurel]
@@ -54,4 +54,4 @@ path = "../"
 
 [dep.http]
 git = "https://github.com/briar-systems/mach-http"
-version = "^0.24"
+version = "^0.25"
