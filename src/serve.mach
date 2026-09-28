@@ -1315,9 +1315,9 @@ fun socket_open(ctx: ptr, request_context: *context.Context, work: *ptr) handler
 #[testing]
 val EVENT_TIMEOUT_NS: u64 = 300000000;
 #[testing]
-val EVENT_LIFETIMES: i64 = 3;
+val EVENT_LIFETIMES:  i64 = 3;
 #[testing]
-val EVENT_PAUSE_NS: u64 = 10000000;
+val EVENT_PAUSE_NS:   u64 = 10000000;
 
 # an event stream fed from another thread: each event published there wakes the
 # host, which pulls it here. it ends once that thread marks it done

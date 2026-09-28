@@ -476,19 +476,19 @@ pub fun default_mapper(renderer: *Default) Mapper {
 #[testing]
 def HostileMode: u8;
 #[testing]
-val HOSTILE_INVALIDATE: HostileMode = 1;
+val HOSTILE_INVALIDATE:  HostileMode = 1;
 #[testing]
-val HOSTILE_COMMIT: HostileMode = 2;
+val HOSTILE_COMMIT:      HostileMode = 2;
 #[testing]
-val HOSTILE_BODY: HostileMode = 3;
+val HOSTILE_BODY:        HostileMode = 3;
 #[testing]
-val HOSTILE_CANCEL: HostileMode = 4;
+val HOSTILE_CANCEL:      HostileMode = 4;
 #[testing]
-val HOSTILE_FIELDS: HostileMode = 5;
+val HOSTILE_FIELDS:      HostileMode = 5;
 #[testing]
-val HOSTILE_IDENTITY: HostileMode = 6;
+val HOSTILE_IDENTITY:    HostileMode = 6;
 #[testing]
-val HOSTILE_GENERATION: HostileMode = 7;
+val HOSTILE_GENERATION:  HostileMode = 7;
 #[testing]
 val HOSTILE_CANCEL_FAIL: HostileMode = 8;
 

@@ -427,7 +427,7 @@ fun close(fixture: *Fixture) bool {
 
 # a signature is computed over these bytes, so nothing in them is decoded
 #[testing]
-val PAYLOAD: str = "a=%41+b&sig=x y";
+val PAYLOAD:     str   = "a=%41+b&sig=x y";
 #[testing]
 val PAYLOAD_LEN: usize = 15;
 
