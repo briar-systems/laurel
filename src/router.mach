@@ -204,8 +204,10 @@ fun route_error(kind: error.Kind, status: u16, public_msg: str,
     ret error.make(kind, status, public_msg, detail, retryable);
 }
 
+# decoders serve path captures and typed query or form values alike, so the
+# public text names neither source
 fun bad_parameter() error.AppError {
-    ret route_error(error.BAD_REQUEST, 400, "invalid route parameter",
+    ret route_error(error.BAD_REQUEST, 400, "invalid parameter",
         "parameter decoder rejected value", false);
 }
 
@@ -940,9 +942,12 @@ test dispatch__typed_params {
     if (!test_request(?request, method.from_kind(method.GET),
         view.view("/users/nope", 11), ?host_item,
         view.view("x.example.com", 13), 10)) { ret 9; }
-    val rejected: Dispatch = dispatch(?router, ?request, ?allocator);
+    val rejected:       Dispatch       = dispatch(?router, ?request, ?allocator);
+    var rejected_error: error.AppError = rejected.app_error;
     if (rejected.status != DISPATCH_PARAMETER_ERROR
-        || rejected.app_error.kind != error.BAD_REQUEST || rejected.params.len != 0) { ret 10; }
+        || rejected.app_error.kind != error.BAD_REQUEST || rejected.params.len != 0
+        || !same(error.public_text(?rejected_error),
+        view.view("invalid parameter", 17))) { ret 10; }
     fixed.reset(?allocation_state);
     if (!test_request(?request, method.from_kind(method.GET),
         view.view("/users/%2f", 10), ?host_item,
