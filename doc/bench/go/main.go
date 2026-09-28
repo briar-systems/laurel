@@ -49,7 +49,7 @@ func handleJSON(w http.ResponseWriter, r *http.Request) {
 func handleEcho(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Error(w, "invalid route parameter", http.StatusBadRequest)
+		http.Error(w, "invalid parameter", http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, http.StatusOK, fmt.Sprintf(`{"id":%d}`, id))

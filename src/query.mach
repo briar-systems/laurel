@@ -120,6 +120,10 @@ test typed__route_decoders {
         form.find(?done.form, text("page")), router.u64_decoder(), nil);
     if (!(sel page.err && (page.err.status == 400
         && page.err.kind == error.BAD_REQUEST))) { ret 4; }
+    if (sel page.err) {
+        var page_error: error.AppError = page.err;
+        if (!equal(error.public_text(?page_error), "invalid parameter")) { ret 11; }
+    }
     val neg: res[opt[router.Value], error.AppError] = form.typed(
         form.find(?done.form, text("neg")), router.i64_decoder(), nil);
     if (sel neg.err)                                          { ret 5; }
