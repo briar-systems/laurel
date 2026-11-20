@@ -92,10 +92,10 @@ results side by side.
 
 ## Local dependencies
 
-The manifest selects releases by version range, with the resolved release
-committed as a gitlink under `dep/`, and builds with mach 6: `mach-std` `^9.0`
-(v9.0.0), `mach-http` `^0.24` (v0.24.0) and `mach-crypto` `^0.24` (v0.24.0).
-Build output uses Mach's default `out/` directory.
+The project builds with mach 7. Each dependency is pinned by a gitlink
+committed under `dep/`, and `mach-std`, `mach-http` and `mach-crypto` follow
+`branch/dev` until their mach 7 releases. Build output goes under the work
+directory, `out/<target>/<profile>`.
 
 ## Status
 
