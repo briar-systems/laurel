@@ -1443,7 +1443,7 @@ test stream__backpressure {
         || stream.reader.transferred != 40) { ret 12; }
     if (stream_send(?stream, repeated(?payload[0], 1, 'f'), FRAME_TEXT).status
         != SEND_CLOSED) { ret 13; }
-    if (!operation_ok(cancel.destroy(?state.scope))) { ret 14; }
+    if (!operation_ok(cancel.dnit(?state.scope))) { ret 14; }
     ret 0;
 }
 
@@ -1495,7 +1495,7 @@ test sse__framing {
         || !same(?received[58], 28, view.view("id: 42\nretry: 3000\ndata: x\n\n", 28))
         || !same(?received[86], 7, view.view(": ping\n", 7))
         || !same(?received[93], 12, view.view(": heartbeat\n", 12))) { ret 16; }
-    if (!operation_ok(cancel.destroy(?state.scope))) { ret 17; }
+    if (!operation_ok(cancel.dnit(?state.scope))) { ret 17; }
     ret 0;
 }
 
@@ -1539,7 +1539,7 @@ test stream__suspend_and_disconnect {
     if (aborted.status != body.CANCELLED || stream_state(?stream) != STATE_CLOSED) {
         ret 13;
     }
-    if (!operation_ok(cancel.destroy(?state.scope)) || !operation_ok(cancel.destroy(?disconnected.scope))) { ret 14; }
+    if (!operation_ok(cancel.dnit(?state.scope)) || !operation_ok(cancel.dnit(?disconnected.scope))) { ret 14; }
     ret 0;
 }
 
@@ -1616,7 +1616,7 @@ test websocket__frames_and_close {
     if (closed.kind != websocket.EVENT_CLOSE || closed.close_code != 1000
         || socket_state(?socket) != STATE_CLOSED
         || socket_peer_close_code(?socket) != 1000 || !socket_release(?socket)) { ret 13; }
-    if (!operation_ok(cancel.destroy(?state.scope))) { ret 14; }
+    if (!operation_ok(cancel.dnit(?state.scope))) { ret 14; }
     ret 0;
 }
 
@@ -1648,7 +1648,7 @@ test websocket__negotiation {
     var other_accept: [29]u8;
     val refused:      negotiation.Handshake = negotiate(?rejected.exchange, view.view(nil, 0),
         view.view(nil, 0), ?other_accept[0], 29);
-    if (refused.status == negotiation.NEGOTIATED || rejected.response.committed)                       { ret 6; }
-    if (!operation_ok(cancel.destroy(?state.scope)) || !operation_ok(cancel.destroy(?rejected.scope))) { ret 7; }
+    if (refused.status == negotiation.NEGOTIATED || rejected.response.committed)                 { ret 6; }
+    if (!operation_ok(cancel.dnit(?state.scope)) || !operation_ok(cancel.dnit(?rejected.scope))) { ret 7; }
     ret 0;
 }

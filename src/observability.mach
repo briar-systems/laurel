@@ -733,7 +733,7 @@ fun init_fixture(state: *Fixture, generation: u64, path: view.View,
 
 #[testing]
 fun release_fixture(state: *Fixture) bool {
-    ret context.unbind(?state.context, ?state.owner, 3) && operation_ok(cancel.destroy(?state.scope));
+    ret context.unbind(?state.context, ?state.owner, 3) && operation_ok(cancel.dnit(?state.scope));
 }
 
 #[testing]
@@ -1010,7 +1010,7 @@ test fields__size_policies {
     if (init_fixture(?wide, 32, view.view("/d", 2), view.view(?oversized_id[0], 80))) {
         ret 9;
     }
-    if (!operation_ok(cancel.destroy(?wide.scope)) || !release_fixture(?state)) { ret 10; }
+    if (!operation_ok(cancel.dnit(?wide.scope)) || !release_fixture(?state)) { ret 10; }
     ret 0;
 }
 

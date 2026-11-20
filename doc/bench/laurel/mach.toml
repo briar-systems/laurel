@@ -1,52 +1,47 @@
 [project]
 id = "bench"
-mach = "^6.5"
+mach = "^7"
 version = "0.1.0"
 src = "src"
-out = "out/{target.name}/{profile.name}"
+work = "out/{target.name}/{profile.name}"
 
 [target.linux-x86_64]
-default = true
-isa = "x86_64"
-os = "linux"
+arch = "x86_64"
+sys = "linux"
 abi = "sysv64"
 
 [target.linux-arm64]
-isa = "aarch64"
-os = "linux"
+arch = "aarch64"
+sys = "linux"
 abi = "aapcs64"
 
 [target.darwin-aarch64]
-isa = "aarch64"
-os = "darwin"
-abi = "aapcs64"
+arch = "aarch64"
+sys = "darwin"
+abi = "darwinpcs"
 
 [profile.debug]
 default = true
-opt = 0
+optimize = false
 debug = false
 simd = "scalarize"
-vectorize = true
-float_reassoc = false
 
 [profile.release]
-opt = 2
+optimize = true
 debug = false
 simd = "scalarize"
-vectorize = true
-float_reassoc = false
 
 [artifact.laurel-bench]
 kind = "bin"
 entry = "bin/main.mach"
-out = "bin/laurel-bench"
+out = "{project.work}/bin/laurel-bench{artifact.suffix}"
 targets = ["*"]
 link = []
 need = []
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-version = "^9.4"
+ref = "branch/dev"
 
 # the laurel this benchmark lives in, so it measures the working tree
 [dep.laurel]
@@ -54,4 +49,4 @@ path = "../../../"
 
 [dep.http]
 git = "https://github.com/briar-systems/mach-http"
-version = "^0.25"
+ref = "branch/dev"

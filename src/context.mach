@@ -458,7 +458,7 @@ test bind__borrows_exchange_generation {
     if (!unbind(?context, ?owner, 9) || context.bound || request(?context) != nil
         || unbind(?context, ?owner, 9)
         || limits(?context).response_body.max_bytes != message.limits_default().response_body.max_bytes) { ret 5; }
-    if (!operation_ok(cancel.destroy(?fixture.scope))) { ret 6; }
+    if (!operation_ok(cancel.dnit(?fixture.scope))) { ret 6; }
     ret 0;
 }
 
@@ -479,7 +479,7 @@ test bind__stale_and_cancelled_fail_closed {
     val cancelled: cancel.Reason = reason(?context);
     if (active(?context) || request(?context) != nil || response(?context) != nil
         || cancellation(?context) != nil || !(sel cancelled.cancelled)) { ret 5; }
-    if (!unbind(?context, ?owner, 3) || !operation_ok(cancel.destroy(?fixture.scope))) { ret 6; }
+    if (!unbind(?context, ?owner, 3) || !operation_ok(cancel.dnit(?fixture.scope))) { ret 6; }
     ret 0;
 }
 
@@ -507,7 +507,7 @@ test bind__refuses_invalid_captures {
         Params{items: nil, len: 0, generation: 61}, 2,
         ?invalid_allocator, ?owner, 1, nil,
         view.view("request-61", 10), 32) || context.bound) { ret 5; }
-    if (!operation_ok(cancel.destroy(?fixture.scope))) { ret 6; }
+    if (!operation_ok(cancel.dnit(?fixture.scope))) { ret 6; }
     ret 0;
 }
 
@@ -522,6 +522,6 @@ test deadline__owned_by_exchange_scope {
     var actual: time.Instant;
     if (!deadline(?context, ?actual) || actual.sec != expected.sec || actual.nsec != expected.nsec) { ret 3; }
     if (!transition_ok(cancel.timeout(?fixture.scope)) || deadline(?context, ?actual))              { ret 4; }
-    if (!unbind(?context, ?owner, 1) || !operation_ok(cancel.destroy(?fixture.scope)))              { ret 5; }
+    if (!unbind(?context, ?owner, 1) || !operation_ok(cancel.dnit(?fixture.scope)))                 { ret 5; }
     ret 0;
 }
