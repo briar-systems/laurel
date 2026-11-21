@@ -2,6 +2,7 @@
 
 use crypto.contracts;
 use crypto.hmac;
+use encoding.base64;
 use http.core.body;
 use http.core.exchange;
 use http.core.field;
@@ -13,7 +14,6 @@ use A: std.allocator;
 use std.allocator.fixed;
 use std.chrono.time;
 use std.crypto.ct;
-use std.encoding.base64;
 use std.sync.cancel;
 use std.sync.mutex;
 use std.types.bool.bool;

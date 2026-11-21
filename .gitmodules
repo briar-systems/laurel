@@ -25,3 +25,12 @@
 [submodule "doc/bench/laurel/dep/http"]
 	path = doc/bench/laurel/dep/http
 	url = https://github.com/briar-systems/mach-http
+[submodule "dep/encoding"]
+	path = dep/encoding
+	url = https://github.com/briar-systems/mach-encoding
+[submodule "demo/dep/encoding"]
+	path = demo/dep/encoding
+	url = https://github.com/briar-systems/mach-encoding
+[submodule "doc/bench/laurel/dep/encoding"]
+	path = doc/bench/laurel/dep/encoding
+	url = https://github.com/briar-systems/mach-encoding

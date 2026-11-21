@@ -93,9 +93,10 @@ results side by side.
 ## Local dependencies
 
 The project builds with mach 7. Each dependency is pinned by a gitlink
-committed under `dep/`, and `mach-std`, `mach-http` and `mach-crypto` follow
-`branch/dev` until their mach 7 releases. Build output goes under the work
-directory, `out/<target>/<profile>`.
+committed under `dep/`, and `mach-std`, `mach-http`, `mach-crypto` and
+`mach-encoding` follow `branch/dev` until their mach 7 releases. Session and
+CSRF tokens use the base64 module from `mach-encoding`. Build output goes under
+the work directory, `out/<target>/<profile>`.
 
 ## Status
 

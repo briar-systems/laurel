@@ -3,6 +3,7 @@
 use crypto.aead.aes_gcm;
 use crypto.aead.chacha20_poly1305;
 use crypto.contracts;
+use encoding.base64;
 use http.core.field;
 use http.core.message;
 use laurel.context;
@@ -13,7 +14,6 @@ use laurel.middleware;
 use A: std.allocator;
 use std.chrono.time;
 use std.crypto.ct;
-use std.encoding.base64;
 use std.sync.atomic;
 use std.sync.cancel;
 use std.sync.mutex;
