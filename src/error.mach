@@ -688,7 +688,7 @@ fun hostile_fixture_end(fixture: *HostileFixture) bool {
     }
     if (scope_active(?fixture.scope)
         && !transition_ok(cancel.cancel(?fixture.scope))) { ret false; }
-    ret operation_ok(cancel.destroy(?fixture.scope));
+    ret operation_ok(cancel.dnit(?fixture.scope));
 }
 
 #[testing]

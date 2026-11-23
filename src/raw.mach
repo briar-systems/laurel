@@ -422,7 +422,7 @@ fun open(fixture: *Fixture, state: *TestBody, sized: bool, declared: u64,
 
 #[testing]
 fun close(fixture: *Fixture) bool {
-    ret operation_ok(cancel.destroy(?fixture.scope));
+    ret operation_ok(cancel.dnit(?fixture.scope));
 }
 
 # a signature is computed over these bytes, so nothing in them is decoded

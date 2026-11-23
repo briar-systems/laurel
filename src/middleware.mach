@@ -735,7 +735,7 @@ fun fixture_end(fixture: *Fixture) bool {
         && !context.unbind(?fixture.request_context, fixture::ptr, 1)) { ret false; }
     if (scope_active(?fixture.scope)
         && !transition_ok(cancel.cancel(?fixture.scope))) { ret false; }
-    ret operation_ok(cancel.destroy(?fixture.scope));
+    ret operation_ok(cancel.dnit(?fixture.scope));
 }
 
 #[testing]

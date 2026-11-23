@@ -409,7 +409,7 @@ fun operation_ok(outcome: cancel.Operation) bool {
 }
 
 fun close_scope(entry: *Entry) {
-    if (entry.scope_live && operation_ok(cancel.destroy(?entry.scope))) {
+    if (entry.scope_live && operation_ok(cancel.dnit(?entry.scope))) {
         entry.scope_live = false;
     }
 }
@@ -656,7 +656,7 @@ pub fun destroy(runner: *Runner) bool {
         ret false;
     }
     unlock(runner);
-    if (!operation_ok(cancel.destroy(?runner.root))) { ret false; }
+    if (!operation_ok(cancel.dnit(?runner.root))) { ret false; }
     runner.valid = false;
     ret true;
 }

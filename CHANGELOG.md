@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-23
+
+### Changed
+
+- **Breaking:** Migrated to Mach 7 (`mach = "^7"`).
+- **Breaking:** Updated dependencies to `mach-std` `^10.0.0` (v10.0.0), `mach-crypto` `^0.30.0` (v0.30.0), `mach-http` `^0.26.0` (v0.26.0), and `mach-encoding` `^0.1.0` (v0.1.0).
+
+
 ## [0.23.0] - 2026-09-28
 
 ### Changed

@@ -929,7 +929,7 @@ test respond__fixed_body {
     if (!body.reader_terminal_state(?content.reader)
         || content.reader.transferred != 26) { ret 8; }
     if (!context.unbind(?state.context, ?state.owner, 3)
-        || !operation_ok(cancel.destroy(?state.scope))) { ret 9; }
+        || !operation_ok(cancel.dnit(?state.scope))) { ret 9; }
     ret 0;
 }
 
@@ -1014,7 +1014,7 @@ test stream__suspend_resume_cancel {
     if (!body.reader_terminal_state(?stream.reader)) { ret 9; }
     if (context.active(?state.context)
         || !context.unbind(?state.context, ?state.owner, 3)
-        || !operation_ok(cancel.destroy(?state.scope))) { ret 10; }
+        || !operation_ok(cancel.dnit(?state.scope))) { ret 10; }
     ret 0;
 }
 
@@ -1042,7 +1042,7 @@ test render_into__renderer_body {
         || second.response.fields.len != 0) { ret 6; }
     if (!context.unbind(?state.context, ?state.owner, 3)
         || !context.unbind(?second.context, ?second.owner, 3)
-        || !operation_ok(cancel.destroy(?state.scope)) || !operation_ok(cancel.destroy(?second.scope))) { ret 7; }
+        || !operation_ok(cancel.dnit(?state.scope)) || !operation_ok(cancel.dnit(?second.scope))) { ret 7; }
     ret 0;
 }
 
@@ -1085,6 +1085,6 @@ test respond__host_and_explicit_limits {
         loose) != RESPOND_OK) { ret 5; }
     if (state.response.status != status.CREATED) { ret 6; }
     if (!context.unbind(?state.context, ?state.owner, 3)
-        || !operation_ok(cancel.destroy(?state.scope))) { ret 7; }
+        || !operation_ok(cancel.dnit(?state.scope))) { ret 7; }
     ret 0;
 }

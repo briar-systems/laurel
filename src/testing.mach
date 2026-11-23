@@ -460,7 +460,7 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
         || !fixed_ok(fixed_allocator.make(?harness.allocator, ?harness.allocation,
         harness.storage.arena, harness.storage.arena_bytes))) {
         harness.active = false;
-        cancel.destroy(?harness.scope);
+        cancel.dnit(?harness.scope);
         ret INVOKE_INVALID;
     }
     harness.terminal = router.terminal(harness.routes,
@@ -483,7 +483,7 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
         allocator:  ?harness.allocator, request_id: one.request_id,
         route_name: route_name, started: harness.clock})) {
         harness.active = false;
-        cancel.destroy(?harness.scope);
+        cancel.dnit(?harness.scope);
         ret failure(result, INVOKE_REJECTED);
     }
     # a host drives the request across suspensions: each pending outcome names
@@ -566,8 +566,8 @@ pub fun invoke(harness: *Harness, one: Request, result: *Result) Status {
         status_value = INVOKE_INVALID;
     }
     harness.active = false;
-    if (!operation_ok(cancel.destroy(?harness.scope))) { status_value = INVOKE_INVALID; }
-    if (exhausted)                                     { status_value = INVOKE_PENDING; }
+    if (!operation_ok(cancel.dnit(?harness.scope))) { status_value = INVOKE_INVALID; }
+    if (exhausted)                                  { status_value = INVOKE_PENDING; }
     result.status = status_value;
     ret status_value;
 }

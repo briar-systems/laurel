@@ -3,6 +3,7 @@
 use crypto.aead.aes_gcm;
 use crypto.aead.chacha20_poly1305;
 use crypto.contracts;
+use encoding.base64;
 use http.core.field;
 use http.core.message;
 use laurel.context;
@@ -13,7 +14,6 @@ use laurel.middleware;
 use A: std.allocator;
 use std.chrono.time;
 use std.crypto.ct;
-use std.encoding.base64;
 use std.sync.atomic;
 use std.sync.cancel;
 use std.sync.mutex;
@@ -3156,7 +3156,7 @@ test request__reaches_session {
     }
     fixture.manager.cookie.max_age = 0;
 
-    if (!release_request(?fixture.session) || !operation_ok(cancel.destroy(?fixture.scope))
+    if (!release_request(?fixture.session) || !operation_ok(cancel.dnit(?fixture.scope))
         || stop_manager(?fixture.manager) != STORE_OK) { ret 23; }
     ret 0;
 }
@@ -3177,7 +3177,7 @@ test request_storage__disjoint_and_complete {
     absent.header_bytes = nil;
     if (request_storage_valid(absent))                             { ret 4; }
     if (!request_storage_valid(request_fixture_storage(?fixture))) { ret 5; }
-    if (!operation_ok(cancel.destroy(?fixture.scope))
+    if (!operation_ok(cancel.dnit(?fixture.scope))
         || stop_manager(?fixture.manager) != STORE_OK) { ret 6; }
     ret 0;
 }
@@ -3940,7 +3940,7 @@ test store__versions_generations_capacity {
     var untouched: Session = value;
     if (store.load(store.ctx, value.id, 1, ?data[0], 2048, ?untouched,
         ?cancelled) != STORE_CANCELLED || untouched.generation != 0
-        || !operation_ok(cancel.destroy(?cancelled))) { ret 8; }
+        || !operation_ok(cancel.dnit(?cancelled))) { ret 8; }
 
     var second: Session = Session{id: view.view("beta", 4),
         data:            view.view("second", 6), issued_at_unix: 1,
@@ -4037,7 +4037,7 @@ test store__scopes_disjoint_from_operations {
         != STORE_OK
         || unchanged.version != loaded.version
         || unchanged.generation != loaded.generation
-        || !operation_ok(cancel.destroy(?scope)) || store.stop(store.ctx) != STORE_OK) {
+        || !operation_ok(cancel.dnit(?scope)) || store.stop(store.ctx) != STORE_OK) {
         ret 8;
     }
     ret 0;

@@ -2,6 +2,7 @@
 
 use crypto.contracts;
 use crypto.hmac;
+use encoding.base64;
 use http.core.body;
 use http.core.exchange;
 use http.core.field;
@@ -13,7 +14,6 @@ use A: std.allocator;
 use std.allocator.fixed;
 use std.chrono.time;
 use std.crypto.ct;
-use std.encoding.base64;
 use std.sync.cancel;
 use std.sync.mutex;
 use std.types.bool.bool;
@@ -1031,7 +1031,7 @@ fun release_fixture(fixture: *Fixture) bool {
         !release(?fixture.protector) || !release_ring(?fixture.ring)) {
         ret false;
     }
-    ret operation_ok(cancel.destroy(?fixture.scope));
+    ret operation_ok(cancel.dnit(?fixture.scope));
 }
 
 test token__bounded_authenticated_rotated {
@@ -1169,7 +1169,7 @@ test protector__rejects_mutation_and_invalid_rings {
     fixture.protector.policy.max_age_s = 60;
     if (!release(?fixture.protector) || !context.unbind(
         ?fixture.request_context, (?fixture.owner)::ptr, fixture.owner) ||
-        !release_ring(?fixture.ring) || !operation_ok(cancel.destroy(?fixture.scope))) {
+        !release_ring(?fixture.ring) || !operation_ok(cancel.dnit(?fixture.scope))) {
         ret 4;
     }
     var duplicate: [2]KeyGeneration;

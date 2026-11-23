@@ -52,12 +52,14 @@ use std.net.ip;
 use std.net.tcp;
 use std.process.env;
 use std.process.events;
+use std.runtime.native.view.Unit;
 use std.sync.atomic;
 use std.sync.cancel;
 use std.sync.condition;
 use std.sync.mutex;
 use std.sync.thread;
 use std.system.os;
+use std.text.utf8;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -69,10 +71,10 @@ use std.types.string.str;
 use std.types.string.str_len;
 use std.types.view;
 
-$if ($mach.build.os == $mach.os.linux) {
+$if ($mach.build.sys == $mach.sys.linux) {
     use std.system.os.linux;
 }
-$or ($mach.build.os == $mach.os.darwin) {
+$or ($mach.build.sys == $mach.sys.darwin) {
     use std.system.os.darwin.libsystem;
 }
 
@@ -294,38 +296,69 @@ fun env_name(prefix: view.View, name: view.View, output: *u8) usize {
     ret i + j;
 }
 
-fun name_byte_equal(a: u8, b: u8) bool {
-    $if ($mach.build.os == $mach.os.windows) {
-        var left:  u8 = a;
-        var right: u8 = b;
+fun name_unit_equal(unit: Unit, byte: u8) bool {
+    $if ($mach.build.sys == $mach.sys.windows) {
+        if (unit >= 0x80) { ret false; }
+        var left:  u8 = unit::u8;
+        var right: u8 = byte;
         if (left >= 'a' && left <= 'z')   { left = left - 32; }
         if (right >= 'a' && right <= 'z') { right = right - 32; }
         ret left == right;
     }
     $or {
-        ret a == b;
+        ret unit == byte;
     }
 }
 
-# the value of an environment variable, read in place from the environment the
-# process started with. nil data when it is unset
-fun lookup(name: *u8, length: usize) view.View {
-    val entries: **u8 = env.environ();
-    if (entries == nil || length == 0) { ret view.view(nil, 0); }
+# copy a nul-terminated native value into output as UTF-8, as far as it fits
+# ---
+# ret: the value's full length in UTF-8 bytes, none when it has no UTF-8
+#      spelling (an unpaired surrogate, windows only)
+fun value_copy(value: *Unit, output: *u8, capacity: usize) opt[usize] {
+    var size: usize = 0;
+    $if ($mach.build.sys == $mach.sys.windows) {
+        var i: usize = 0;
+        for (value[i] != 0) {
+            var point: utf8.Codepoint = value[i]::utf8.Codepoint;
+            i = i + 1;
+            if (point >= 0xDC00 && point <= 0xDFFF) { ret opt[usize].none{}; }
+            if (point >= 0xD800 && point <= 0xDBFF) {
+                val low: utf8.Codepoint = value[i]::utf8.Codepoint;
+                if (low < 0xDC00 || low > 0xDFFF) { ret opt[usize].none{}; }
+                point = 0x10000 + ((point - 0xD800) << 10) + (low - 0xDC00);
+                i     = i + 1;
+            }
+            var encoded: [4]u8;
+            val count:   usize = utf8.encode(point, ?encoded[0], 4);
+            if (size + count <= capacity) { memory.raw_copy(?output[size], ?encoded[0], count); }
+            size = size + count;
+        }
+    }
+    $or {
+        for (value[size] != 0) {
+            if (size < capacity) { output[size] = value[size]; }
+            size = size + 1;
+        }
+    }
+    ret opt[usize].some{size};
+}
+
+# the value of an environment variable, read in place from the native
+# environment the process started with and copied into output when it fits
+# ---
+# ret: the value's full length in bytes, none when it is unset
+fun lookup(name: *u8, length: usize, output: *u8, capacity: usize) opt[usize] {
+    val entries: **Unit = env.environ_native();
+    if (entries == nil || length == 0) { ret opt[usize].none{}; }
     var i: usize = 0;
     for (entries[i] != nil) {
-        val entry: *u8   = entries[i];
+        val entry: *Unit = entries[i];
         var k:     usize = 0;
-        for (k < length && entry[k] != 0 && name_byte_equal(entry[k], name[k])) { k = k + 1; }
-        if (k == length && entry[k] == '=') {
-            val value: *u8   = ?entry[k + 1];
-            var size:  usize = 0;
-            for (value[size] != 0) { size = size + 1; }
-            ret view.view(value, size);
-        }
+        for (k < length && entry[k] != 0 && name_unit_equal(entry[k], name[k])) { k = k + 1; }
+        if (k == length && entry[k] == '='::Unit) { ret value_copy(?entry[k + 1], output, capacity); }
         i = i + 1;
     }
-    ret view.view(nil, 0);
+    ret opt[usize].none{};
 }
 
 fun env_config_read(ctx: ptr, key: view.View, output: *u8, capacity: usize) config.Read {
@@ -333,11 +366,10 @@ fun env_config_read(ctx: ptr, key: view.View, output: *u8, capacity: usize) conf
     var name:   [192]u8;
     val length: usize = env_name(host.options.config_prefix, key, ?name[0]);
     if (length == 0) { ret config.Read{status: config.READ_INVALID, len: 0}; }
-    val value: view.View = lookup(?name[0], length);
-    if (value.data == nil)    { ret config.Read{status: config.READ_MISSING, len: 0}; }
-    if (value.len > capacity) { ret config.Read{status: config.READ_TOO_LARGE, len: value.len}; }
-    if (value.len > 0)        { memory.raw_copy(output, value.data, value.len); }
-    ret config.Read{status: config.READ_FOUND, len: value.len};
+    val value: opt[usize] = lookup(?name[0], length, output, capacity);
+    if (sel value.none)        { ret config.Read{status: config.READ_MISSING, len: 0}; }
+    if (value.some > capacity) { ret config.Read{status: config.READ_TOO_LARGE, len: value.some}; }
+    ret config.Read{status: config.READ_FOUND, len: value.some};
 }
 
 fun resolver_host(slot: usize) *Host {
@@ -355,16 +387,22 @@ fun env_borrow(ctx: ptr, name: view.View, use: secret.UseFun, use_ctx: ptr) secr
     var variable: [192]u8;
     val length:   usize = env_name(host.options.secret_prefix, name, ?variable[0]);
     if (length == 0) { ret secret.BORROW_INVALID; }
-    val value: view.View = lookup(?variable[0], length);
-    if (value.data == nil)            { ret secret.BORROW_MISSING; }
-    if (value.len > MAX_SECRET_BYTES) { ret secret.BORROW_REFUSED; }
+    var plain: [4096]u8;
+    val value: opt[usize] = lookup(?variable[0], length, ?plain[0], MAX_SECRET_BYTES);
+    if (sel value.none) { ret secret.BORROW_MISSING; }
+    if (value.some > MAX_SECRET_BYTES) {
+        ct.zeroize_plain(?plain[0], MAX_SECRET_BYTES);
+        ret secret.BORROW_REFUSED;
+    }
+    val size:    usize = value.some;
     var scratch: [4096]^u8;
     var i:       usize = 0;
-    for (i < value.len) {
-        scratch[i] = value.data[i];
+    for (i < size) {
+        scratch[i] = plain[i];
         i          = i + 1;
     }
-    val used: bool = use(use_ctx, contracts.SecretBytes{data: ?scratch[0], len: value.len});
+    ct.zeroize_plain(?plain[0], MAX_SECRET_BYTES);
+    val used: bool = use(use_ctx, contracts.SecretBytes{data: ?scratch[0], len: size});
     ct.zeroize(?scratch[0], MAX_SECRET_BYTES);
     if (!used) { ret secret.BORROW_REFUSED; }
     ret secret.BORROW_OK;
@@ -1578,12 +1616,12 @@ test serve__application_runs_under_the_harness_unchanged {
 # the call the signal thread makes
 #[testing]
 fun terminate_self(host: *Host) bool {
-    $if ($mach.build.os == $mach.os.linux) {
+    $if ($mach.build.sys == $mach.sys.linux) {
         var number: usize = 129;
         $if ($mach.build.arch == $mach.arch.x86_64) { number = 62; }
         ret linux.syscall2(number, os.getpid()::usize, 15) == 0;
     }
-    $or ($mach.build.os == $mach.os.darwin) {
+    $or ($mach.build.sys == $mach.sys.darwin) {
         ret libsystem.raise(15) == 0;
     }
     $or {

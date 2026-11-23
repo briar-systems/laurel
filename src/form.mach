@@ -978,7 +978,7 @@ test body__state_cannot_overlap_storage {
     var read_buffer: [2]u8;
     val accepted:    bool        = init_body(?parser, ?decoder, ?reader,
         ?read_buffer[0], 2);
-    val destroyed: bool = operation_ok(cancel.destroy(?scope));
+    val destroyed: bool = operation_ok(cancel.dnit(?scope));
     if (accepted || !destroyed) { ret 3; }
     ret 0;
 }
@@ -1022,7 +1022,7 @@ test body__pending_across_fragmentation {
         !view_equal(current.form.fields[0].value, "alice") ||
         !view_equal(current.form.fields[1].value, "a/b") ||
         state.release_calls != 1 || !body.reader_terminal_state(?reader) ||
-        !operation_ok(cancel.destroy(?scope))) { ret 6; }
+        !operation_ok(cancel.dnit(?scope))) { ret 6; }
     ret 0;
 }
 
@@ -1057,7 +1057,7 @@ test body__parse_failure_settles_once {
     current = complete_body(?parser, current.token);
     if (current.status != LIMIT || state.finish_calls != 1 ||
         state.release_calls != 1 || !body.reader_terminal_state(?reader) ||
-        !operation_ok(cancel.destroy(?scope))) { ret 6; }
+        !operation_ok(cancel.dnit(?scope))) { ret 6; }
     ret 0;
 }
 
@@ -1084,6 +1084,6 @@ test body__cancellation_publishes_nothing {
     val stopped: Operation = poll_body(?parser);
     if (stopped.status != CANCELLED || stopped.form.len != 0 ||
         state.finish_calls != 1 || state.release_calls != 1 ||
-        !operation_ok(cancel.destroy(?scope))) { ret 4; }
+        !operation_ok(cancel.dnit(?scope))) { ret 4; }
     ret 0;
 }

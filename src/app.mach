@@ -855,8 +855,8 @@ test assembly__caller_ownership {
     if (sink.start_calls != 1 || sink.finish_calls != 1 || sink.error_calls != 0
         || sink.status != 200 || sink.outcome != observability.OUTCOME_COMPLETED
         || sink.route_len != 11) { ret 12; }
-    if (stop(?app).status != lifecycle.TRANSITION_OK || !lifecycle.terminal(?controller))             { ret 13; }
-    if (!release(?app) || app.valid || app.app_state != nil || !operation_ok(cancel.destroy(?scope))) { ret 14; }
+    if (stop(?app).status != lifecycle.TRANSITION_OK || !lifecycle.terminal(?controller))          { ret 13; }
+    if (!release(?app) || app.valid || app.app_state != nil || !operation_ok(cancel.dnit(?scope))) { ret 14; }
     ret 0;
 }
 
@@ -1060,7 +1060,7 @@ test admit__reaches_observer {
         view.view("orders index", 12)))
         || unstartable.request_context.bound || sink.start_calls != 0
         || active_request_count(?app) != 0 || !can_accept(?app)
-        || !operation_ok(cancel.destroy(?unstartable.scope))) { ret 4; }
+        || !operation_ok(cancel.dnit(?unstartable.scope))) { ret 4; }
 
     var completed: RequestFixture;
     if (!request_fixture(?completed, 101, view.view("/orders", 7))) { ret 4; }
@@ -1081,7 +1081,7 @@ test admit__reaches_observer {
     if (!release_context(?app, ?completed.request_context,
         Termination{outcome: responded, reason: cancel.Reason.active{}, status: 200,
         transfer: completed.exchange.completion, finished: test_instant(3)})
-        || !operation_ok(cancel.destroy(?completed.scope))) { ret 7; }
+        || !operation_ok(cancel.dnit(?completed.scope))) { ret 7; }
     if (sink.start_calls != 1 || sink.finish_calls != 1 || sink.error_calls != 0
         || sink.status != 200 || sink.outcome != observability.OUTCOME_COMPLETED
         || sink.route_len != 12 || sink.label_len != 1) { ret 7; }
@@ -1103,7 +1103,7 @@ test admit__reaches_observer {
     if (!release_context(?app, ?faulted.request_context,
         Termination{outcome: refused, reason: cancel.Reason.active{}, status: 404,
         transfer: faulted.exchange.completion, finished: test_instant(3)})
-        || !operation_ok(cancel.destroy(?faulted.scope))) { ret 11; }
+        || !operation_ok(cancel.dnit(?faulted.scope))) { ret 11; }
     if (sink.start_calls != 2 || sink.finish_calls != 1 || sink.error_calls != 1
         || sink.status != 404 || sink.kind != error.NOT_FOUND
         || sink.outcome != observability.OUTCOME_FAILED) { ret 11; }
@@ -1123,7 +1123,7 @@ test admit__reaches_observer {
     if (!release_context(?app, ?stopped.request_context,
         Termination{outcome: abandoned, reason: cancel.reason(?stopped.scope),
         status: 408, transfer: stopped.exchange.completion, finished: test_instant(3)})
-        || !operation_ok(cancel.destroy(?stopped.scope))) { ret 16; }
+        || !operation_ok(cancel.dnit(?stopped.scope))) { ret 16; }
     if (sink.start_calls != 3 || sink.finish_calls != 2 || sink.error_calls != 1
         || sink.status != 408
         || sink.outcome != observability.OUTCOME_CANCELLED) { ret 16; }
@@ -1153,7 +1153,7 @@ test admit__reaches_observer {
         || sink.outcome != observability.OUTCOME_UNREPORTED
         || sink.kind != error.INTERNAL
         || active_request_count(?app) != 0 || !can_accept(?app)
-        || !operation_ok(cancel.destroy(?undescribed.scope))) { ret 18; }
+        || !operation_ok(cancel.dnit(?undescribed.scope))) { ret 18; }
 
     # an outcome outside the execution vocabulary cannot be described either
     var unsettled: RequestFixture;
@@ -1172,7 +1172,7 @@ test admit__reaches_observer {
         || sink.finish_calls != 2 || sink.error_calls != 3
         || sink.outcome != observability.OUTCOME_UNREPORTED
         || active_request_count(?app) != 0 || !can_accept(?app)
-        || !operation_ok(cancel.destroy(?unsettled.scope))) { ret 20; }
+        || !operation_ok(cancel.dnit(?unsettled.scope))) { ret 20; }
 
     if (drain(?app, opt[time.Instant].none{}).status != lifecycle.TRANSITION_OK
         || stop(?app).status != lifecycle.TRANSITION_OK || !release(?app)) {
@@ -1210,7 +1210,7 @@ fun finish_at(app: *App, state: *RequestFixture, finished: time.Instant) bool {
     ret release_context(app, ?state.request_context,
         Termination{outcome: outcome, reason: cancel.reason(?state.scope), status: status,
         transfer: state.exchange.completion, finished: finished})
-        && operation_ok(cancel.destroy(?state.scope));
+        && operation_ok(cancel.dnit(?state.scope));
 }
 
 #[testing]
@@ -1284,12 +1284,12 @@ test admit__handler_timeout_narrows_deadline {
     var negative: RequestFixture;
     if (admit_at(?app, ?negative, ?recorder, 303, open_ended, time.Instant{sec: -1, nsec: 0})
         || negative.request_context.bound || active_request_count(?app) != 0
-        || !operation_ok(cancel.destroy(?negative.scope))) { ret 13; }
+        || !operation_ok(cancel.dnit(?negative.scope))) { ret 13; }
     var overflow: RequestFixture;
     if (admit_at(?app, ?overflow, ?recorder, 304, open_ended,
         time.Instant{sec: 9223372036854775807, nsec: 0})
         || overflow.request_context.bound || active_request_count(?app) != 0
-        || !operation_ok(cancel.destroy(?overflow.scope))) { ret 14; }
+        || !operation_ok(cancel.dnit(?overflow.scope))) { ret 14; }
 
     if (drain(?app, opt[time.Instant].none{}).status != lifecycle.TRANSITION_OK
         || stop(?app).status != lifecycle.TRANSITION_OK || !release(?app)) { ret 15; }

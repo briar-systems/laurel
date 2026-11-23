@@ -2799,7 +2799,7 @@ test body__spans_reader_and_storage_pending {
         store_state.len != 4) { ret 6; }
     if (body_state.release_calls != 1 ||
         !body.reader_terminal_state(?reader)) { ret 7; }
-    if (!operation_ok(cancel.destroy(?scope))) { ret 8; }
+    if (!operation_ok(cancel.dnit(?scope))) { ret 8; }
     ret 0;
 }
 
@@ -2842,7 +2842,7 @@ test body__rejection_settles_once {
     }
     if (current.status != MALFORMED || body_state.finish_calls != 1 ||
         body_state.release_calls != 1 ||
-        !body.reader_terminal_state(?reader) || !operation_ok(cancel.destroy(?scope))) {
+        !body.reader_terminal_state(?reader) || !operation_ok(cancel.dnit(?scope))) {
         ret 5;
     }
     ret 0;
