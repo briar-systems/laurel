@@ -1,7 +1,7 @@
 [project]
 id = "laurel"
 mach = "^7"
-version = "0.24.0"
+version = "0.24.1"
 src = "src"
 work = "out/{target.name}/{profile.name}"
 
