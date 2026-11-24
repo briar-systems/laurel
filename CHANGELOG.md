@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-11-24
+
+### Fixed
+
+- Synced `demo/dep/*` and `doc/bench/laurel/dep/*` subproject pins to Mach 7 and updated `doc/bench/run.sh` to select the release benchmark binary (#208).
+
 ## [0.24.0] - 2026-11-23
 
 ### Changed
