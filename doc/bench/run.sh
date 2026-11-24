@@ -67,7 +67,7 @@ echo "run.sh: building laurel"
 need mach
 # pull realizes the committed pins and recopies laurel from this tree
 ( cd laurel && mach dep pull . && mach build . --profile release )
-laurel_bin="$(find laurel/out -type f -name laurel-bench -perm -u+x | head -n 1)"
+laurel_bin="$(find laurel/out -path '*/release/bin/laurel-bench' -type f -perm -u+x | head -n 1)"
 [ -n "$laurel_bin" ] || { echo "run.sh: the laurel server was not built" >&2; exit 1; }
 
 echo "run.sh: building go"
